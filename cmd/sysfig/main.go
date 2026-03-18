@@ -779,103 +779,111 @@ func newApplyCmd() *cobra.Command {
 
 // ── status ────────────────────────────────────────────────────────────────────
 
+// printStatusTable renders the status table to stdout and returns true if any
+// file is not SYNCED/ENCRYPTED.
+func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
+	counts := map[string]int{}
+
+	fmt.Printf("%-40s %-20s %s\n", clrBold.Sprint("ID"), clrBold.Sprint("STATUS"), clrBold.Sprint("SYSTEM PATH"))
+	divider()
+
+	for _, r := range results {
+		label := string(r.Status)
+		switch r.Status {
+		case core.StatusDirty:
+			label = "DIRTY/MODIFIED"
+			hasDiff = true
+		case core.StatusPending:
+			label = "PENDING/APPLY"
+			hasDiff = true
+		case core.StatusMissing:
+			hasDiff = true
+		}
+		counts[string(r.Status)]++
+		coloredLabel := statusColored(r.Status, fmt.Sprintf("%-20s", label))
+		fmt.Printf("%-40s %s %s\n", r.ID, coloredLabel, clrDim.Sprint(r.SystemPath))
+
+		if r.MetaDrift && r.RecordedMeta != nil && r.CurrentMeta != nil {
+			rec := r.RecordedMeta
+			cur := r.CurrentMeta
+			if rec.UID != cur.UID || rec.GID != cur.GID {
+				recOwner := rec.Owner
+				if recOwner == "" {
+					recOwner = fmt.Sprintf("%d", rec.UID)
+				}
+				recGroup := rec.Group
+				if recGroup == "" {
+					recGroup = fmt.Sprintf("%d", rec.GID)
+				}
+				curOwner := cur.Owner
+				if curOwner == "" {
+					curOwner = fmt.Sprintf("%d", cur.UID)
+				}
+				curGroup := cur.Group
+				if curGroup == "" {
+					curGroup = fmt.Sprintf("%d", cur.GID)
+				}
+				fmt.Printf("   %s owner:  %s → %s\n",
+					clrWarn.Sprint("⚠"),
+					clrDim.Sprintf("%s:%s", recOwner, recGroup),
+					clrDirty.Sprintf("%s:%s", curOwner, curGroup))
+			}
+			if rec.Mode != cur.Mode {
+				fmt.Printf("   %s mode:   %s → %s\n",
+					clrWarn.Sprint("⚠"),
+					clrDim.Sprintf("%04o", rec.Mode),
+					clrDirty.Sprintf("%04o", cur.Mode))
+			}
+		}
+	}
+
+	divider()
+	parts := []string{clrBold.Sprintf("%d files", len(results))}
+	if n := counts[string(core.StatusSynced)]; n > 0 {
+		parts = append(parts, clrSynced.Sprintf("%d synced", n))
+	}
+	if n := counts[string(core.StatusDirty)]; n > 0 {
+		parts = append(parts, clrDirty.Sprintf("%d dirty", n))
+	}
+	if n := counts[string(core.StatusPending)]; n > 0 {
+		parts = append(parts, clrPending.Sprintf("%d pending", n))
+	}
+	if n := counts[string(core.StatusMissing)]; n > 0 {
+		parts = append(parts, clrMissing.Sprintf("%d missing", n))
+	}
+	if n := counts[string(core.StatusEncrypted)]; n > 0 {
+		parts = append(parts, clrEncrypted.Sprintf("%d encrypted", n))
+	}
+	fmt.Printf("  %s\n", strings.Join(parts, clrDim.Sprint("  ·  ")))
+	return hasDiff
+}
+
 func newStatusCmd() *cobra.Command {
 	var (
-		baseDir string
-		sysRoot string
-		ids     []string
+		baseDir  string
+		sysRoot  string
+		ids      []string
+		watchMode bool
+		interval time.Duration
 	)
 
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show sync status of all tracked files",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if watchMode {
+				return runStatusWatch(baseDir, sysRoot, ids, interval)
+			}
+
 			results, err := core.Status(baseDir, ids, sysRoot)
 			if err != nil {
 				return err
 			}
-
 			if len(results) == 0 {
 				info("No tracked files.")
 				return nil
 			}
-
-			hasDiff := false
-			counts := map[string]int{}
-
-			fmt.Printf("%-40s %-20s %s\n", clrBold.Sprint("ID"), clrBold.Sprint("STATUS"), clrBold.Sprint("SYSTEM PATH"))
-			divider()
-
-			for _, r := range results {
-				label := string(r.Status)
-				switch r.Status {
-				case core.StatusDirty:
-					label = "DIRTY/MODIFIED"
-					hasDiff = true
-				case core.StatusPending:
-					label = "PENDING/APPLY"
-					hasDiff = true
-				case core.StatusMissing:
-					hasDiff = true
-				}
-				counts[string(r.Status)]++
-				coloredLabel := statusColored(r.Status, fmt.Sprintf("%-20s", label))
-				fmt.Printf("%-40s %s %s\n", r.ID, coloredLabel, clrDim.Sprint(r.SystemPath))
-
-				if r.MetaDrift && r.RecordedMeta != nil && r.CurrentMeta != nil {
-					rec := r.RecordedMeta
-					cur := r.CurrentMeta
-					if rec.UID != cur.UID || rec.GID != cur.GID {
-						recOwner := rec.Owner
-						if recOwner == "" {
-							recOwner = fmt.Sprintf("%d", rec.UID)
-						}
-						recGroup := rec.Group
-						if recGroup == "" {
-							recGroup = fmt.Sprintf("%d", rec.GID)
-						}
-						curOwner := cur.Owner
-						if curOwner == "" {
-							curOwner = fmt.Sprintf("%d", cur.UID)
-						}
-						curGroup := cur.Group
-						if curGroup == "" {
-							curGroup = fmt.Sprintf("%d", cur.GID)
-						}
-						fmt.Printf("   %s owner:  %s → %s\n",
-							clrWarn.Sprint("⚠"),
-							clrDim.Sprintf("%s:%s", recOwner, recGroup),
-							clrDirty.Sprintf("%s:%s", curOwner, curGroup))
-					}
-					if rec.Mode != cur.Mode {
-						fmt.Printf("   %s mode:   %s → %s\n",
-							clrWarn.Sprint("⚠"),
-							clrDim.Sprintf("%04o", rec.Mode),
-							clrDirty.Sprintf("%04o", cur.Mode))
-					}
-				}
-			}
-
-			divider()
-			parts := []string{clrBold.Sprintf("%d files", len(results))}
-			if n := counts[string(core.StatusSynced)]; n > 0 {
-				parts = append(parts, clrSynced.Sprintf("%d synced", n))
-			}
-			if n := counts[string(core.StatusDirty)]; n > 0 {
-				parts = append(parts, clrDirty.Sprintf("%d dirty", n))
-			}
-			if n := counts[string(core.StatusPending)]; n > 0 {
-				parts = append(parts, clrPending.Sprintf("%d pending", n))
-			}
-			if n := counts[string(core.StatusMissing)]; n > 0 {
-				parts = append(parts, clrMissing.Sprintf("%d missing", n))
-			}
-			if n := counts[string(core.StatusEncrypted)]; n > 0 {
-				parts = append(parts, clrEncrypted.Sprintf("%d encrypted", n))
-			}
-			fmt.Printf("  %s\n", strings.Join(parts, clrDim.Sprint("  ·  ")))
-
-			if hasDiff {
+			if printStatusTable(results) {
 				os.Exit(1)
 			}
 			return nil
@@ -886,7 +894,65 @@ func newStatusCmd() *cobra.Command {
 	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.StringArrayVar(&ids, "id", nil, "check only this ID (repeatable)")
+	f.BoolVarP(&watchMode, "watch", "w", false, "continuously refresh status (Ctrl-C to stop)")
+	f.DurationVar(&interval, "interval", 3*time.Second, "refresh interval when --watch is set")
 	return cmd
+}
+
+// runStatusWatch clears the screen and re-renders the status table every
+// interval until the user sends SIGINT/SIGTERM.
+func runStatusWatch(baseDir, sysRoot string, ids []string, interval time.Duration) error {
+	stop := make(chan struct{})
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		close(stop)
+	}()
+
+	// ANSI: move cursor to top-left and clear to end of screen.
+	const clearScreen = "\033[H\033[2J"
+	// ANSI: move cursor to top-left without clearing (flicker-free redraw).
+	const cursorHome = "\033[H"
+
+	first := true
+	for {
+		results, err := core.Status(baseDir, ids, sysRoot)
+
+		// On the very first frame clear the terminal fully.
+		// On subsequent frames jump to top-left and overwrite in-place to
+		// avoid flickering.
+		if first {
+			fmt.Print(clearScreen)
+			first = false
+		} else {
+			fmt.Print(cursorHome)
+		}
+
+		ts := time.Now().Format("2006-01-02 15:04:05")
+		fmt.Printf("%s  %s  %s\n\n",
+			clrBold.Sprint("sysfig status"),
+			clrDim.Sprint("--watch"),
+			clrDim.Sprint(ts))
+
+		if err != nil {
+			fmt.Printf("  %s  %s\n", clrErr.Sprint("ERROR"), err)
+		} else if len(results) == 0 {
+			info("No tracked files.")
+		} else {
+			printStatusTable(results)
+		}
+
+		// Print a blank footer so old content below is visually separated.
+		fmt.Printf("\n  %s\n", clrDim.Sprintf("Refreshing every %v — Ctrl-C to stop", interval))
+
+		select {
+		case <-stop:
+			fmt.Println()
+			return nil
+		case <-time.After(interval):
+		}
+	}
 }
 
 // ── diff ──────────────────────────────────────────────────────────────────────

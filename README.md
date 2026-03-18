@@ -653,10 +653,12 @@ Compares every tracked file against the repo using BLAKE3 content hashes. Also c
 
 **Options:**
 
-| Flag         | Default     | Description                        |
-| ------------ | ----------- | ---------------------------------- |
-| `--id`       | all         | Check only this ID (repeatable)    |
-| `--base-dir` | `~/.sysfig` | Directory where sysfig stores data |
+| Flag         | Short | Default     | Description                                      |
+| ------------ | ----- | ----------- | ------------------------------------------------ |
+| `--id`       | —     | all         | Check only this ID (repeatable)                  |
+| `--watch`    | `-w`  | `false`     | Continuously refresh status (Ctrl-C to stop)     |
+| `--interval` | —     | `3s`        | Refresh interval when `--watch` is set           |
+| `--base-dir` | —     | `~/.sysfig` | Directory where sysfig stores data               |
 
 **Script-friendly:**
 
@@ -666,6 +668,18 @@ if ! sysfig status; then
   echo "Config drift detected on $(hostname)" | mail -s "sysfig alert" ops@example.com
 fi
 ```
+
+**Live monitoring:**
+
+```bash
+# Refresh every 3 seconds (default)
+sysfig status --watch
+
+# Faster refresh
+sysfig status -w --interval 1s
+```
+
+The watch mode clears the screen on the first frame, then redraws in-place to avoid flickering. Any transition to `DIRTY/MODIFIED` is immediately visible.
 
 ---
 
