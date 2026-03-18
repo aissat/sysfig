@@ -736,6 +736,9 @@ func newApplyCmd() *cobra.Command {
 				if r.Encrypted {
 					fmt.Printf("     %s\n", clrEncrypted.Sprint("decrypted from age ciphertext"))
 				}
+				if r.TemplateRendered {
+					fmt.Printf("     %s\n", clrInfo.Sprint("template variables rendered"))
+				}
 				if r.ChownWarning != "" {
 					warn("%s", r.ChownWarning)
 				}

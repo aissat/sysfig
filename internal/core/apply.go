@@ -33,9 +33,10 @@ type ApplyResult struct {
 	RepoPath     string
 	BackupPath   string // empty if NoBackup or DryRun
 	Skipped      bool   // true if DryRun
-	DirtySkipped bool   // true when file is DIRTY and Force==false
-	Encrypted    bool
-	ChownWarning string // non-empty if chown failed due to insufficient privilege
+	DirtySkipped     bool   // true when file is DIRTY and Force==false
+	Encrypted        bool
+	TemplateRendered bool   // true when {{variable}} substitution was performed
+	ChownWarning     string // non-empty if chown failed due to insufficient privilege
 }
 
 // Apply reads all (or specified) FileRecords from state.json, then for each:
@@ -209,6 +210,16 @@ func applyOne(opts ApplyOptions, bm *backup.Manager, rec *types.FileRecord) (App
 		plaintext = decrypted
 	} else {
 		plaintext = repoData
+	}
+
+	// 4b. Template rendering: substitute {{variable}} placeholders.
+	if rec.Template {
+		rendered, err := RenderTemplate(plaintext, DefaultTemplateVars())
+		if err != nil {
+			return result, fmt.Errorf("core: apply: render template %q: %w", rec.ID, err)
+		}
+		plaintext = rendered
+		result.TemplateRendered = true
 	}
 
 	// 5. Write atomically to the destination, using the resolved perm.

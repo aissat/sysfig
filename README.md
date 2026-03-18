@@ -520,9 +520,35 @@ sysfig track --recursive /etc --exclude /etc/ssl/private --exclude /etc/shadow.d
 # Glob pattern — skip all .bak files
 sysfig track --recursive /etc/nginx --exclude "*.bak"
 
+# Track a template file — placeholders substituted at apply time
+sysfig track ~/.gitconfig --template
+
 # After tracking, commit
 sysfig sync
 ```
+
+**Template variables:**
+
+When `--template` is set, `sysfig apply` replaces `{{variable}}` placeholders with live values from the current machine. The repo always stores the raw template; each machine gets its own rendered copy.
+
+| Placeholder | Value |
+|-------------|-------|
+| `{{hostname}}` | `os.Hostname()` |
+| `{{user}}` | current username |
+| `{{home}}` | current user's home directory |
+| `{{os}}` | `linux` / `darwin` / `windows` |
+| `{{env.NAME}}` | value of environment variable `NAME` |
+
+```
+# ~/.gitconfig stored in repo:
+[user]
+    name = {{user}}
+    email = {{env.GIT_EMAIL}}
+[core]
+    hostname = {{hostname}}
+```
+
+On apply, `{{user}}` → `alice`, `{{hostname}}` → `webserver-01`, etc. Unknown placeholders cause an error before any file is written (typos are caught early).
 
 **Example output (single file):**
 
