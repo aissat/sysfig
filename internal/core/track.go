@@ -319,6 +319,11 @@ type TrackDirOptions struct {
 	// SysRoot mirrors TrackOptions.SysRoot — stripped from every file path
 	// before deriving repo layout, ID, and logical SystemPath in state.json.
 	SysRoot string
+	// Excludes is an optional list of paths or glob patterns to skip during
+	// the recursive walk. Each entry is matched against the absolute file
+	// path using filepath.Match; a plain path prefix also matches any file
+	// underneath it (i.e. excluding /etc/ssl skips /etc/ssl/certs/ca.pem).
+	Excludes []string
 }
 
 // TrackDirEntry reports the outcome for a single file encountered during a
@@ -383,8 +388,11 @@ func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
 			return nil
 		}
 
-		// Skip the root directory itself and all subdirectories.
+		// Skip the root directory itself; prune excluded subdirectories.
 		if d.IsDir() {
+			if path != opts.DirPath && isExcluded(path, opts.Excludes) {
+				return fs.SkipDir
+			}
 			return nil
 		}
 
@@ -405,6 +413,17 @@ func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
 				Path:    path,
 				Skipped: true,
 				Reason:  "not a regular file",
+			})
+			summary.Skipped++
+			return nil
+		}
+
+		// User-supplied exclude patterns.
+		if isExcluded(path, opts.Excludes) {
+			summary.Entries = append(summary.Entries, TrackDirEntry{
+				Path:    path,
+				Skipped: true,
+				Reason:  "excluded by --exclude pattern",
 			})
 			summary.Skipped++
 			return nil
@@ -460,6 +479,24 @@ func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
 	}
 
 	return summary, nil
+}
+
+// isExcluded reports whether path matches any of the caller-supplied exclude
+// patterns. Each pattern is tested in two ways:
+//  1. filepath.Match(pattern, path) — glob syntax (e.g. "*.bak", "/etc/ssl/*")
+//  2. plain prefix: path == pattern or strings.HasPrefix(path, pattern+"/")
+func isExcluded(path string, patterns []string) bool {
+	for _, p := range patterns {
+		// Glob match.
+		if matched, _ := filepath.Match(p, path); matched {
+			return true
+		}
+		// Prefix match — excludes the directory and everything inside it.
+		if path == p || strings.HasPrefix(path, strings.TrimRight(p, "/")+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // isAlreadyTracked returns true when the error from Track indicates that the

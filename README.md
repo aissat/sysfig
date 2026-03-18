@@ -111,6 +111,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
   - [log](#log)
   - [keys](#keys)
   - [doctor](#doctor)
+  - [snap](#snap)
 - [Configuration File: sysfig.yaml](#configuration-file-sysfigyaml)
 - [state.json vs sysfig.yaml](#statejson-vs-sysfigyaml)
 - [Encryption](#encryption)
@@ -126,13 +127,13 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
 
 ## Why sysfig?
 
-| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | Single binary |
-| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | ------------- |
-| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✓             |
-| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✓             |
-| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✓             |
-| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗             |
-| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓**         |
+| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | Local snapshots | Single binary |
+| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | --------------- | ------------- |
+| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗               | ✓             |
+| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗               | ✓             |
+| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗               | ✓             |
+| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗               | ✗             |
+| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓ snap**      | **✓**         |
 
 **Key design decisions:**
 
@@ -485,6 +486,7 @@ Copies the file into the bare git repo's index (staged, not yet committed), reco
 | `--encrypt`   | `false`     | Encrypt the file at rest in the repo                     |
 | `--template`  | `false`     | Mark as a template with `{{variable}}` expansions        |
 | `--recursive` | `false`     | Track all files under a directory recursively            |
+| `--exclude`   | —           | Path or glob to skip during `--recursive` walk (repeatable) |
 | `--base-dir`  | `~/.sysfig` | Directory where sysfig stores its data                   |
 
 **ID derivation:**
@@ -510,6 +512,12 @@ sysfig track /etc/myapp/secrets.env --encrypt
 
 # Recursively track a directory
 sysfig track --recursive /etc/nginx/
+
+# Recursively track /etc but skip secrets
+sysfig track --recursive /etc --exclude /etc/ssl/private --exclude /etc/shadow.d
+
+# Glob pattern — skip all .bak files
+sysfig track --recursive /etc/nginx --exclude "*.bak"
 
 # After tracking, commit
 sysfig sync
@@ -865,6 +873,139 @@ Audits every layer of the setup — prerequisites, base directory, git repo, sta
 
 ---
 
+### `snap`
+
+Take instant local snapshots of tracked files — test config changes safely and undo them in one command.
+
+```
+sysfig snap take     [--label TEXT] [--id ID] [options]
+sysfig snap list     [-a] [options]       # alias: snap ls
+sysfig snap undo     [-a] [--dry-run] [options]
+sysfig snap restore  <snap-id> [--id ID] [--dry-run] [options]
+sysfig snap drop     <snap-id> [options]
+```
+
+Snapshots capture the **live on-disk content** of your tracked files without creating a git commit. Use them as a fast checkpoint before testing a risky config change:
+
+```
+before change:   sysfig snap take --label "before nginx tuning"
+                 → Hash: a3f2b1c4   ← use this short hash anywhere
+make the change: edit /etc/nginx/nginx.conf
+test it:         nginx -t && systemctl reload nginx
+if it breaks:    sysfig snap restore a3f2b1c4   ← 8 chars, no full ID needed
+                 OR: sysfig snap undo            ← latest snap, no ID at all
+```
+
+**`snap list` and `snap undo` are context-aware** — they automatically scope to the current working directory. Working in `/etc/nginx`? Only nginx snaps are shown and undone. Use `-a` / `--all` to see or undo everything.
+
+**Subcommands:**
+
+| Subcommand | Description |
+| ---------- | ----------- |
+| `snap take` | Capture current on-disk file content into a named snapshot |
+| `snap list` / `snap ls` | List snapshots scoped to CWD (`-a` for all) |
+| `snap undo` | Restore the most recent snapshot scoped to CWD (`-a` for global) |
+| `snap restore <id>` | Restore a specific snapshot by ID |
+| `snap drop <id>` | Delete a snapshot permanently |
+
+**`snap take` options:**
+
+| Flag         | Default     | Description                                               |
+| ------------ | ----------- | --------------------------------------------------------- |
+| `--label`    | —           | Human-readable description (included in the snapshot ID)  |
+| `--id`       | all tracked | Limit to these file IDs (repeatable)                      |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores its data                    |
+
+**`snap list` / `snap ls` options:**
+
+| Flag         | Default     | Description                                                    |
+| ------------ | ----------- | -------------------------------------------------------------- |
+| `--all`/`-a` | `false`     | Show all snapshots regardless of current directory             |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores its data                         |
+
+**`snap undo` options:**
+
+| Flag         | Default     | Description                                                    |
+| ------------ | ----------- | -------------------------------------------------------------- |
+| `--all`/`-a` | `false`     | Undo the latest snapshot globally (all tracked files)          |
+| `--id`       | CWD files   | Further limit restore to specific IDs (repeatable)             |
+| `--dry-run`  | `false`     | Show what would be restored without writing                    |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores its data                         |
+
+**`snap restore` options:**
+
+| Flag         | Default       | Description                                       |
+| ------------ | ------------- | ------------------------------------------------- |
+| `--id`       | all in snap   | Restore only this file ID (repeatable)            |
+| `--dry-run`  | `false`       | Show what would be restored without writing       |
+| `--base-dir` | `~/.sysfig`   | Directory where sysfig stores its data            |
+
+**Snapshot ID format:** `YYYYMMDD-HHmmss` or `YYYYMMDD-HHmmss-your-label` when `--label` is set.
+
+**Examples:**
+
+```bash
+# Save a checkpoint before tuning nginx
+cd /etc/nginx
+sysfig snap take --label "before nginx tuning"
+
+# Make changes, test, break something...
+# Roll back — only nginx files touched:
+sysfig snap undo
+
+# List checkpoints for this directory
+sysfig snap ls
+
+# List ALL checkpoints across all directories
+sysfig snap ls -a
+
+# Also working in /home/user/.config/app at the same time:
+cd /home/user/.config/app
+sysfig snap take --label "before app update"
+# ... make changes, break something ...
+sysfig snap undo    # restores only app files — nginx untouched
+
+# Global rollback (all tracked files):
+sysfig snap undo -a
+
+# Restore a specific snapshot by ID (without changing directory):
+sysfig snap restore 20260318-153042-before-nginx-tuning
+
+# Restore only one file from a snapshot:
+sysfig snap restore 20260318-153042-before-nginx-tuning --id nginx_main
+
+# Delete a snapshot once you no longer need it:
+sysfig snap drop 20260318-153042-before-nginx-tuning
+```
+
+**Example output — `snap ls` scoped to `/etc/nginx`:**
+
+```
+  Snapshots (2)  [scope: /etc/nginx]
+
+  96da94e9  20260318-162215-app-before-update    2026-03-18 16:22:15  app before update    [2/4 files]
+  6f23a446  20260318-162215-nginx-before-tuning  2026-03-18 16:22:15  nginx before tuning  [2/4 files]
+```
+
+The first column is the **short hash** — use it directly in `snap restore`, `snap drop`, and `snap undo`. The `[2/4 files]` counter shows how many files in each snapshot match the current scope.
+
+**Example output — `snap undo` from `/etc/nginx`:**
+
+```
+  Undo → restoring snapshot: 20260318-162215-nginx-before-tuning  [scope: /etc/nginx]
+
+  ✓ etc_nginx_limits_conf          → /etc/nginx/limits.conf
+  ✓ etc_nginx_nginx_conf           → /etc/nginx/nginx.conf
+  ―  home_user__config_app_settings_ini   skipped
+  ―  home_user__config_app_locale_ini     skipped
+────────────────────────────────────────────────────────────────────────────
+  Restored: 2  ·  Skipped: 2
+```
+
+> Snapshots are stored locally in `~/.sysfig/snaps/` — never committed to git, never pushed. They are fast (plain file copies) and independent of any git commit. `snap restore`/`snap undo` do **not** run a `sysfig sync` — the system file is updated but the repo is not. Run `sysfig sync` after restoring if you want to capture the restored state as a commit.
+
+---
+
 ## Configuration File: sysfig.yaml
 
 `sysfig.yaml` lives at the root of your config repo and is committed to git. It is the shared manifest that tells `sysfig setup` what to seed on a new machine.
@@ -1044,6 +1185,12 @@ No arbitrary shell commands are permitted. The hook system is intentionally limi
 ├── keys/
 │   └── master.age-identity          ← age private key (mode 0600, local only)
 │
+├── snaps/                           ← local snapshots (local only, never pushed)
+│   └── 20260318-153042-before-nginx-tuning/
+│       ├── snap.json                ← snapshot manifest (ID, label, timestamp, files)
+│       └── files/
+│           └── etc/nginx/nginx.conf ← live file content at snapshot time
+│
 ├── state.json                       ← local cache (local only)
 └── hooks.yaml                       ← local hooks (local only)
 ```
@@ -1073,6 +1220,7 @@ sysfig never touches the network automatically.
 | `track`, `apply`, `status`       | Never             |
 | `sync` (local commit)            | Never             |
 | `diff`, `log`                    | Never             |
+| `snap take/list/restore/drop`    | Never             |
 | `push`                           | Always            |
 | `pull`                           | Always            |
 | `setup` (initial bootstrap only) | Yes, one-time     |
