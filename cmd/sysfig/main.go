@@ -70,6 +70,7 @@ Commands:
   push    Push commits to the remote (requires network)
   pull    Pull remote changes into the local repo (requires network)
   log     Show commit history as a tree
+  doctor  Run a full health check of your sysfig environment
 
 Run 'sysfig <command> -help' for command-specific options.
 `
@@ -105,6 +106,8 @@ func main() {
 		runPull(os.Args[2:])
 	case "log":
 		runLog(os.Args[2:])
+	case "doctor":
+		runDoctor(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown subcommand %q\n\n", os.Args[1])
 		fmt.Fprint(os.Stderr, usage)
@@ -918,6 +921,81 @@ func runPull(args []string) {
 	} else {
 		ok("Pulled latest changes from remote.")
 		info("Run %s to deploy updated config files.", clrBold.Sprint("sysfig apply"))
+	}
+}
+
+// runDoctor runs a full health check of the sysfig environment.
+func runDoctor(args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	baseDir := fs.String("base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	network := fs.Bool("network", false, "also probe the configured remote (requires network)")
+
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	result := core.Doctor(core.DoctorOptions{
+		BaseDir: *baseDir,
+		Network: *network,
+	})
+
+	fmt.Println()
+	clrBold.Println("  sysfig doctor — environment health check")
+	fmt.Println(clrDim.Sprint("  ─────────────────────────────────────────────"))
+	fmt.Println()
+
+	lastCategory := ""
+	for _, f := range result.Findings {
+		if f.Category != lastCategory {
+			if lastCategory != "" {
+				fmt.Println()
+			}
+			fmt.Printf("  %s\n", clrBold.Sprint(f.Category))
+			lastCategory = f.Category
+		}
+
+		icon := ""
+		label := ""
+		switch f.Severity {
+		case core.SeverityOK:
+			icon = clrOK.Sprint("✓")
+			label = clrOK.Sprintf("%-30s", f.Label)
+		case core.SeverityWarn:
+			icon = clrWarn.Sprint("⚠")
+			label = clrWarn.Sprintf("%-30s", f.Label)
+		case core.SeverityFail:
+			icon = clrErr.Sprint("✗")
+			label = clrErr.Sprintf("%-30s", f.Label)
+		case core.SeverityInfo:
+			icon = clrInfo.Sprint("ℹ")
+			label = clrDim.Sprintf("%-30s", f.Label)
+		}
+
+		fmt.Printf("    %s  %s  %s\n", icon, label, clrDim.Sprint(f.Detail))
+		if f.Hint != "" {
+			fmt.Printf("       %s %s\n", clrDim.Sprint("→"), clrInfo.Sprint(f.Hint))
+		}
+	}
+
+	fmt.Println()
+	divider()
+
+	okStr := clrOK.Sprintf("✓ %d passed", result.OK)
+	var parts []string
+	parts = append(parts, okStr)
+	if result.Warn > 0 {
+		parts = append(parts, clrWarn.Sprintf("⚠ %d warnings", result.Warn))
+	}
+	if result.Fail > 0 {
+		parts = append(parts, clrErr.Sprintf("✗ %d failed", result.Fail))
+	}
+	fmt.Printf("  %s\n", strings.Join(parts, clrDim.Sprint("  ·  ")))
+	fmt.Println()
+
+	if result.Fail > 0 {
+		os.Exit(1)
 	}
 }
 

@@ -31,6 +31,7 @@
    sysfig apply    Deploy your config files to this machine
    sysfig status   Check sync status at any time
    sysfig log      See your commit history
+   sysfig doctor   Run a health check if anything seems wrong
 ```
 
 **Daily status check:**
@@ -80,6 +81,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
   - [pull](#pull)
   - [log](#log)
   - [keys](#keys)
+  - [doctor](#doctor)
 - [Configuration File: sysfig.yaml](#configuration-file-sysfigyaml)
 - [state.json vs sysfig.yaml](#statejson-vs-sysfigyaml)
 - [Encryption](#encryption)
@@ -95,13 +97,13 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
 
 ## Why sysfig?
 
-| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Single binary |
-| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------- |
-| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✓             |
-| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✓             |
-| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✓             |
-| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗             |
-| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓**         |
+| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Single binary |
+| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------- |
+| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✓             |
+| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✓             |
+| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✓             |
+| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | ✗             |
+| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓**         |
 
 **Key design decisions:**
 
@@ -649,6 +651,77 @@ sysfig keys generate
 ```
 
 > **Back up your master key immediately.** Loss of the key means permanent loss of all encrypted files. The key lives at `~/.sysfig/keys/master.age-identity` and is **never** committed to git.
+
+---
+
+### `doctor`
+
+Run a full health check of your sysfig environment.
+
+```
+sysfig doctor [options]
+```
+
+Audits every layer of the setup — prerequisites, base directory, git repo, state, file health, and encryption — and reports every finding with a colored icon, plain-English detail, and a concrete fix hint. Read-only: never modifies any file.
+
+**Options:**
+
+| Flag         | Default     | Description                                           |
+| ------------ | ----------- | ----------------------------------------------------- |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores data                    |
+| `--network`  | `false`     | Also probe the configured remote via `git ls-remote`  |
+
+**Check categories:**
+
+| Category         | What is checked                                                                              |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| `prerequisites`  | `git` on `$PATH` (with version); `diff` on `$PATH`                                          |
+| `base directory` | `~/.sysfig/` exists; permissions are `0700`                                                  |
+| `git repo`       | `repo.git/` is a valid bare repo; HEAD resolves; no uncommitted staged changes; remote configured; `sysfig.yaml` committed in HEAD |
+| `state`          | `state.json` readable; IDs in `state.json` cross-checked against `sysfig.yaml` in HEAD     |
+| `file health`    | All tracked system files exist on disk; all tracked repo blobs present in HEAD               |
+| `encryption`     | Master key present when encrypted files are tracked; key permissions are `0600`              |
+
+**Exit codes:** `0` = all checks OK or warnings only, `1` = any hard failure.
+
+**Example output:**
+
+```
+  sysfig doctor — environment health check
+  ─────────────────────────────────────────────
+
+  prerequisites
+    ✓  git binary                      /usr/bin/git  (git version 2.53.0)
+    ✓  diff binary                     /usr/bin/diff
+
+  base directory
+    ✓  exists                          /home/you/.sysfig
+    ✓  permissions                     0700
+
+  git repo
+    ✓  repo exists                     /home/you/.sysfig/repo.git
+    ✓  HEAD resolves                   a3f2b1c
+    ⚠  uncommitted changes             staged changes exist that have not been committed
+       → Run: sysfig sync
+    ✓  remote configured               origin → git@github.com:you/configs.git
+    ✓  sysfig.yaml in HEAD
+
+  state
+    ✓  state.json readable             5 tracked file(s)
+    ✓  state/manifest sync             state.json and sysfig.yaml are in sync
+
+  file health
+    ✓  system files present            all 5 file(s) exist on disk
+    ✓  repo blobs in HEAD              all 5 file(s) have blobs in HEAD
+
+  encryption
+    ✓  master key                      present — covers 2 encrypted file(s)
+
+────────────────────────────────────────────────────────────────────────────
+  ✓ 12 passed  ·  ⚠ 1 warnings
+```
+
+**Run it whenever something feels wrong** — after `setup`, before a release, or when a command gives an unexpected error. It tells you exactly what is broken and what to run to fix it.
 
 ---
 
