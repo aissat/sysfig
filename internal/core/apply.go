@@ -21,6 +21,7 @@ type ApplyOptions struct {
 	IDs      []string // specific IDs to apply; empty = apply all
 	DryRun   bool     // if true, print what would happen but don't write
 	NoBackup bool     // skip backup step (dangerous)
+	Force    bool     // overwrite DIRTY (locally-modified) files without prompting
 	SysRoot  string   // if non-empty, prepend to all system paths (sandbox override)
 	// e.g. SysRoot="/tmp/sandbox" → /etc/nginx.conf becomes /tmp/sandbox/etc/nginx.conf
 }
@@ -32,6 +33,7 @@ type ApplyResult struct {
 	RepoPath     string
 	BackupPath   string // empty if NoBackup or DryRun
 	Skipped      bool   // true if DryRun
+	DirtySkipped bool   // true when file is DIRTY and Force==false
 	Encrypted    bool
 	ChownWarning string // non-empty if chown failed due to insufficient privilege
 }
@@ -152,6 +154,18 @@ func applyOne(opts ApplyOptions, bm *backup.Manager, rec *types.FileRecord) (App
 		fmt.Printf("[dry-run] would apply %q → %q (encrypted=%v)\n", rec.RepoPath, destPath, rec.Encrypt)
 		result.Skipped = true
 		return result, nil
+	}
+
+	// Conflict check: if the on-disk file has been modified since the last
+	// sync (DIRTY), refuse to overwrite unless --force is set.
+	// We detect DIRTY by comparing the live file hash against the recorded
+	// CurrentHash in state.json.  If the file is missing we proceed normally
+	// (it is MISSING, not DIRTY).
+	if !opts.Force && rec.CurrentHash != "" {
+		if liveHash, err := hash.File(destPath); err == nil && liveHash != rec.CurrentHash {
+			result.DirtySkipped = true
+			return result, nil
+		}
 	}
 
 	// 2. Backup the current destination file if it exists.

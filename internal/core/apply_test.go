@@ -240,6 +240,7 @@ func TestApply_CreatesBackup(t *testing.T) {
 		BaseDir:  baseDir,
 		SysRoot:  sysRoot,
 		NoBackup: false,
+		Force:    true, // pre-existing file has different hash → treat as force-overwrite
 	}
 
 	results, err := core.Apply(opts)
@@ -287,6 +288,7 @@ func TestApply_NoBackup(t *testing.T) {
 		BaseDir:  baseDir,
 		SysRoot:  sysRoot,
 		NoBackup: true,
+		Force:    true, // pre-existing file has different hash → treat as force-overwrite
 	}
 
 	results, err := core.Apply(opts)
@@ -304,4 +306,54 @@ func TestApply_NoBackup(t *testing.T) {
 		assert.Empty(t, entries, "backups directory must remain empty when NoBackup=true")
 	}
 	// os.IsNotExist is also acceptable — backups dir never created.
+}
+
+// ---------------------------------------------------------------------------
+// TestApply_DirtyProtection
+// ---------------------------------------------------------------------------
+
+// TestApply_DirtyProtection verifies that Apply skips files whose on-disk
+// content differs from the recorded CurrentHash (DIRTY), and that Force=true
+// overrides the protection.
+func TestApply_DirtyProtection(t *testing.T) {
+	baseDir, _, id, repoContent := buildApplyFixture(t)
+
+	sysRoot := t.TempDir()
+	destPath := filepath.Join(sysRoot, "/etc/myapp.conf")
+
+	// Write a locally-modified version to disk — this is the "DIRTY" state.
+	require.NoError(t, os.MkdirAll(filepath.Dir(destPath), 0o755))
+	dirtyContent := []byte("locally modified\n")
+	require.NoError(t, os.WriteFile(destPath, dirtyContent, 0o644))
+
+	// Without --force: file must be skipped (DirtySkipped=true).
+	results, err := core.Apply(core.ApplyOptions{
+		BaseDir: baseDir,
+		SysRoot: sysRoot,
+		Force:   false,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.True(t, results[0].DirtySkipped, "DIRTY file must be skipped without --force")
+
+	// On-disk content must be unchanged.
+	got, err := os.ReadFile(destPath)
+	require.NoError(t, err)
+	assert.Equal(t, dirtyContent, got, "DIRTY file must not be overwritten without --force")
+
+	// With --force: file must be applied.
+	results, err = core.Apply(core.ApplyOptions{
+		BaseDir: baseDir,
+		SysRoot: sysRoot,
+		Force:   true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.False(t, results[0].DirtySkipped, "Force=true must not skip DIRTY file")
+
+	got, err = os.ReadFile(destPath)
+	require.NoError(t, err)
+	assert.Equal(t, repoContent, got, "--force must overwrite DIRTY file with repo content")
+
+	_ = id
 }

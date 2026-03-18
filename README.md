@@ -106,6 +106,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
   - [status](#status)
   - [diff](#diff)
   - [sync](#sync)
+  - [watch](#watch)
   - [push](#push-deprecated) _(deprecated)_
   - [pull](#pull-deprecated) _(deprecated)_
   - [log](#log)
@@ -556,7 +557,19 @@ For each tracked file:
 | `--id`        | all         | Apply only this ID (repeatable)                          |
 | `--dry-run`   | `false`     | Print what would happen without writing anything         |
 | `--no-backup` | `false`     | Skip pre-apply backup (use with care)                    |
+| `--force`     | `false`     | Overwrite DIRTY (locally-modified) files without prompting |
 | `--base-dir`  | `~/.sysfig` | Directory where sysfig stores its data                   |
+
+**DIRTY file protection:**
+
+By default, `apply` will **refuse** to overwrite a file that has been locally modified since the last `sysfig sync` (status: DIRTY). This prevents accidentally discarding in-progress edits.
+
+```
+  ⚠  Skipped nginx_main — file has local changes (DIRTY). Use --force to overwrite.
+     Tip: run 'sysfig sync' first to commit local changes, or 'sysfig snap take' to snapshot them.
+```
+
+Use `--force` to override when you intentionally want to reset to the repo version.
 
 **Examples:**
 
@@ -564,11 +577,14 @@ For each tracked file:
 # Preview what will happen
 sysfig apply --dry-run
 
-# Apply everything
+# Apply everything (DIRTY files are skipped with a warning)
 sysfig apply
 
 # Apply only specific files
 sysfig apply --id nginx_main --id sshd_config
+
+# Force-overwrite even DIRTY files (after taking a snapshot first)
+sysfig snap take --label "before reset" && sysfig apply --force
 ```
 
 **Example output:**
@@ -698,6 +714,52 @@ sysfig sync --pull --push      # full round-trip: pull → commit → push
 ```
 
 > **Note:** `--pull` is non-fatal. If the remote is unreachable, sysfig prints a warning and continues with the local commit.
+
+---
+
+### `watch`
+
+Auto-sync tracked files whenever they change on disk.
+
+```
+sysfig watch [options]
+```
+
+Starts a foreground process that monitors every tracked config file using OS-level filesystem events. When a change is detected, sysfig waits for the debounce window (default 2 s) and then runs `sysfig sync` automatically. Press **Ctrl-C** to stop.
+
+**Options:**
+
+| Flag         | Default     | Description                                      |
+| ------------ | ----------- | ------------------------------------------------ |
+| `--debounce` | `2s`        | Wait this long after the last change before syncing |
+| `--dry-run`  | `false`     | Print detected changes without syncing           |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores its data           |
+
+**Examples:**
+
+```bash
+# Start watching (blocks until Ctrl-C)
+sysfig watch
+
+# Faster debounce for interactive editing
+sysfig watch --debounce 500ms
+
+# See what would be synced without committing
+sysfig watch --dry-run
+```
+
+**Example output:**
+
+```
+Watching tracked files for changes  (Ctrl-C to stop)
+  base-dir: /home/you/.sysfig
+  debounce: 2s
+
+  10:42:15  synced  /etc/nginx/nginx.conf
+            sysfig: sync 2026-03-18T10:42:15Z
+```
+
+> **Tip:** Run `sysfig watch` in a `tmux` pane or as a systemd user service for continuous background versioning.
 
 ---
 

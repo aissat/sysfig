@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
+	"os/user"
+	"syscall"
+	"time"
 	"path/filepath"
 	"strings"
 
@@ -60,8 +64,15 @@ func step(n int, label string) {
 	fmt.Printf("  %s %s\n", clrBold.Sprintf("[%d]", n), clrBold.Sprint(label))
 }
 
-// defaultBaseDir returns ~/.sysfig.
+// defaultBaseDir returns ~/.sysfig, honouring SUDO_USER so that
+// "sudo sysfig apply" resolves to the invoking user's home, not /root.
 func defaultBaseDir() string {
+	// When running under sudo, prefer the real user's home directory.
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if u, err := user.Lookup(sudoUser); err == nil {
+			return filepath.Join(u.HomeDir, ".sysfig")
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ".sysfig"
@@ -108,6 +119,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newLogCmd(),
 		newDoctorCmd(),
 		newSnapCmd(),
+		newWatchCmd(),
 	)
 
 	// Hidden alias kept for backward-compat.
@@ -685,6 +697,7 @@ func newApplyCmd() *cobra.Command {
 		sysRoot  string
 		dryRun   bool
 		noBackup bool
+		force    bool
 		ids      []string
 	)
 
@@ -697,14 +710,22 @@ func newApplyCmd() *cobra.Command {
 				IDs:      ids,
 				DryRun:   dryRun,
 				NoBackup: noBackup,
+				Force:    force,
 				SysRoot:  sysRoot,
 			})
 
-			applied, skipped := 0, 0
+			applied, skipped, dirty := 0, 0, 0
 			for _, r := range results {
 				if r.Skipped {
 					fmt.Printf("  %s %s %s\n", clrDim.Sprint("[dry-run]"), clrInfo.Sprint(r.ID), clrDim.Sprint("→ "+r.SystemPath))
 					skipped++
+					continue
+				}
+				if r.DirtySkipped {
+					warn("Skipped %s — file has local changes (DIRTY). Use --force to overwrite.", clrBold.Sprint(r.ID))
+					fmt.Printf("     %s %s\n", clrDim.Sprint("→"), r.SystemPath)
+					fmt.Printf("     %s\n", clrDim.Sprint("Tip: run 'sysfig sync' first to commit local changes, or 'sysfig snap take' to snapshot them."))
+					dirty++
 					continue
 				}
 				ok("Applied: %s", clrBold.Sprint(r.ID))
@@ -731,11 +752,14 @@ func newApplyCmd() *cobra.Command {
 
 			fmt.Println()
 			divider()
+			parts := []string{clrOK.Sprintf("Applied: %d", applied)}
 			if skipped > 0 {
-				fmt.Printf("  %s  ·  %s\n", clrOK.Sprintf("Applied: %d", applied), clrDim.Sprintf("Dry-run: %d", skipped))
-			} else {
-				fmt.Printf("  %s\n", clrOK.Sprintf("Applied: %d", applied))
+				parts = append(parts, clrDim.Sprintf("Dry-run: %d", skipped))
 			}
+			if dirty > 0 {
+				parts = append(parts, clrWarn.Sprintf("Skipped (dirty): %d", dirty))
+			}
+			fmt.Printf("  %s\n", strings.Join(parts, "  ·  "))
 			return nil
 		},
 	}
@@ -745,6 +769,7 @@ func newApplyCmd() *cobra.Command {
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.BoolVar(&dryRun, "dry-run", false, "print what would happen without writing anything")
 	f.BoolVar(&noBackup, "no-backup", false, "skip pre-apply backup (dangerous)")
+	f.BoolVar(&force, "force", false, "overwrite DIRTY (locally-modified) files without prompting")
 	f.StringArrayVar(&ids, "id", nil, "apply only this ID (repeatable)")
 	return cmd
 }
@@ -1243,6 +1268,77 @@ func newDoctorCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
 	f.BoolVar(&network, "network", false, "also probe the configured remote (requires network)")
+	return cmd
+}
+
+// ── watch ─────────────────────────────────────────────────────────────────────
+
+func newWatchCmd() *cobra.Command {
+	var (
+		baseDir  string
+		sysRoot  string
+		debounce time.Duration
+		dryRun   bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Auto-sync tracked files when they change on disk",
+		Long: `Watch monitors every tracked config file for changes and runs
+'sysfig sync' automatically after a short debounce window.
+
+Press Ctrl-C to stop watching.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clrBold.Println("Watching tracked files for changes  (Ctrl-C to stop)")
+			fmt.Printf("  %s %s\n", clrDim.Sprint("base-dir:"), clrDim.Sprint(baseDir))
+			fmt.Printf("  %s %v\n\n", clrDim.Sprint("debounce:"), debounce)
+
+			stop := make(chan struct{})
+
+			// Catch SIGINT / SIGTERM so we exit cleanly.
+			sigs := make(chan os.Signal, 1)
+			signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+			go func() {
+				<-sigs
+				fmt.Println()
+				info("Stopping watch.")
+				close(stop)
+			}()
+
+			onEvent := func(path string, result *core.SyncResult, err error) {
+				ts := time.Now().Format("15:04:05")
+				if dryRun {
+					fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrInfo.Sprint("[dry-run]"), path)
+					return
+				}
+				if err != nil {
+					fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrErr.Sprint("ERROR"), err)
+					return
+				}
+				if result != nil && !result.Committed {
+					return // debounced false-positive — no output
+				}
+				fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrOK.Sprint("synced"), path)
+				if result != nil && result.Message != "" {
+					fmt.Printf("            %s\n", clrDim.Sprint(result.Message))
+				}
+			}
+
+			return core.Watch(core.WatchOptions{
+				BaseDir:  baseDir,
+				SysRoot:  sysRoot,
+				Debounce: debounce,
+				DryRun:   dryRun,
+				OnEvent:  onEvent,
+			}, stop)
+		},
+	}
+
+	f := cmd.Flags()
+	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
+	f.DurationVar(&debounce, "debounce", 2*time.Second, "wait this long after last change before syncing")
+	f.BoolVar(&dryRun, "dry-run", false, "print detected changes without syncing")
 	return cmd
 }
 
