@@ -8,7 +8,35 @@
 
 ## What it looks like
 
-**Setting up a new machine:**
+**One command to deploy everything (new or existing machine):**
+
+```
+$ sysfig deploy git@github.com:you/configs.git
+
+  sysfig deploy — syncing your environment
+  ─────────────────────────────────────────────
+
+  ✓ Config repo cloned
+     location: /home/you/.sysfig/repo.git
+  ✓ Manifest seeded: 12 tracked file(s)
+
+  ✓ Applied: nginx_main          → /etc/nginx/nginx.conf
+  ✓ Applied: sshd_config         → /etc/ssh/sshd_config
+  ✓ Applied: bashrc              → /home/you/.bashrc
+  ... (9 more)
+
+────────────────────────────────────────────────────────────────────────────
+  ✓ Deploy complete!
+
+  Applied: 12
+
+  What to do next:
+   sysfig status  See current sync state
+   sysfig doctor  Check environment health
+   sysfig log     See commit history
+```
+
+**Setting up a new machine (step-by-step alternative):**
 
 ```
   sysfig setup — bootstrapping your environment
@@ -70,6 +98,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
   - [New machine — setup and apply](#new-machine--setup-and-apply)
   - [Daily workflow](#daily-workflow)
 - [Command Reference](#command-reference)
+  - [deploy](#deploy)
   - [setup](#setup)
   - [init](#init)
   - [track](#track)
@@ -194,20 +223,23 @@ git --git-dir ~/.sysfig/repo.git remote add origin git@github.com:you/myconfigs.
 sysfig push
 ```
 
-### New machine — setup and apply
+### New machine — deploy (one command)
 
 ```bash
-# 1. Bootstrap from your remote config repo (one-time, needs network)
+# Everything in one shot: clone + seed state + apply
+sysfig deploy git@github.com:you/myconfigs.git
+
+# If you have encrypted files, copy your master key first:
+# scp oldhost:~/.sysfig/keys/master.age-identity ~/.sysfig/keys/
+# chmod 0600 ~/.sysfig/keys/master.age-identity
+# Then re-run — sysfig deploy is idempotent.
+```
+
+Or step-by-step if you prefer explicit control:
+
+```bash
 sysfig setup git@github.com:you/myconfigs.git
-
-# 2. If you have encrypted files, copy your master key first:
-#    scp oldhost:~/.sysfig/keys/master.age-identity ~/.sysfig/keys/
-#    chmod 0600 ~/.sysfig/keys/master.age-identity
-
-# 3. Deploy all tracked configs to this machine
 sysfig apply
-
-# 4. Verify
 sysfig status
 ```
 
@@ -247,6 +279,69 @@ sysfig apply --id nginx_main
 ---
 
 ## Command Reference
+
+### `deploy`
+
+Pull from remote and apply configs — one command for everything.
+
+```
+sysfig deploy [<remote-url>] [options]
+```
+
+The recommended entry point for both first-time machines and routine updates. Idempotent: safe to re-run as many times as needed.
+
+**Behaviour:**
+
+| Situation | What happens |
+| --------- | ------------ |
+| First-time machine (no local repo) | Clone remote → seed `state.json` → apply all files |
+| Already set up, network available | Pull latest → apply all files |
+| Already set up, `--no-pull` | Skip pull → apply from local repo (fully offline) |
+| Pull fails (network error) | Fall back to local repo → apply (non-fatal) |
+
+**Options:**
+
+| Flag               | Default     | Description                                              |
+| ------------------ | ----------- | -------------------------------------------------------- |
+| `--base-dir`       | `~/.sysfig` | Directory where sysfig stores its data                   |
+| `--id`             | all         | Apply only this ID (repeatable)                          |
+| `--dry-run`        | `false`     | Print what would happen without writing anything         |
+| `--no-backup`      | `false`     | Skip pre-apply backup                                    |
+| `--skip-encrypted` | `false`     | Skip encrypted files when master key is absent           |
+| `--no-pull`        | `false`     | Skip pull — apply from local repo only (offline mode)    |
+| `--yes`            | `false`     | Non-interactive: skip all prompts                        |
+
+**Examples:**
+
+```bash
+# First-time machine
+sysfig deploy git@github.com:you/myconfigs.git
+
+# Already set up — pull + apply
+sysfig deploy
+
+# Preview what would change
+sysfig deploy --dry-run
+
+# Offline — apply from local repo, no network
+sysfig deploy --no-pull
+
+# CI/scripts — non-interactive
+sysfig deploy git@github.com:you/myconfigs.git --yes --skip-encrypted
+
+# Apply only specific files
+sysfig deploy --id nginx_main --id sshd_config
+```
+
+**Use in CI / server provisioning:**
+
+```bash
+#!/bin/bash
+# Ensure the machine matches the config repo — run on boot or in cron
+sysfig deploy git@github.com:ops/server-configs.git --yes --skip-encrypted
+```
+
+---
 
 ### `setup`
 

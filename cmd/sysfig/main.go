@@ -59,6 +59,7 @@ func divider() { fmt.Println(clrDim.Sprint(strings.Repeat("─", 76))) }
 const usage = `Usage: sysfig <command> [options]
 
 Commands:
+  deploy  Pull from remote and apply configs — one command for everything
   setup   Bootstrap sysfig on a new machine from a remote config repo
   init    Initialise a fresh sysfig environment (no remote)
   track   Start tracking a config file
@@ -82,6 +83,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "deploy":
+		runDeploy(os.Args[2:])
 	case "setup":
 		runSetup(os.Args[2:])
 	case "clone": // hidden alias for backward-compat
@@ -922,6 +925,170 @@ func runPull(args []string) {
 		ok("Pulled latest changes from remote.")
 		info("Run %s to deploy updated config files.", clrBold.Sprint("sysfig apply"))
 	}
+}
+
+// runDeploy is the "one command to rule them all" — pull from remote and apply.
+// On a first-time machine it clones the repo then applies everything.
+// On an already-set-up machine it pulls then applies.
+func runDeploy(args []string) {
+	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	baseDir := fs.String("base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	dryRun := fs.Bool("dry-run", false, "print what would happen without writing anything")
+	noBackup := fs.Bool("no-backup", false, "skip pre-apply backup")
+	skipEncrypted := fs.Bool("skip-encrypted", false, "skip encrypted files when master key is absent")
+	noPull := fs.Bool("no-pull", false, "skip pull, apply from local repo only (offline mode)")
+	yes := fs.Bool("yes", false, "non-interactive: skip all prompts")
+	sysRoot := fs.String("sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
+
+	var ids multiFlag
+	fs.Var(&ids, "id", "apply only this ID (repeatable)")
+
+	// Accept remote URL as optional positional argument (same parser as setup).
+	valueTakingFlags := map[string]bool{
+		"-base-dir": true, "--base-dir": true,
+		"-sys-root": true, "--sys-root": true,
+	}
+	var remoteURL string
+	var flagArgs []string
+	skipNext := false
+	for _, arg := range args {
+		if skipNext {
+			flagArgs = append(flagArgs, arg)
+			skipNext = false
+			continue
+		}
+		if len(arg) > 0 && arg[0] == '-' {
+			flagArgs = append(flagArgs, arg)
+			bare := strings.SplitN(arg, "=", 2)[0]
+			if valueTakingFlags[bare] {
+				skipNext = true
+			}
+		} else if remoteURL == "" {
+			remoteURL = arg
+		} else {
+			flagArgs = append(flagArgs, arg)
+		}
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		os.Exit(1)
+	}
+
+	// ── Header ────────────────────────────────────────────────────────────
+	fmt.Println()
+	clrBold.Println("  sysfig deploy — syncing your environment")
+	fmt.Println(clrDim.Sprint("  ─────────────────────────────────────────────"))
+	fmt.Println()
+
+	// If no URL and no local repo, we need a URL.
+	repoDir := filepath.Join(*baseDir, "repo.git")
+	_, repoErr := os.Stat(repoDir)
+	alreadySetUp := repoErr == nil
+
+	if !alreadySetUp && remoteURL == "" {
+		if *yes || !isatty() {
+			fmt.Fprintf(os.Stderr, "%s remote URL required on first run (no local repo found)\n", clrErr.Sprint("Error:"))
+			os.Exit(1)
+		}
+		fmt.Printf("     %s ", clrBold.Sprint("Remote URL:"))
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			remoteURL = strings.TrimSpace(scanner.Text())
+		}
+		if remoteURL == "" {
+			fmt.Fprintf(os.Stderr, "%s no URL provided\n", clrErr.Sprint("Error:"))
+			os.Exit(1)
+		}
+	}
+
+	result, err := core.Deploy(core.DeployOptions{
+		RemoteURL:     remoteURL,
+		BaseDir:       *baseDir,
+		IDs:           []string(ids),
+		DryRun:        *dryRun,
+		NoBackup:      *noBackup,
+		SkipEncrypted: *skipEncrypted,
+		NoPull:        *noPull,
+		Yes:           *yes,
+		SysRoot:       *sysRoot,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n%s %s\n", clrErr.Sprint("Error:"), err)
+		os.Exit(1)
+	}
+
+	// ── Phase report ──────────────────────────────────────────────────────
+	switch result.Phase {
+	case core.DeployPhaseSetup:
+		cr := result.CloneResult
+		ok("Config repo cloned")
+		fmt.Printf("     %s %s\n", clrDim.Sprint("location:"), clrDim.Sprint(cr.RepoDir))
+		if cr.Seeded > 0 {
+			ok("Manifest seeded: %s tracked file(s)", clrBold.Sprintf("%d", cr.Seeded))
+		} else {
+			info("Manifest has no tracked files yet.")
+		}
+		if cr.HooksWarning != "" {
+			warn("hooks.yaml created from template — review before using")
+		}
+
+	case core.DeployPhasePull:
+		pr := result.PullResult
+		if pr.AlreadyUpToDate {
+			info("Already up to date — no remote changes.")
+		} else {
+			ok("Pulled latest changes from remote.")
+		}
+
+	case core.DeployPhaseSkipped:
+		info("Pull skipped — applying from local repo.")
+	}
+
+	// ── Apply report ──────────────────────────────────────────────────────
+	fmt.Println()
+	if len(result.ApplyResults) == 0 {
+		info("Nothing to apply.")
+	} else {
+		for _, r := range result.ApplyResults {
+			if r.Skipped {
+				fmt.Printf("  %s %s %s\n",
+					clrDim.Sprint("[dry-run]"),
+					clrInfo.Sprint(r.ID),
+					clrDim.Sprint("→ "+r.SystemPath))
+				continue
+			}
+			ok("Applied: %s", clrBold.Sprint(r.ID))
+			fmt.Printf("     %s %s\n", clrDim.Sprint("→"), r.SystemPath)
+			if r.BackupPath != "" {
+				fmt.Printf("     %s %s\n", clrDim.Sprint("backup:"), clrDim.Sprint(r.BackupPath))
+			}
+			if r.Encrypted {
+				fmt.Printf("     %s\n", clrEncrypted.Sprint("decrypted from age ciphertext"))
+			}
+			if r.ChownWarning != "" {
+				warn("%s", r.ChownWarning)
+			}
+		}
+	}
+
+	// ── Summary ───────────────────────────────────────────────────────────
+	fmt.Println()
+	divider()
+	clrOK.Println("  ✓ Deploy complete!")
+	fmt.Println()
+
+	parts := []string{clrOK.Sprintf("Applied: %d", result.Applied)}
+	if result.Skipped > 0 {
+		parts = append(parts, clrDim.Sprintf("Dry-run: %d", result.Skipped))
+	}
+	fmt.Printf("  %s\n", strings.Join(parts, clrDim.Sprint("  ·  ")))
+	fmt.Println()
+	fmt.Printf("  %s\n", clrBold.Sprint("What to do next:"))
+	fmt.Printf("   %s  See current sync state\n", clrInfo.Sprint("sysfig status"))
+	fmt.Printf("   %s  Check environment health\n", clrInfo.Sprint("sysfig doctor"))
+	fmt.Printf("   %s  See commit history\n", clrInfo.Sprint("sysfig log   "))
+	fmt.Println()
 }
 
 // runDoctor runs a full health check of the sysfig environment.
