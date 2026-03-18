@@ -156,6 +156,13 @@ func stageBlob(repoDir, relPath string, data []byte) error {
 //
 // Returns TrackResult or a descriptive error.
 func Track(opts TrackOptions) (*TrackResult, error) {
+	// Resolve relative paths (e.g. ".", "../foo") to absolute so that IDs,
+	// repo paths, and system_path entries are always canonical.
+	absPath, err := filepath.Abs(opts.SystemPath)
+	if err != nil {
+		return nil, fmt.Errorf("core: track: resolve path %q: %w", opts.SystemPath, err)
+	}
+	opts.SystemPath = absPath
 	path := opts.SystemPath
 
 	// 1a. Denylist check.
@@ -347,6 +354,13 @@ type TrackDirSummary struct {
 // Returns TrackDirSummary and a top-level error only if the root walk itself
 // fails (e.g. dirPath does not exist or is not a directory).
 func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
+	// Resolve relative paths to absolute before walking.
+	absDir, err := filepath.Abs(opts.DirPath)
+	if err != nil {
+		return nil, fmt.Errorf("core: trackdir: resolve path %q: %w", opts.DirPath, err)
+	}
+	opts.DirPath = absDir
+
 	// Validate that the root path is an existing directory.
 	info, err := os.Stat(opts.DirPath)
 	if err != nil {

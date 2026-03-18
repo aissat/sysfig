@@ -216,6 +216,42 @@ func TestTrack_AlreadyTracked(t *testing.T) {
 	assert.Contains(t, err.Error(), "already tracked", "error must mention the file is already tracked")
 }
 
+func TestTrack_RelativeDotPath(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := initTestBareRepo(t, filepath.Join(tmp, "repo.git"))
+	stateDir := filepath.Join(tmp, "state")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+
+	sysRoot := filepath.Join(tmp, "sysroot")
+	sysDir := filepath.Join(sysRoot, "etc")
+	require.NoError(t, os.MkdirAll(sysDir, 0o755))
+	sysFile := filepath.Join(sysDir, "hosts")
+	require.NoError(t, os.WriteFile(sysFile, []byte("127.0.0.1 localhost\n"), 0o644))
+
+	// Change working directory to the file's directory and use "." as the
+	// dir argument via TrackDir so that relative paths are resolved.
+	orig, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	require.NoError(t, os.Chdir(sysDir))
+
+	summary, err := core.TrackDir(core.TrackDirOptions{
+		DirPath:  ".",
+		RepoDir:  repoDir,
+		StateDir: stateDir,
+		SysRoot:  sysRoot,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, summary.Tracked)
+
+	// The stored system_path must be absolute, not ".".
+	s := readState(t, stateDir)
+	for _, rec := range s.Files {
+		assert.True(t, filepath.IsAbs(rec.SystemPath),
+			"system_path %q must be absolute", rec.SystemPath)
+	}
+}
+
 func TestTrack_IDDerivation(t *testing.T) {
 	tmp := t.TempDir()
 	repoDir := initTestBareRepo(t, filepath.Join(tmp, "repo.git"))
