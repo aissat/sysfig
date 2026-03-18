@@ -722,33 +722,35 @@ sysfig sync --pull --push      # full round-trip: pull → commit → push
 Auto-sync tracked files whenever they change on disk.
 
 ```
-sysfig watch [options]
+sysfig watch [subcommand] [options]
 ```
 
-Starts a foreground process that monitors every tracked config file using OS-level filesystem events. When a change is detected, sysfig waits for the debounce window (default 2 s) and then runs `sysfig sync` automatically. Press **Ctrl-C** to stop.
+| Subcommand | Description |
+|------------|-------------|
+| _(none)_ / `run` | Run the watcher in the foreground (Ctrl-C to stop) |
+| `install` | Write a systemd user service file |
+| `uninstall` | Stop, disable, and remove the service file |
+| `status` | Show `systemctl --user status sysfig-watch` |
 
-**Options:**
+#### Foreground mode
 
-| Flag         | Default     | Description                                      |
-| ------------ | ----------- | ------------------------------------------------ |
+Starts a foreground process that monitors every tracked config file using OS-level filesystem events (`inotify` on Linux). When a change is detected, sysfig waits for the debounce window then runs `sysfig sync` automatically.
+
+**Flags:**
+
+| Flag         | Default     | Description                                         |
+| ------------ | ----------- | --------------------------------------------------- |
 | `--debounce` | `2s`        | Wait this long after the last change before syncing |
-| `--dry-run`  | `false`     | Print detected changes without syncing           |
-| `--base-dir` | `~/.sysfig` | Directory where sysfig stores its data           |
-
-**Examples:**
+| `--dry-run`  | `false`     | Print detected changes without syncing              |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores its data              |
 
 ```bash
-# Start watching (blocks until Ctrl-C)
-sysfig watch
-
-# Faster debounce for interactive editing
-sysfig watch --debounce 500ms
-
-# See what would be synced without committing
-sysfig watch --dry-run
+sysfig watch                    # foreground, 2s debounce
+sysfig watch --debounce 500ms   # faster
+sysfig watch --dry-run          # preview only
 ```
 
-**Example output:**
+**Output:**
 
 ```
 Watching tracked files for changes  (Ctrl-C to stop)
@@ -759,7 +761,30 @@ Watching tracked files for changes  (Ctrl-C to stop)
             sysfig: sync 2026-03-18T10:42:15Z
 ```
 
-> **Tip:** Run `sysfig watch` in a `tmux` pane or as a systemd user service for continuous background versioning.
+#### Service mode (systemd)
+
+Install as a persistent background service that starts on login and restarts automatically on failure.
+
+```bash
+# Write service file and enable immediately
+sysfig watch install --enable
+
+# Check it is running
+sysfig watch status
+
+# Remove the service
+sysfig watch uninstall
+```
+
+**`watch install` flags:**
+
+| Flag         | Default     | Description                                           |
+| ------------ | ----------- | ----------------------------------------------------- |
+| `--base-dir` | `~/.sysfig` | Base dir written into the ExecStart line              |
+| `--debounce` | `2s`        | Debounce window written into the ExecStart line       |
+| `--enable`   | `false`     | Also run `systemctl --user enable --now sysfig-watch` |
+
+The generated unit file lives at `~/.config/systemd/user/sysfig-watch.service` and uses `Restart=on-failure` so the watcher recovers automatically if it crashes.
 
 ---
 
