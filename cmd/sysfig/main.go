@@ -1003,22 +1003,48 @@ func newSyncCmd() *cobra.Command {
 		baseDir string
 		message string
 		push    bool
+		pull    bool
 		sysRoot string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Capture local changes and commit (offline-safe)",
+		Short: "Commit local changes, optionally pull first and/or push after",
+		Long: `Stages all modified tracked files and creates a local git commit (offline-safe).
+
+Use --pull to fetch remote changes first (full round-trip with --push):
+  sysfig sync --pull --push
+
+This replaces the standalone 'push' and 'pull' commands.`,
+		Example: `  sysfig sync                        # local commit only
+  sysfig sync --message "tuned nginx" # with custom message
+  sysfig sync --push                  # commit + push
+  sysfig sync --pull                  # pull first, then commit
+  sysfig sync --pull --push           # full round-trip`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := core.Sync(core.SyncOptions{
 				BaseDir: baseDir,
 				Message: message,
+				Pull:    pull,
 				Push:    push,
 				SysRoot: sysRoot,
 			})
 			if err != nil {
 				return err
 			}
+
+			// Pull status.
+			if pull {
+				if result.PullErr != nil {
+					warn("Pull failed: %s", result.PullErr)
+					info("Continuing with local repo.")
+				} else if result.Pulled {
+					ok("Pulled latest changes from remote.")
+				} else {
+					info("Already up to date.")
+				}
+			}
+
 			if !result.Committed {
 				info("Nothing to commit — shadow repo is clean.")
 				return nil
@@ -1027,8 +1053,8 @@ func newSyncCmd() *cobra.Command {
 			ok("Repo:      %s", clrDim.Sprint(result.RepoDir))
 			if result.Pushed {
 				ok("Pushed to remote.")
-			} else {
-				info("Not pushed. Run %s when online.", clrBold.Sprint("sysfig push"))
+			} else if !push {
+				info("Not pushed. Run %s when online.", clrBold.Sprint("sysfig sync --push"))
 			}
 			return nil
 		},
@@ -1037,19 +1063,22 @@ func newSyncCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
 	f.StringVar(&message, "message", "", "commit message (default: sysfig: sync <timestamp>)")
-	f.BoolVar(&push, "push", false, "also push to remote after committing (requires network)")
+	f.BoolVar(&pull, "pull", false, "pull from remote before committing (requires network)")
+	f.BoolVar(&push, "push", false, "push to remote after committing (requires network)")
 	f.StringVar(&sysRoot, "sys-root", "", "prefix all system paths (sandbox/testing override)")
 	return cmd
 }
 
-// ── push ──────────────────────────────────────────────────────────────────────
+// ── push (hidden alias → sysfig sync --push) ─────────────────────────────────
 
 func newPushCmd() *cobra.Command {
 	var baseDir string
 
 	cmd := &cobra.Command{
-		Use:   "push",
-		Short: "Push local commits to the remote git repository",
+		Use:        "push",
+		Short:      "Push local commits to the remote (alias: sysfig sync --push)",
+		Hidden:     true,
+		Deprecated: "use 'sysfig sync --push' instead",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := core.Push(core.PushOptions{BaseDir: baseDir}); err != nil {
 				return err
@@ -1062,14 +1091,16 @@ func newPushCmd() *cobra.Command {
 	return cmd
 }
 
-// ── pull ──────────────────────────────────────────────────────────────────────
+// ── pull (hidden alias → sysfig sync --pull) ─────────────────────────────────
 
 func newPullCmd() *cobra.Command {
 	var baseDir string
 
 	cmd := &cobra.Command{
-		Use:   "pull",
-		Short: "Pull remote changes into the local repo (requires network)",
+		Use:        "pull",
+		Short:      "Pull remote changes into the local repo (alias: sysfig sync --pull)",
+		Hidden:     true,
+		Deprecated: "use 'sysfig sync --pull' instead",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := core.Pull(core.PullOptions{BaseDir: baseDir})
 			if err != nil {

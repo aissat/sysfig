@@ -106,8 +106,8 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
   - [status](#status)
   - [diff](#diff)
   - [sync](#sync)
-  - [push](#push)
-  - [pull](#pull)
+  - [push](#push-deprecated) _(deprecated)_
+  - [pull](#pull-deprecated) _(deprecated)_
   - [log](#log)
   - [keys](#keys)
   - [doctor](#doctor)
@@ -139,7 +139,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
 
 - **No symlinks.** Files are physical copies. `ls -la` on your system never reveals your repo structure.
 - **Bare git repo.** The shadow repo lives at `~/.sysfig/repo.git/` — no working tree, no accidental edits.
-- **Offline-first.** `track`, `apply`, `status`, `sync`, `diff` work 100% without network. Only `push` and `pull` touch the wire.
+- **Offline-first.** `track`, `apply`, `status`, `sync`, `diff` work 100% without network. Only `sync --push` and `sync --pull` touch the wire.
 - **Per-file encryption.** Secrets are encrypted with [age](https://age-encryption.org/) + HKDF-SHA256 per-file keys derived from a single master key.
 - **Metadata tracking.** Records `uid`, `gid`, and `mode` for every file. `status` warns when permissions drift.
 - **Atomic backups.** Every `apply` creates a timestamped backup before overwriting anything on disk.
@@ -668,22 +668,25 @@ Capture the current state of tracked files and commit locally (offline-safe).
 sysfig sync [options]
 ```
 
-Stages any modified tracked files, creates a git commit in the local bare repo, and updates `state.json` hashes and timestamps. No network access required. Use `--push` to also push in one step.
+Stages any modified tracked files, creates a git commit in the local bare repo, and updates `state.json` hashes and timestamps. No network access required. Use `--push` to also push in one step; use `--pull` to fetch remote changes before committing.
 
 **Options:**
 
-| Flag         | Default                    | Description                                 |
-| ------------ | -------------------------- | ------------------------------------------- |
-| `--message`  | `sysfig: sync <timestamp>` | Commit message                              |
-| `--push`     | `false`                    | Also push to remote after committing        |
-| `--base-dir` | `~/.sysfig`                | Directory where sysfig stores data          |
+| Flag         | Default                    | Description                                           |
+| ------------ | -------------------------- | ----------------------------------------------------- |
+| `--message`  | `sysfig: sync <timestamp>` | Commit message                                        |
+| `--push`     | `false`                    | Also push to remote after committing                  |
+| `--pull`     | `false`                    | Fetch remote changes before committing (non-fatal)    |
+| `--base-dir` | `~/.sysfig`                | Directory where sysfig stores data                    |
 
 **Examples:**
 
 ```bash
 sysfig sync
 sysfig sync --message "hardened sshd_config"
-sysfig sync --push          # commit + push in one step
+sysfig sync --push             # commit + push in one step
+sysfig sync --pull             # pull first, then commit locally
+sysfig sync --pull --push      # full round-trip: pull → commit → push
 ```
 
 **Example output:**
@@ -691,53 +694,27 @@ sysfig sync --push          # commit + push in one step
 ```
   ✓ Committed: hardened sshd_config
   ✓ Repo:      /home/you/.sysfig/repo.git
-  ℹ Not pushed. Run sysfig push when online.
+  ℹ Not pushed. Run sysfig sync --push when online.
 ```
+
+> **Note:** `--pull` is non-fatal. If the remote is unreachable, sysfig prints a warning and continues with the local commit.
 
 ---
 
-### `push`
+### `push` _(deprecated)_
 
-Push local commits to the remote git repository.
-
-```
-sysfig push [options]
-```
-
-Requires network access and a configured remote. Set up a remote once with:
-
-```bash
-git --git-dir ~/.sysfig/repo.git remote add origin git@github.com:you/myconfigs.git
-```
-
-**Options:**
-
-| Flag         | Default     | Description                        |
-| ------------ | ----------- | ---------------------------------- |
-| `--base-dir` | `~/.sysfig` | Directory where sysfig stores data |
+> **Deprecated.** Use `sysfig sync --push` instead. This command is hidden from help output but still works for backward compatibility.
 
 ---
 
-### `pull`
+### `pull` _(deprecated)_
 
-Pull remote changes into the local bare git repo.
+> **Deprecated.** Use `sysfig sync --pull` instead. This command is hidden from help output but still works for backward compatibility.
 
-```
-sysfig pull [options]
-```
-
-Fetches and fast-forwards the local repo. **Does not automatically apply changes to the system** — run `sysfig apply` after pulling to deploy.
-
-**Options:**
-
-| Flag         | Default     | Description                        |
-| ------------ | ----------- | ---------------------------------- |
-| `--base-dir` | `~/.sysfig` | Directory where sysfig stores data |
-
-**Standard update workflow:**
+**Standard update workflow (new):**
 
 ```bash
-sysfig pull           # fetch remote changes
+sysfig sync --pull    # pull + commit locally
 sysfig status         # see what is PENDING/APPLY
 sysfig diff           # review the changes
 sysfig apply          # deploy to system

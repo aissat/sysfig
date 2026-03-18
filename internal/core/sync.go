@@ -142,6 +142,11 @@ type SyncOptions struct {
 	// Defaults to "sysfig: sync <timestamp>" if empty.
 	Message string
 
+	// Pull, when true, runs `git pull` from the remote BEFORE staging and
+	// committing local changes. Useful for a full round-trip in one command.
+	// Pull failure is non-fatal — sync continues with the local repo.
+	Pull bool
+
 	// Push, when true, also runs `git push` after the commit.
 	// When false (default), changes are committed locally only — safe offline.
 	Push bool
@@ -155,6 +160,8 @@ type SyncOptions struct {
 // SyncResult reports what happened during a sync.
 type SyncResult struct {
 	RepoDir      string
+	Pulled       bool     // true if pull ran and succeeded
+	PullErr      error    // non-nil if pull was attempted but failed (non-fatal)
 	Committed    bool     // true if a commit was created (i.e. there were staged changes)
 	Pushed       bool     // true if push was attempted and succeeded
 	Message      string
@@ -184,6 +191,17 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 	result := &SyncResult{
 		RepoDir: repoDir,
 		Message: msg,
+	}
+
+	// Optional pull before committing local changes.
+	if opts.Pull {
+		pr, err := Pull(PullOptions{BaseDir: opts.BaseDir})
+		if err != nil {
+			// Non-fatal — note the error and continue with local repo.
+			result.PullErr = err
+		} else {
+			result.Pulled = !pr.AlreadyUpToDate
+		}
 	}
 
 	// Load state so we know which files to stage.
