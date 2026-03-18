@@ -126,13 +126,13 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
 
 ## Why sysfig?
 
-| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Single binary |
-| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------- |
-| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✓             |
-| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✓             |
-| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✓             |
-| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | ✗             |
-| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓**         |
+| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | Single binary |
+| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | ------------- |
+| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✓             |
+| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✓             |
+| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✓             |
+| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗             |
+| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓**         |
 
 **Key design decisions:**
 
@@ -147,11 +147,12 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
 
 ## Prerequisites
 
-| Dependency | Required for          | Notes                              |
-| ---------- | --------------------- | ---------------------------------- |
-| `git`      | Everything            | Must be on `$PATH`. v2.x or later. |
-| `diff`     | `sysfig diff`         | Usually pre-installed on Linux.    |
-| Go 1.21+   | Building from source  | Not needed if using a binary.      |
+| Dependency | Required for              | Notes                                              |
+| ---------- | ------------------------- | -------------------------------------------------- |
+| `git`      | Everything                | Must be on `$PATH`. v2.x or later.                 |
+| `diff`     | `sysfig diff`             | Usually pre-installed on Linux.                    |
+| `ssh`      | `deploy --host` only      | OpenSSH client on the **local** machine only.      |
+| Go 1.21+   | Building from source      | Not needed if using a binary.                      |
 
 ---
 
@@ -299,7 +300,7 @@ The recommended entry point for both first-time machines and routine updates. Id
 | Already set up, `--no-pull` | Skip pull → apply from local repo (fully offline) |
 | Pull fails (network error) | Fall back to local repo → apply (non-fatal) |
 
-**Options:**
+**Local deploy options:**
 
 | Flag               | Default     | Description                                              |
 | ------------------ | ----------- | -------------------------------------------------------- |
@@ -311,7 +312,17 @@ The recommended entry point for both first-time machines and routine updates. Id
 | `--no-pull`        | `false`     | Skip pull — apply from local repo only (offline mode)    |
 | `--yes`            | `false`     | Non-interactive: skip all prompts                        |
 
-**Examples:**
+**Remote deploy options (`--host`):**
+
+| Flag           | Default | Description                                                       |
+| -------------- | ------- | ----------------------------------------------------------------- |
+| `--host`       | —       | SSH target (`user@hostname`) — pushes files to the remote instead |
+| `--ssh-key`    | —       | Path to SSH identity file (default: use ssh-agent)                |
+| `--ssh-port`   | `22`    | SSH port on the remote host                                       |
+
+> When `--host` is set sysfig reads files from the **local** repo and writes them to the remote over SSH. **No sysfig installation is needed on the remote** — only `mkdir`, `cat`, and `chmod`.
+
+**Local deploy examples:**
 
 ```bash
 # First-time machine
@@ -333,13 +344,47 @@ sysfig deploy git@github.com:you/myconfigs.git --yes --skip-encrypted
 sysfig deploy --id nginx_main --id sshd_config
 ```
 
+**Remote deploy examples:**
+
+```bash
+# Deploy all tracked files to a remote server
+sysfig deploy --host user@192.168.1.10
+
+# Preview what would be pushed (no SSH writes)
+sysfig deploy --host user@server --dry-run
+
+# Deploy only specific files
+sysfig deploy --host user@server --id nginx_main --id sshd_config
+
+# Use a specific SSH key
+sysfig deploy --host deploy@server --ssh-key ~/.ssh/deploy_ed25519
+
+# Non-standard SSH port
+sysfig deploy --host user@server --ssh-port 2222
+```
+
 **Use in CI / server provisioning:**
 
 ```bash
 #!/bin/bash
 # Ensure the machine matches the config repo — run on boot or in cron
 sysfig deploy git@github.com:ops/server-configs.git --yes --skip-encrypted
+
+# Or push from a central ops machine to all servers (no sysfig needed on targets)
+for host in web1 web2 web3; do
+  sysfig deploy --host deploy@$host --id nginx_main
+done
 ```
+
+**Remote deploy behaviour table:**
+
+| Situation                          | What happens                                     |
+| ---------------------------------- | ------------------------------------------------ |
+| `--host` set, `--dry-run`          | Lists files that would be pushed — no SSH writes |
+| `--host` set, file is encrypted    | Decrypted locally with master key, then pushed   |
+| `--host` set, no master key        | Fails unless `--skip-encrypted` is set           |
+| `--host` set, `--id` filter        | Only matching files are pushed                   |
+| Remote path's parent dir missing   | Created automatically (`mkdir -p`)               |
 
 ---
 
@@ -1031,6 +1076,7 @@ sysfig never touches the network automatically.
 | `push`                           | Always            |
 | `pull`                           | Always            |
 | `setup` (initial bootstrap only) | Yes, one-time     |
+| `deploy --host` (remote push)    | SSH to target     |
 
 If `sysfig setup` detects the bare repo already exists locally, it shows hints and exits cleanly — no silent pull, no network call. The user must explicitly run `sysfig pull` to fetch changes. This prevents silent data loss on intermittent networks and keeps the local repo as the always-valid source of truth.
 

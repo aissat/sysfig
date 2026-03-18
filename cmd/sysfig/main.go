@@ -930,6 +930,7 @@ func runPull(args []string) {
 // runDeploy is the "one command to rule them all" — pull from remote and apply.
 // On a first-time machine it clones the repo then applies everything.
 // On an already-set-up machine it pulls then applies.
+// With --host it SSHes into the target and runs sysfig deploy there instead.
 func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -942,13 +943,21 @@ func runDeploy(args []string) {
 	yes := fs.Bool("yes", false, "non-interactive: skip all prompts")
 	sysRoot := fs.String("sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 
+	// Remote host flags
+	host := fs.String("host", "", "SSH target to deploy to (user@hostname) — runs sysfig deploy on the remote")
+	sshKey := fs.String("ssh-key", "", "path to SSH identity file (default: use ssh-agent)")
+	sshPort := fs.Int("ssh-port", 22, "SSH port on the remote host")
+
 	var ids multiFlag
 	fs.Var(&ids, "id", "apply only this ID (repeatable)")
 
 	// Accept remote URL as optional positional argument (same parser as setup).
 	valueTakingFlags := map[string]bool{
-		"-base-dir": true, "--base-dir": true,
-		"-sys-root": true, "--sys-root": true,
+		"-base-dir":  true, "--base-dir":  true,
+		"-sys-root":  true, "--sys-root":  true,
+		"-host":      true, "--host":      true,
+		"-ssh-key":   true, "--ssh-key":   true,
+		"-ssh-port":  true, "--ssh-port":  true,
 	}
 	var remoteURL string
 	var flagArgs []string
@@ -973,6 +982,70 @@ func runDeploy(args []string) {
 	}
 	if err := fs.Parse(flagArgs); err != nil {
 		os.Exit(1)
+	}
+
+	// ── Remote host mode ──────────────────────────────────────────────────
+	if *host != "" {
+		fmt.Println()
+		clrBold.Printf("  sysfig deploy → %s\n", *host)
+		fmt.Println(clrDim.Sprint("  ─────────────────────────────────────────────"))
+		fmt.Println()
+
+		result, err := core.RemoteDeploy(core.RemoteDeployOptions{
+			Host:          *host,
+			SSHKey:        *sshKey,
+			SSHPort:       *sshPort,
+			BaseDir:       *baseDir,
+			IDs:           []string(ids),
+			DryRun:        *dryRun,
+			SkipEncrypted: *skipEncrypted,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\n%s %s\n", clrErr.Sprint("Error:"), err)
+			os.Exit(1)
+		}
+
+		// ── Remote apply report ───────────────────────────────────────
+		for _, r := range result.Results {
+			switch {
+			case r.Err != nil:
+				fail("%s  %s", clrErr.Sprint(r.ID), clrErr.Sprint(r.Err.Error()))
+			case r.Skipped && r.SkipReason == "dry-run":
+				fmt.Printf("  %s %s %s\n",
+					clrDim.Sprint("[dry-run]"),
+					clrInfo.Sprint(r.ID),
+					clrDim.Sprint("→ "+r.SystemPath))
+			case r.Skipped:
+				fmt.Printf("  %s %s  %s\n",
+					clrDim.Sprint("―"),
+					clrDim.Sprint(r.ID),
+					clrDim.Sprintf("(%s)", r.SkipReason))
+			default:
+				ok("%-36s → %s", clrBold.Sprint(r.ID), r.SystemPath)
+			}
+		}
+
+		if len(result.Results) == 0 {
+			info("Nothing to deploy (no tracked files).")
+		}
+
+		fmt.Println()
+		divider()
+		clrOK.Printf("  ✓ Remote deploy complete! (%s)\n", *host)
+		fmt.Println()
+		parts := []string{clrOK.Sprintf("Applied: %d", result.Applied)}
+		if result.Skipped > 0 {
+			parts = append(parts, clrDim.Sprintf("Skipped: %d", result.Skipped))
+		}
+		if result.Failed > 0 {
+			parts = append(parts, clrErr.Sprintf("Failed: %d", result.Failed))
+		}
+		fmt.Printf("  %s\n\n", strings.Join(parts, clrDim.Sprint("  ·  ")))
+
+		if result.Failed > 0 {
+			os.Exit(1)
+		}
+		return
 	}
 
 	// ── Header ────────────────────────────────────────────────────────────
