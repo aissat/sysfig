@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,9 +32,18 @@ func gitRun(repoDir string, timeout time.Duration, args ...string) error {
 	cmd.Stderr = &buf
 
 	if err := cmd.Run(); err != nil {
+		if isGitNotFound(err) {
+			return fmt.Errorf("git not found on $PATH — install git (e.g. sudo apt install git): %w", err)
+		}
 		return fmt.Errorf("git %v: %w\n%s", args, err, buf.String())
 	}
 	return nil
+}
+
+// isGitNotFound returns true when the error is caused by the git binary not
+// being present on $PATH, so callers can show a clear actionable message.
+func isGitNotFound(err error) bool {
+	return errors.Is(err, exec.ErrNotFound)
 }
 
 // syncGitBareRun executes a git command against the bare repo, setting

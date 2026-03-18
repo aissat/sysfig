@@ -64,10 +64,12 @@ func step(n int, label string) {
 	fmt.Printf("  %s %s\n", clrBold.Sprintf("[%d]", n), clrBold.Sprint(label))
 }
 
-// defaultBaseDir returns ~/.sysfig, honouring SUDO_USER so that
-// "sudo sysfig apply" resolves to the invoking user's home, not /root.
-func defaultBaseDir() string {
-	// When running under sudo, prefer the real user's home directory.
+// globalProfile holds the value of the --profile persistent flag.
+// Set by newRootCmd() before any subcommand runs.
+var globalProfile string
+
+// sysfigHome returns the base ~/.sysfig directory, honouring SUDO_USER.
+func sysfigHome() string {
 	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
 		if u, err := user.Lookup(sudoUser); err == nil {
 			return filepath.Join(u.HomeDir, ".sysfig")
@@ -78,6 +80,32 @@ func defaultBaseDir() string {
 		return ".sysfig"
 	}
 	return filepath.Join(home, ".sysfig")
+}
+
+// profilesDir returns ~/.sysfig/profiles.
+func profilesDir() string { return filepath.Join(sysfigHome(), "profiles") }
+
+// defaultBaseDir returns the active base directory.
+// Priority: --profile flag > SYSFIG_PROFILE env var > default ~/.sysfig
+func defaultBaseDir() string {
+	profile := globalProfile
+	if profile == "" {
+		profile = os.Getenv("SYSFIG_PROFILE")
+	}
+	if profile != "" {
+		return filepath.Join(profilesDir(), profile)
+	}
+	return sysfigHome()
+}
+
+// resolveBaseDir returns baseDir if non-empty, otherwise calls defaultBaseDir().
+// Every command should call this at the top of RunE so that --profile is
+// honoured even though flag defaults are evaluated at command-creation time.
+func resolveBaseDir(baseDir string) string {
+	if baseDir != "" {
+		return baseDir
+	}
+	return defaultBaseDir()
 }
 
 // isatty returns true if stdout is connected to a terminal.
@@ -104,6 +132,11 @@ ownership and permissions, and stay fully offline-capable.`,
 		SilenceErrors: true,
 	}
 
+	// --profile is a persistent flag: it applies to every subcommand and
+	// overrides the base directory resolution in defaultBaseDir().
+	root.PersistentFlags().StringVar(&globalProfile, "profile", "",
+		"use named profile (~/.sysfig/profiles/<name>); overrides --base-dir default")
+
 	root.AddCommand(
 		newDeployCmd(),
 		newSetupCmd(),
@@ -120,6 +153,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newDoctorCmd(),
 		newSnapCmd(),
 		newWatchCmd(),
+		newProfileCmd(),
 	)
 
 	// Hidden alias kept for backward-compat.
@@ -165,6 +199,7 @@ With --host it SSHes into the target and pushes tracked files directly.
 No sysfig installation is required on the remote host.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			remoteURL := ""
 			if len(args) > 0 {
 				remoteURL = args[0]
@@ -341,7 +376,7 @@ No sysfig installation is required on the remote host.`,
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringArrayVar(&ids, "id", nil, "apply only this ID (repeatable)")
 	f.BoolVar(&dryRun, "dry-run", false, "print what would happen without writing anything")
 	f.BoolVar(&noBackup, "no-backup", false, "skip pre-apply backup")
@@ -370,6 +405,7 @@ func newSetupCmd() *cobra.Command {
 		Short: "Bootstrap sysfig on a new machine from a remote config repo",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			remoteURL := ""
 			if len(args) > 0 {
 				remoteURL = args[0]
@@ -453,7 +489,7 @@ func newSetupCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.BoolVar(&configsOnly, "configs-only", false, "skip package installation, deploy configs only")
 	f.BoolVar(&skipEncrypted, "skip-encrypted", false, "skip encrypted files when master key is absent")
 	f.BoolVar(&yes, "yes", false, "non-interactive: skip all prompts")
@@ -472,6 +508,7 @@ func newInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Initialise a fresh sysfig environment (no remote)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			result, err := core.Init(core.InitOptions{
 				BaseDir: baseDir,
 				Encrypt: encrypt,
@@ -515,7 +552,7 @@ func newInitCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.BoolVar(&encrypt, "encrypt", false, "also generate a master key for encryption")
 	return cmd
 }
@@ -539,6 +576,7 @@ func newTrackCmd() *cobra.Command {
 		Short: "Start tracking a config file (or directory with --recursive)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			targetPath := args[0]
 			repoDir := filepath.Join(baseDir, "repo.git")
 
@@ -622,7 +660,7 @@ func newTrackCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&id, "id", "", "explicit tracking ID (derived from path if omitted)")
 	f.BoolVar(&encrypt, "encrypt", false, "mark the file for encryption at rest in the repo")
 	f.BoolVar(&template, "template", false, "mark the file as a template with {{variable}} expansions")
@@ -642,13 +680,14 @@ func newKeysCmd() *cobra.Command {
 		Use:   "keys <subcommand>",
 		Short: "Manage the master encryption key",
 	}
-	keysCmd.PersistentFlags().StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	keysCmd.PersistentFlags().StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 
 	keysCmd.AddCommand(&cobra.Command{
 		Use:   "info",
 		Short: "Show the master key path and its age public key",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			keysDir := filepath.Join(baseDir, "keys")
 			km := crypto.NewKeyManager(keysDir)
 			identity, err := km.Load()
@@ -669,6 +708,7 @@ func newKeysCmd() *cobra.Command {
 		Short: "Generate a new master key (fails if one already exists)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			keysDir := filepath.Join(baseDir, "keys")
 			km := crypto.NewKeyManager(keysDir)
 			identity, err := km.Generate()
@@ -705,6 +745,7 @@ func newApplyCmd() *cobra.Command {
 		Use:   "apply",
 		Short: "Deploy tracked configs from the repo to the system",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			results, err := core.Apply(core.ApplyOptions{
 				BaseDir:  baseDir,
 				IDs:      ids,
@@ -768,7 +809,7 @@ func newApplyCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.BoolVar(&dryRun, "dry-run", false, "print what would happen without writing anything")
 	f.BoolVar(&noBackup, "no-backup", false, "skip pre-apply backup (dangerous)")
@@ -871,6 +912,7 @@ func newStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show sync status of all tracked files",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			if watchMode {
 				return runStatusWatch(baseDir, sysRoot, ids, interval)
 			}
@@ -891,7 +933,7 @@ func newStatusCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.StringArrayVar(&ids, "id", nil, "check only this ID (repeatable)")
 	f.BoolVarP(&watchMode, "watch", "w", false, "continuously refresh status (Ctrl-C to stop)")
@@ -970,6 +1012,7 @@ func newDiffCmd() *cobra.Command {
 		Use:   "diff",
 		Short: "Show unified diff between system files and repo versions",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			if err := core.CheckDiffPrereqs(); err != nil {
 				os.Exit(2)
 			}
@@ -1037,7 +1080,7 @@ func newDiffCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.BoolVar(&colorFlag, "color", true, "colorize diff output (default: true when stdout is a TTY)")
 	f.StringArrayVar(&ids, "id", nil, "diff only this ID (repeatable)")
@@ -1116,6 +1159,7 @@ This replaces the standalone 'push' and 'pull' commands.`,
   sysfig sync --pull                  # pull first, then commit
   sysfig sync --pull --push           # full round-trip`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			result, err := core.Sync(core.SyncOptions{
 				BaseDir: baseDir,
 				Message: message,
@@ -1155,7 +1199,7 @@ This replaces the standalone 'push' and 'pull' commands.`,
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&message, "message", "", "commit message (default: sysfig: sync <timestamp>)")
 	f.BoolVar(&pull, "pull", false, "pull from remote before committing (requires network)")
 	f.BoolVar(&push, "push", false, "push to remote after committing (requires network)")
@@ -1174,6 +1218,7 @@ func newPushCmd() *cobra.Command {
 		Hidden:     true,
 		Deprecated: "use 'sysfig sync --push' instead",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			if err := core.Push(core.PushOptions{BaseDir: baseDir}); err != nil {
 				return err
 			}
@@ -1181,7 +1226,7 @@ func newPushCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	return cmd
 }
 
@@ -1196,6 +1241,7 @@ func newPullCmd() *cobra.Command {
 		Hidden:     true,
 		Deprecated: "use 'sysfig sync --pull' instead",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			result, err := core.Pull(core.PullOptions{BaseDir: baseDir})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s check your network connection and remote configuration.\n", clrWarn.Sprint("Hint:"))
@@ -1210,7 +1256,7 @@ func newPullCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	return cmd
 }
 
@@ -1227,6 +1273,7 @@ func newLogCmd() *cobra.Command {
 		Use:   "log",
 		Short: "Show commit history as a tree",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			repoDir := filepath.Join(baseDir, "repo.git")
 			gitArgs := []string{
 				"--git-dir=" + repoDir,
@@ -1254,7 +1301,7 @@ func newLogCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&file, "file", "", "show only commits touching this repo-relative path")
 	f.IntVarP(&n, "number", "n", 0, "limit to last N commits (0 = unlimited)")
 	return cmd
@@ -1272,6 +1319,7 @@ func newDoctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "Run a full health check of your sysfig environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			result := core.Doctor(core.DoctorOptions{
 				BaseDir: baseDir,
 				Network: network,
@@ -1335,7 +1383,7 @@ func newDoctorCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.BoolVar(&network, "network", false, "also probe the configured remote (requires network)")
 	return cmd
 }
@@ -1410,12 +1458,13 @@ Sub-commands:
 
 Press Ctrl-C to stop the foreground watcher.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			return watchRun(baseDir, sysRoot, debounce, dryRun)
 		},
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.DurationVar(&debounce, "debounce", 2*time.Second, "wait this long after last change before syncing")
 	f.BoolVar(&dryRun, "dry-run", false, "print detected changes without syncing")
@@ -1442,11 +1491,12 @@ func newWatchRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Run the file watcher in the foreground",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			return watchRun(baseDir, sysRoot, debounce, dryRun)
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.DurationVar(&debounce, "debounce", 2*time.Second, "wait this long after last change before syncing")
 	f.BoolVar(&dryRun, "dry-run", false, "print detected changes without syncing")
@@ -1480,6 +1530,7 @@ func newWatchInstallCmd() *cobra.Command {
 		Use:   "install",
 		Short: "Install sysfig-watch as a systemd user service",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			// Resolve binary path.
 			binPath, err := os.Executable()
 			if err != nil {
@@ -1529,7 +1580,7 @@ func newWatchInstallCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", defaultBaseDir(), "directory where sysfig stores its data")
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.DurationVar(&debounce, "debounce", 2*time.Second, "debounce window written into the service file")
 	f.BoolVar(&enable, "enable", false, "also run 'systemctl --user enable --now sysfig-watch'")
 	return cmd
@@ -1595,6 +1646,165 @@ func runSystemctl(args ...string) (string, error) {
 	return string(out), err
 }
 
+// ── profile ────────────────────────────────────────────────────────────────────
+
+func newProfileCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "profile <subcommand>",
+		Short: "Manage sysfig profiles (isolated config sets)",
+		Long: `Profiles let you maintain separate sets of tracked files, each with their
+own git repo, state, keys, and snapshots.
+
+Examples:
+  sysfig profile list
+  sysfig profile create work
+  sysfig --profile work track /etc/nginx/nginx.conf
+  sysfig --profile work sync
+  sysfig profile delete personal`,
+	}
+	cmd.AddCommand(
+		newProfileListCmd(),
+		newProfileCreateCmd(),
+		newProfileDeleteCmd(),
+	)
+	return cmd
+}
+
+func newProfileListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List all profiles",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			home := sysfigHome()
+			pDir := profilesDir()
+
+			// Always show the default profile first.
+			active := globalProfile
+			if active == "" {
+				active = os.Getenv("SYSFIG_PROFILE")
+			}
+
+			defaultMarker := ""
+			if active == "" {
+				defaultMarker = clrOK.Sprint(" ◀ active")
+			}
+			fmt.Printf("  %-20s  %s%s\n",
+				clrBold.Sprint("default"),
+				clrDim.Sprint(home),
+				defaultMarker)
+
+			entries, err := os.ReadDir(pDir)
+			if err != nil {
+				if os.IsNotExist(err) {
+					// No named profiles yet — that's fine.
+					return nil
+				}
+				return err
+			}
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				name := e.Name()
+				marker := ""
+				if name == active {
+					marker = clrOK.Sprint(" ◀ active")
+				}
+				fmt.Printf("  %-20s  %s%s\n",
+					clrBold.Sprint(name),
+					clrDim.Sprint(filepath.Join(pDir, name)),
+					marker)
+			}
+			return nil
+		},
+	}
+}
+
+func newProfileCreateCmd() *cobra.Command {
+	var setupURL string
+	cmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create and initialise a new profile",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			if name == "default" {
+				return fmt.Errorf("'default' is reserved — it refers to ~/.sysfig")
+			}
+
+			baseDir := filepath.Join(profilesDir(), name)
+			if _, err := os.Stat(baseDir); err == nil {
+				return fmt.Errorf("profile %q already exists at %s", name, baseDir)
+			}
+
+			clrBold.Printf("Creating profile %q\n\n", name)
+
+			if setupURL != "" {
+				// Clone from remote.
+				result, err := core.Clone(core.CloneOptions{
+					BaseDir:   baseDir,
+					RemoteURL: setupURL,
+				})
+				if err != nil {
+					return err
+				}
+				ok("Cloned:  %s", clrDim.Sprint(result.RepoDir))
+			} else {
+				// Fresh init.
+				result, err := core.Init(core.InitOptions{BaseDir: baseDir})
+				if err != nil {
+					return err
+				}
+				ok("Repo:    %s", clrDim.Sprint(result.RepoDir))
+			}
+
+			ok("Profile %q ready.", name)
+			fmt.Println()
+			info("To use this profile:")
+			fmt.Printf("  %s\n", clrBold.Sprintf("sysfig --profile %s track <path>", name))
+			fmt.Printf("  %s\n", clrBold.Sprintf("sysfig --profile %s sync", name))
+			fmt.Printf("\n  or set: %s\n", clrDim.Sprintf("export SYSFIG_PROFILE=%s", name))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&setupURL, "from", "", "clone from remote git URL instead of creating empty repo")
+	return cmd
+}
+
+func newProfileDeleteCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete a named profile and all its data",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			if name == "default" {
+				return fmt.Errorf("cannot delete the default profile")
+			}
+
+			baseDir := filepath.Join(profilesDir(), name)
+			if _, err := os.Stat(baseDir); os.IsNotExist(err) {
+				return fmt.Errorf("profile %q does not exist", name)
+			}
+
+			if !force {
+				return fmt.Errorf(
+					"this will permanently delete %s\nRe-run with --force to confirm", baseDir)
+			}
+
+			if err := os.RemoveAll(baseDir); err != nil {
+				return fmt.Errorf("delete profile: %w", err)
+			}
+			ok("Deleted profile %q (%s)", name, baseDir)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "confirm deletion (required)")
+	return cmd
+}
+
 // ── snap ───────────────────────────────────────────────────────────────────────
 
 func newSnapCmd() *cobra.Command {
@@ -1621,6 +1831,7 @@ config changes, then restore with 'snap restore' if something breaks.`,
   sysfig snap take --label "before nginx tuning"
   sysfig snap take --id nginx_main --id sshd_config`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			result, err := core.SnapTake(core.SnapTakeOptions{
 				BaseDir: baseDir,
 				SysRoot: sysRoot,
@@ -1645,7 +1856,7 @@ config changes, then restore with 'snap restore' if something breaks.`,
 			return nil
 		},
 	}
-	takeCmd.Flags().StringVar(&baseDir, "base-dir", defaultBaseDir(), "sysfig data directory")
+	takeCmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
 	takeCmd.Flags().StringVar(&sysRoot, "sys-root", "", "strip this prefix from system paths")
 	takeCmd.Flags().StringVar(&snapLabel, "label", "", "human-readable description for this snapshot")
 	takeCmd.Flags().StringArrayVar(&snapIDs, "id", nil, "limit snapshot to these file IDs (repeatable)")
@@ -1666,6 +1877,7 @@ Use --all / -a to show every snapshot regardless of path.`,
   sysfig snap list -a        # all snapshots
   sysfig snap list --path /etc/nginx   # specific directory`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			all, err := core.SnapList(baseDir)
 			if err != nil {
 				return err
@@ -1719,7 +1931,7 @@ Use --all / -a to show every snapshot regardless of path.`,
 			return nil
 		},
 	}
-	listCmd.Flags().StringVar(&baseDir, "base-dir", defaultBaseDir(), "sysfig data directory")
+	listCmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
 	listCmd.Flags().StringVar(&listSysRoot, "sys-root", "", "strip this prefix from CWD when matching paths")
 	listCmd.Flags().BoolVarP(&listAll, "all", "a", false, "show all snapshots regardless of current directory")
 
@@ -1736,6 +1948,7 @@ Use --all / -a to show every snapshot regardless of path.`,
   sysfig snap restore 20260318-153042 --dry-run
   sysfig snap restore 20260318-153042 --id nginx_main`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			result, err := core.SnapRestore(core.SnapRestoreOptions{
 				BaseDir: baseDir,
 				SysRoot: sysRoot,
@@ -1770,7 +1983,7 @@ Use --all / -a to show every snapshot regardless of path.`,
 			return nil
 		},
 	}
-	restoreCmd.Flags().StringVar(&baseDir, "base-dir", defaultBaseDir(), "sysfig data directory")
+	restoreCmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
 	restoreCmd.Flags().StringVar(&sysRoot, "sys-root", "", "strip this prefix from system paths")
 	restoreCmd.Flags().StringArrayVar(&restoreIDs, "id", nil, "limit restore to these file IDs (repeatable)")
 	restoreCmd.Flags().BoolVar(&restoreDryRun, "dry-run", false, "show what would be restored without writing")
@@ -1781,6 +1994,7 @@ Use --all / -a to show every snapshot regardless of path.`,
 		Short: "Delete a snapshot",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			if err := core.SnapDrop(baseDir, args[0]); err != nil {
 				return err
 			}
@@ -1788,7 +2002,7 @@ Use --all / -a to show every snapshot regardless of path.`,
 			return nil
 		},
 	}
-	dropCmd.Flags().StringVar(&baseDir, "base-dir", defaultBaseDir(), "sysfig data directory")
+	dropCmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
 
 	// ── snap undo ─────────────────────────────────────────────────────────────
 	var (
@@ -1808,6 +2022,7 @@ Use --all / -a to restore the most recent snapshot globally (all files).`,
   sysfig snap undo --dry-run    # preview without writing
   sysfig snap undo --id nginx_main`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
 			dir := ""
 			if !undoAll {
 				cwd, err := os.Getwd()
@@ -1859,7 +2074,7 @@ Use --all / -a to restore the most recent snapshot globally (all files).`,
 			return nil
 		},
 	}
-	undoCmd.Flags().StringVar(&baseDir, "base-dir", defaultBaseDir(), "sysfig data directory")
+	undoCmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
 	undoCmd.Flags().StringVar(&sysRoot, "sys-root", "", "strip this prefix from system paths")
 	undoCmd.Flags().StringArrayVar(&undoIDs, "id", nil, "limit restore to these file IDs (repeatable)")
 	undoCmd.Flags().BoolVar(&undoDryRun, "dry-run", false, "show what would be restored without writing")

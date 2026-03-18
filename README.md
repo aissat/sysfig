@@ -110,6 +110,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
   - [push](#push-deprecated) _(deprecated)_
   - [pull](#pull-deprecated) _(deprecated)_
   - [log](#log)
+  - [profile](#profile)
   - [keys](#keys)
   - [doctor](#doctor)
   - [snap](#snap)
@@ -903,6 +904,70 @@ sysfig keys generate
 ```
 
 > **Back up your master key immediately.** Loss of the key means permanent loss of all encrypted files. The key lives at `~/.sysfig/keys/master.age-identity` and is **never** committed to git.
+
+---
+
+### `profile`
+
+Manage isolated sets of tracked files. Each profile has its own git repo, state, keys, snapshots, and backups.
+
+```
+sysfig profile <subcommand>
+sysfig --profile <name> <command>
+```
+
+**Why profiles?**
+
+- Keep `work` configs (nginx, sshd) separate from `personal` dotfiles (.gitconfig, .bashrc)
+- Manage different server roles from one machine (`--profile webserver`, `--profile database`)
+- Share a profile with a team via a git remote without exposing personal configs
+
+**The `--profile` flag** is a persistent flag available on every command. It redirects the base directory to `~/.sysfig/profiles/<name>`. You can also set `SYSFIG_PROFILE=<name>` in your shell environment to avoid typing it every time.
+
+```
+~/.sysfig/                     ← default profile (unchanged)
+~/.sysfig/profiles/
+├── work/                      ← sysfig --profile work ...
+└── personal/                  ← sysfig --profile personal ...
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `profile list` / `profile ls` | List all profiles, mark active |
+| `profile create <name>` | Init new isolated profile |
+| `profile delete <name>` | Delete profile (`--force` required) |
+
+**Options for `profile create`:**
+
+| Flag     | Description |
+|----------|-------------|
+| `--from <url>` | Clone from remote git URL instead of creating empty repo |
+
+**Examples:**
+
+```bash
+# Create profiles
+sysfig profile create work
+sysfig profile create personal
+
+# Use a profile for every command
+sysfig --profile work track /etc/nginx/nginx.conf
+sysfig --profile work sync
+sysfig --profile work status
+
+# Or set it in the environment
+export SYSFIG_PROFILE=work
+sysfig track /etc/nginx/nginx.conf
+sysfig sync
+
+# List profiles
+sysfig profile list
+
+# Delete a profile (requires --force to prevent accidents)
+sysfig profile delete personal --force
+```
 
 ---
 
