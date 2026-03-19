@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -154,6 +155,18 @@ func gitUpdateIndex(repoDir, mode, blobHash, relPath string, timeout time.Durati
 		"update-index", "--add", "--cacheinfo",
 		fmt.Sprintf("%s,%s,%s", mode, blobHash, relPath),
 	)
+}
+
+// isNoUpstreamError returns true when a git push failed because the branch
+// has no upstream tracking reference (first push to a new remote).
+// git exits 128 with "has no upstream branch" in the error message.
+func isNoUpstreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "has no upstream branch") ||
+		strings.Contains(msg, "set the remote as upstream")
 }
 
 // gitBareExists returns true if repoDir looks like an initialised bare git

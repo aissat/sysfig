@@ -35,8 +35,10 @@ type ApplyResult struct {
 	Skipped      bool   // true if DryRun
 	DirtySkipped     bool   // true when file is DIRTY and Force==false
 	Encrypted        bool
-	TemplateRendered bool   // true when {{variable}} substitution was performed
-	ChownWarning     string // non-empty if chown failed due to insufficient privilege
+	TemplateRendered bool         // true when {{variable}} substitution was performed
+	ChownWarning     string       // non-empty if chown failed due to insufficient privilege
+	Hooks      []HookResult // results of post-apply hooks
+	HookFailed bool         // true if any hook returned an error
 }
 
 // Apply reads all (or specified) FileRecords from state.json, then for each:
@@ -78,6 +80,11 @@ func Apply(opts ApplyOptions) ([]ApplyResult, error) {
 
 	bm := backup.NewManager(filepath.Join(opts.BaseDir, "backups"))
 
+	hooksCfg, err := LoadHooks(opts.BaseDir)
+	if err != nil {
+		return nil, fmt.Errorf("core: apply: %w", err)
+	}
+
 	var results []ApplyResult
 	var errs []error
 
@@ -86,6 +93,15 @@ func Apply(opts ApplyOptions) ([]ApplyResult, error) {
 		if err != nil {
 			errs = append(errs, err)
 			continue
+		}
+		if !result.Skipped && !result.DirtySkipped {
+			result.Hooks = RunHooksForID(hooksCfg, rec.ID)
+			for _, hr := range result.Hooks {
+				if hr.Err != nil {
+					result.HookFailed = true
+					errs = append(errs, fmt.Errorf("hook %q failed for %q: %w", hr.Name, rec.ID, hr.Err))
+				}
+			}
 		}
 		results = append(results, result)
 	}

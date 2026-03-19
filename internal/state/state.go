@@ -92,7 +92,15 @@ func (m *Manager) WithLock(fn func(s *types.State) error) error {
 		return fmt.Errorf("state: marshal: %w", err)
 	}
 
-	if err := sysfigfs.WriteFileAtomic(m.statePath, data, 0o600); err != nil {
+	// Preserve the existing file's permission bits if it already exists.
+	// This allows a shared base dir (e.g. /opt/sysfig, group=sysfig, 640)
+	// where a non-root operator user can read state without sudo.
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(m.statePath); err == nil {
+		perm = info.Mode().Perm()
+	}
+
+	if err := sysfigfs.WriteFileAtomic(m.statePath, data, perm); err != nil {
 		return fmt.Errorf("state: %w", err)
 	}
 

@@ -8,12 +8,15 @@ import (
 	"filippo.io/age"
 )
 
-// EncryptFile encrypts plaintext using the given age recipient and returns the
-// ciphertext bytes. Uses age's binary streaming encryption (armor=false) for
-// compact output.
-func EncryptFile(plaintext []byte, recipient age.Recipient) ([]byte, error) {
+// EncryptFile encrypts plaintext to one or more age recipients and returns
+// the ciphertext bytes. age's multi-recipient format means any one recipient
+// can independently decrypt the result. Uses binary (non-armored) format.
+func EncryptFile(plaintext []byte, recipients ...age.Recipient) ([]byte, error) {
+	if len(recipients) == 0 {
+		return nil, fmt.Errorf("crypto: cipher: at least one recipient required")
+	}
 	var buf bytes.Buffer
-	w, err := age.Encrypt(&buf, recipient)
+	w, err := age.Encrypt(&buf, recipients...)
 	if err != nil {
 		return nil, fmt.Errorf("crypto: cipher: encrypt init: %w", err)
 	}
@@ -41,14 +44,16 @@ func DecryptFile(ciphertext []byte, identity age.Identity) ([]byte, error) {
 }
 
 // EncryptForFile derives the per-file recipient from master + fileID using
-// HKDF-SHA256, then encrypts plaintext with that recipient.
+// HKDF-SHA256, then encrypts plaintext to that recipient plus any additional
+// node recipients. Any single recipient can independently decrypt the result.
 // The derived key is ephemeral and never stored on disk.
-func EncryptForFile(plaintext []byte, master *age.X25519Identity, fileID string) ([]byte, error) {
-	recipient, err := DeriveRecipient(master, fileID)
+func EncryptForFile(plaintext []byte, master *age.X25519Identity, fileID string, extra ...age.Recipient) ([]byte, error) {
+	derived, err := DeriveRecipient(master, fileID)
 	if err != nil {
 		return nil, fmt.Errorf("crypto: cipher: derive recipient: %w", err)
 	}
-	ciphertext, err := EncryptFile(plaintext, recipient)
+	recipients := append([]age.Recipient{derived}, extra...)
+	ciphertext, err := EncryptFile(plaintext, recipients...)
 	if err != nil {
 		return nil, err
 	}

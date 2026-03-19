@@ -54,9 +54,21 @@ type BackupRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Node represents a remote machine that can receive encrypted files.
+// Each node holds an age X25519 public key; during sync, sysfig encrypts
+// every encrypted file to the local master key AND all registered nodes,
+// so each machine can independently decrypt its own copy.
+type Node struct {
+	Name      string            `json:"name"`
+	PublicKey string            `json:"public_key"` // age X25519 recipient string (age1…)
+	Variables map[string]string `json:"variables,omitempty"`
+	AddedAt   time.Time         `json:"added_at"`
+}
+
 // State is the top-level structure of state.json.
 type State struct {
 	Version int                       `json:"version"`
 	Files   map[string]*FileRecord    `json:"files"`
 	Backups map[string][]BackupRecord `json:"backups"`
+	Nodes   map[string]*Node          `json:"nodes,omitempty"`
 }

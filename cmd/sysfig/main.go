@@ -68,12 +68,25 @@ func step(n int, label string) {
 // Set by newRootCmd() before any subcommand runs.
 var globalProfile string
 
-// sysfigHome returns the base ~/.sysfig directory, honouring SUDO_USER.
+// sysfigHome returns ~/.sysfig for the real user running the process.
+//
+// Uses user.Current() which reads /etc/passwd by UID — immune to a stale
+// $HOME env var (e.g. after `su <user>` without a login shell). Falls back
+// to os.UserHomeDir() if user.Current() fails.
+//
+// When a non-root user runs `sudo sysfig`, the process UID is 0 (root) so
+// this correctly returns /root/.sysfig — system configs land in root's repo.
+// When ali runs `sysfig` (no sudo), UID is ali's → /home/ali/.sysfig.
 func sysfigHome() string {
+	// When running under sudo, use the invoking user's home so that
+	// "sudo sysfig" stores data in ~/.sysfig of the real user, not root.
 	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
-		if u, err := user.Lookup(sudoUser); err == nil {
+		if u, err := user.Lookup(sudoUser); err == nil && u.HomeDir != "" {
 			return filepath.Join(u.HomeDir, ".sysfig")
 		}
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return filepath.Join(u.HomeDir, ".sysfig")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -82,11 +95,44 @@ func sysfigHome() string {
 	return filepath.Join(home, ".sysfig")
 }
 
+// fixSudoOwnership re-chowns baseDir to the invoking user when running under
+// sudo, so that files written by root land with the correct owner.
+func fixSudoOwnership(baseDir string) {
+	sudoUser := os.Getenv("SUDO_USER")
+	if sudoUser == "" {
+		return
+	}
+	u, err := user.Lookup(sudoUser)
+	if err != nil {
+		return
+	}
+	_ = filepath.WalkDir(baseDir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		uid := toInt(u.Uid)
+		gid := toInt(u.Gid)
+		_ = os.Lchown(path, uid, gid)
+		return nil
+	})
+}
+
+func toInt(s string) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
 // profilesDir returns ~/.sysfig/profiles.
 func profilesDir() string { return filepath.Join(sysfigHome(), "profiles") }
 
 // defaultBaseDir returns the active base directory.
-// Priority: --profile flag > SYSFIG_PROFILE env var > default ~/.sysfig
+// Priority: --profile flag > SYSFIG_PROFILE env var > SYSFIG_BASE_DIR env var > ~/.sysfig
 func defaultBaseDir() string {
 	profile := globalProfile
 	if profile == "" {
@@ -94,6 +140,9 @@ func defaultBaseDir() string {
 	}
 	if profile != "" {
 		return filepath.Join(profilesDir(), profile)
+	}
+	if dir := os.Getenv("SYSFIG_BASE_DIR"); dir != "" {
+		return dir
 	}
 	return sysfigHome()
 }
@@ -106,6 +155,17 @@ func resolveBaseDir(baseDir string) string {
 		return baseDir
 	}
 	return defaultBaseDir()
+}
+
+// resolveSysRoot returns sysRoot if non-empty, then SYSFIG_SYS_ROOT env var,
+// then "" (meaning real system root — no prefix stripping).
+// This allows labs and CI to export SYSFIG_SYS_ROOT=/sysroot once instead of
+// passing --sys-root on every command.
+func resolveSysRoot(sysRoot string) string {
+	if sysRoot != "" {
+		return sysRoot
+	}
+	return os.Getenv("SYSFIG_SYS_ROOT")
 }
 
 // isatty returns true if stdout is connected to a terminal.
@@ -146,6 +206,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newApplyCmd(),
 		newStatusCmd(),
 		newDiffCmd(),
+		newRemoteCmd(),
 		newSyncCmd(),
 		newPushCmd(),
 		newPullCmd(),
@@ -154,6 +215,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newSnapCmd(),
 		newWatchCmd(),
 		newProfileCmd(),
+		newNodeCmd(),
 	)
 
 	// Hidden alias kept for backward-compat.
@@ -300,7 +362,7 @@ No sysfig installation is required on the remote host.`,
 				SkipEncrypted: skipEncrypted,
 				NoPull:        noPull,
 				Yes:           yes,
-				SysRoot:       sysRoot,
+				SysRoot:       resolveSysRoot(sysRoot),
 			})
 			if err != nil {
 				return err
@@ -580,6 +642,14 @@ func newTrackCmd() *cobra.Command {
 			targetPath := args[0]
 			repoDir := filepath.Join(baseDir, "repo.git")
 
+			// Auto-init if the repo doesn't exist yet.
+			if _, err := os.Stat(repoDir); os.IsNotExist(err) {
+				if _, err := core.Init(core.InitOptions{BaseDir: baseDir}); err != nil {
+					return fmt.Errorf("auto-init: %w", err)
+				}
+				fixSudoOwnership(baseDir)
+			}
+
 			if recursive {
 				summary, err := core.TrackDir(core.TrackDirOptions{
 					DirPath:  targetPath,
@@ -588,7 +658,7 @@ func newTrackCmd() *cobra.Command {
 					Tags:     tags,
 					Encrypt:  encrypt,
 					Template: template,
-					SysRoot:  sysRoot,
+					SysRoot:  resolveSysRoot(sysRoot),
 					Excludes: excludes,
 				})
 				if err != nil {
@@ -641,11 +711,12 @@ func newTrackCmd() *cobra.Command {
 				Tags:       tags,
 				Encrypt:    encrypt,
 				Template:   template,
-				SysRoot:    sysRoot,
+				SysRoot:    resolveSysRoot(sysRoot),
 			})
 			if err != nil {
 				return err
 			}
+			fixSudoOwnership(baseDir)
 
 			clrBold.Printf("Tracking %s\n", targetPath)
 			fmt.Println()
@@ -715,6 +786,7 @@ func newKeysCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			fixSudoOwnership(baseDir)
 			clrBold.Println("Generated new master key")
 			fmt.Println()
 			ok("Path:       %s", clrDim.Sprint(crypto.MasterKeyPath(keysDir)))
@@ -746,16 +818,17 @@ func newApplyCmd() *cobra.Command {
 		Short: "Deploy tracked configs from the repo to the system",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
+			defer fixSudoOwnership(baseDir)
 			results, err := core.Apply(core.ApplyOptions{
 				BaseDir:  baseDir,
 				IDs:      ids,
 				DryRun:   dryRun,
 				NoBackup: noBackup,
 				Force:    force,
-				SysRoot:  sysRoot,
+				SysRoot:  resolveSysRoot(sysRoot),
 			})
 
-			applied, skipped, dirty := 0, 0, 0
+			applied, skipped, dirty, hookFailed := 0, 0, 0, 0
 			for _, r := range results {
 				if r.Skipped {
 					fmt.Printf("  %s %s %s\n", clrDim.Sprint("[dry-run]"), clrInfo.Sprint(r.ID), clrDim.Sprint("→ "+r.SystemPath))
@@ -769,7 +842,11 @@ func newApplyCmd() *cobra.Command {
 					dirty++
 					continue
 				}
-				ok("Applied: %s", clrBold.Sprint(r.ID))
+				if r.HookFailed {
+					fail("Applied (hook failed): %s", clrBold.Sprint(r.ID))
+				} else {
+					ok("Applied: %s", clrBold.Sprint(r.ID))
+				}
 				fmt.Printf("     %s %s\n", clrDim.Sprint("→"), r.SystemPath)
 				if r.BackupPath != "" {
 					fmt.Printf("     %s %s\n", clrDim.Sprint("backup:"), clrDim.Sprint(r.BackupPath))
@@ -783,7 +860,24 @@ func newApplyCmd() *cobra.Command {
 				if r.ChownWarning != "" {
 					warn("%s", r.ChownWarning)
 				}
-				applied++
+				for _, hr := range r.Hooks {
+					if hr.Err != nil {
+						fmt.Printf("     %s %s: %s\n", clrErr.Sprint("hook failed:"), clrBold.Sprint(hr.Name), clrErr.Sprint(hr.Err))
+						if hr.Output != "" {
+							fmt.Printf("     %s\n", clrDim.Sprint(hr.Output))
+						}
+					} else {
+						fmt.Printf("     %s %s\n", clrOK.Sprint("hook ok:"), clrDim.Sprint(hr.Name))
+						if hr.Output != "" {
+							fmt.Printf("     %s\n", clrDim.Sprint(hr.Output))
+						}
+					}
+				}
+				if r.HookFailed {
+					hookFailed++
+				} else {
+					applied++
+				}
 			}
 
 			if err != nil {
@@ -803,7 +897,13 @@ func newApplyCmd() *cobra.Command {
 			if dirty > 0 {
 				parts = append(parts, clrWarn.Sprintf("Skipped (dirty): %d", dirty))
 			}
+			if hookFailed > 0 {
+				parts = append(parts, clrErr.Sprintf("Hook failed: %d", hookFailed))
+			}
 			fmt.Printf("  %s\n", strings.Join(parts, "  ·  "))
+			if hookFailed > 0 {
+				os.Exit(1)
+			}
 			return nil
 		},
 	}
@@ -1026,7 +1126,7 @@ func newDiffCmd() *cobra.Command {
 			results, err := core.Diff(core.DiffOptions{
 				BaseDir: baseDir,
 				IDs:     ids,
-				SysRoot: sysRoot,
+				SysRoot: resolveSysRoot(sysRoot),
 			})
 			if err != nil {
 				os.Exit(2)
@@ -1133,6 +1233,73 @@ func colorize(diff string) string {
 	return out.String()
 }
 
+// ── remote ────────────────────────────────────────────────────────────────────
+
+func newRemoteCmd() *cobra.Command {
+	var baseDir string
+
+	cmd := &cobra.Command{
+		Use:   "remote",
+		Short: "Manage the git remote for the sysfig repo",
+	}
+	cmd.PersistentFlags().StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
+
+	runGit := func(baseDir string, args ...string) error {
+		repoDir := filepath.Join(baseDir, "repo.git")
+		gitArgs := append([]string{"--git-dir=" + repoDir}, args...)
+		c := exec.Command("git", gitArgs...)
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		return c.Run()
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "set <url>",
+		Short: "Set (or replace) the origin remote URL",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			url := args[0]
+			// Check if origin exists; add or update accordingly.
+			repoDir := filepath.Join(baseDir, "repo.git")
+			checkCmd := exec.Command("git", "--git-dir="+repoDir, "remote", "get-url", "origin")
+			if checkCmd.Run() == nil {
+				if err := runGit(baseDir, "remote", "set-url", "origin", url); err != nil {
+					return err
+				}
+			} else {
+				if err := runGit(baseDir, "remote", "add", "origin", url); err != nil {
+					return err
+				}
+			}
+			ok("Remote origin set to %s", clrInfo.Sprint(url))
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Show the current remote URL",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			return runGit(baseDir, "remote", "-v")
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "remove",
+		Short: "Remove the origin remote",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			return runGit(baseDir, "remote", "remove", "origin")
+		},
+	})
+
+	return cmd
+}
+
 // ── sync ──────────────────────────────────────────────────────────────────────
 
 func newSyncCmd() *cobra.Command {
@@ -1141,6 +1308,7 @@ func newSyncCmd() *cobra.Command {
 		message string
 		push    bool
 		pull    bool
+		force   bool
 		sysRoot string
 	)
 
@@ -1165,11 +1333,13 @@ This replaces the standalone 'push' and 'pull' commands.`,
 				Message: message,
 				Pull:    pull,
 				Push:    push,
-				SysRoot: sysRoot,
+				Force:   force,
+				SysRoot: resolveSysRoot(sysRoot),
 			})
 			if err != nil {
 				return err
 			}
+			fixSudoOwnership(baseDir)
 
 			// Pull status.
 			if pull {
@@ -1203,6 +1373,7 @@ This replaces the standalone 'push' and 'pull' commands.`,
 	f.StringVar(&message, "message", "", "commit message (default: sysfig: sync <timestamp>)")
 	f.BoolVar(&pull, "pull", false, "pull from remote before committing (requires network)")
 	f.BoolVar(&push, "push", false, "push to remote after committing (requires network)")
+	f.BoolVar(&force, "force", false, "force push (use for first push to a non-empty remote)")
 	f.StringVar(&sysRoot, "sys-root", "", "prefix all system paths (sandbox/testing override)")
 	return cmd
 }
@@ -1429,7 +1600,7 @@ func watchRun(baseDir, sysRoot string, debounce time.Duration, dryRun bool) erro
 
 	return core.Watch(core.WatchOptions{
 		BaseDir:  baseDir,
-		SysRoot:  sysRoot,
+		SysRoot:  resolveSysRoot(sysRoot),
 		Debounce: debounce,
 		DryRun:   dryRun,
 		OnEvent:  onEvent,
@@ -1834,7 +2005,7 @@ config changes, then restore with 'snap restore' if something breaks.`,
 			baseDir = resolveBaseDir(baseDir)
 			result, err := core.SnapTake(core.SnapTakeOptions{
 				BaseDir: baseDir,
-				SysRoot: sysRoot,
+				SysRoot: resolveSysRoot(sysRoot),
 				Label:   snapLabel,
 				IDs:     snapIDs,
 			})
@@ -1951,7 +2122,7 @@ Use --all / -a to show every snapshot regardless of path.`,
 			baseDir = resolveBaseDir(baseDir)
 			result, err := core.SnapRestore(core.SnapRestoreOptions{
 				BaseDir: baseDir,
-				SysRoot: sysRoot,
+				SysRoot: resolveSysRoot(sysRoot),
 				SnapID:  args[0],
 				IDs:     restoreIDs,
 				DryRun:  restoreDryRun,
@@ -2037,7 +2208,7 @@ Use --all / -a to restore the most recent snapshot globally (all files).`,
 			}
 			result, snapID, err := core.SnapUndo(core.SnapUndoOptions{
 				BaseDir: baseDir,
-				SysRoot: sysRoot,
+				SysRoot: resolveSysRoot(sysRoot),
 				Dir:     dir,
 				IDs:     undoIDs,
 				DryRun:  undoDryRun,
@@ -2082,4 +2253,112 @@ Use --all / -a to restore the most recent snapshot globally (all files).`,
 
 	snap.AddCommand(takeCmd, listCmd, restoreCmd, dropCmd, undoCmd)
 	return snap
+}
+
+// ── node ─────────────────────────────────────────────────────────────────────
+
+func newNodeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "node <subcommand>",
+		Short: "Manage remote nodes (multi-recipient encryption)",
+		Long: `Nodes represent remote machines that should be able to decrypt
+encrypted config files. Each node is identified by a name and an age X25519
+public key. When you run 'sysfig sync', every encrypted file is re-encrypted
+to your local master key AND all registered node public keys — so each machine
+can decrypt its own copy independently.
+
+Examples:
+  sysfig node add laptop age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+  sysfig node list
+  sysfig node remove laptop`,
+	}
+	cmd.AddCommand(newNodeAddCmd(), newNodeListCmd(), newNodeRemoveCmd())
+	return cmd
+}
+
+func newNodeAddCmd() *cobra.Command {
+	var baseDir string
+	cmd := &cobra.Command{
+		Use:   "add <name> <age-public-key>",
+		Short: "Register a remote node by name and age public key",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			fixSudoOwnership(baseDir)
+			name, pubkey := args[0], args[1]
+			result, err := core.NodeAdd(core.NodeAddOptions{
+				BaseDir:   baseDir,
+				Name:      name,
+				PublicKey: pubkey,
+			})
+			if err != nil {
+				return err
+			}
+			ok("Node %q registered", result.Node.Name)
+			info("Public key: %s", clrDim.Sprint(result.Node.PublicKey))
+			info("Re-run 'sysfig sync' to re-encrypt tracked files for this node.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	return cmd
+}
+
+func newNodeListCmd() *cobra.Command {
+	var baseDir string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List registered nodes",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			fixSudoOwnership(baseDir)
+			nodes, err := core.NodeList(core.NodeListOptions{BaseDir: baseDir})
+			if err != nil {
+				return err
+			}
+			if len(nodes) == 0 {
+				info("No nodes registered. Use 'sysfig node add <name> <age-pubkey>'.")
+				return nil
+			}
+			divider()
+			fmt.Printf("  %-20s  %-54s  %s\n",
+				clrBold.Sprint("NAME"), clrBold.Sprint("PUBLIC KEY"), clrBold.Sprint("ADDED"))
+			divider()
+			for _, n := range nodes {
+				fmt.Printf("  %-20s  %-54s  %s\n",
+					n.Name,
+					clrDim.Sprint(n.PublicKey),
+					n.AddedAt.Format("2006-01-02"))
+			}
+			divider()
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	return cmd
+}
+
+func newNodeRemoveCmd() *cobra.Command {
+	var baseDir string
+	cmd := &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Unregister a node",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			fixSudoOwnership(baseDir)
+			if err := core.NodeRemove(core.NodeRemoveOptions{
+				BaseDir: baseDir,
+				Name:    args[0],
+			}); err != nil {
+				return err
+			}
+			ok("Node %q removed", args[0])
+			info("Re-run 'sysfig sync' to re-encrypt tracked files without this node.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	return cmd
 }

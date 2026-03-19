@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/sysfig-dev/sysfig/internal/crypto"
 	sysfigfs "github.com/sysfig-dev/sysfig/internal/fs"
 	"github.com/sysfig-dev/sysfig/internal/hash"
@@ -161,6 +163,10 @@ type SyncOptions struct {
 	// When false (default), changes are committed locally only — safe offline.
 	Push bool
 
+	// Force, when true, passes --force to git push.
+	// Use for first-push to a non-empty remote (e.g. a fresh GitHub repo).
+	Force bool
+
 	// SysRoot, when non-empty, is prepended to every system path when
 	// re-hashing files after a commit. This mirrors the --sys-root sandbox
 	// override used by `sysfig status` and `sysfig apply`.
@@ -169,13 +175,14 @@ type SyncOptions struct {
 
 // SyncResult reports what happened during a sync.
 type SyncResult struct {
-	RepoDir      string
-	Pulled       bool     // true if pull ran and succeeded
-	PullErr      error    // non-nil if pull was attempted but failed (non-fatal)
-	Committed    bool     // true if a commit was created (i.e. there were staged changes)
-	Pushed       bool     // true if push was attempted and succeeded
-	Message      string
-	UpdatedFiles []string // IDs of files whose state hash was refreshed
+	RepoDir         string
+	Pulled          bool     // true if pull ran and succeeded
+	PullErr         error    // non-nil if pull was attempted but failed (non-fatal)
+	Committed       bool     // true if a commit was created (i.e. there were staged changes)
+	Pushed          bool     // true if push was attempted and succeeded
+	Message         string
+	UpdatedFiles    []string // IDs of files whose state hash was refreshed
+	NodeWarnings    []string // non-fatal warnings from invalid node public keys
 }
 
 // Sync stages all tracked files into the bare repo and creates a git commit.
@@ -223,6 +230,10 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		return nil, fmt.Errorf("core: sync: load state: %w", err)
 	}
 
+	// Resolve node recipients once — used for every encrypted file.
+	nodeRecipients, nodeWarnings := NodeRecipients(currentState.Nodes)
+	result.NodeWarnings = nodeWarnings
+
 	// Stage each tracked file individually into the bare repo.
 	// We never do `git add -A` against the bare repo — that would try to walk
 	// the entire filesystem through GIT_WORK_TREE=/ which is not what we want.
@@ -249,7 +260,8 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			if err != nil {
 				return nil, fmt.Errorf("core: sync: encrypt %q: master key not found: %w", id, err)
 			}
-			encrypted, err := crypto.EncryptForFile(plaintext, master, id)
+			// Encrypt to local master key + all registered node public keys.
+			encrypted, err := crypto.EncryptForFile(plaintext, master, id, nodeRecipients...)
 			if err != nil {
 				return nil, fmt.Errorf("core: sync: encrypt %q: %w", id, err)
 			}
@@ -276,6 +288,19 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 				if err := syncStageBlob(repoDir, relPath, data); err != nil {
 					return nil, err
 				}
+			}
+		}
+	}
+
+	// Auto-update sysfig.yaml manifest so that `sysfig setup` on a new host
+	// picks up all currently tracked files without a manual manifest edit.
+	// Only stage when there are tracked files AND the content differs from
+	// what is already committed — avoids spurious commits.
+	if len(currentState.Files) > 0 {
+		if manifestData, err := buildManifest(currentState); err == nil {
+			existing, _ := gitShowBytes(repoDir, "sysfig.yaml")
+			if !bytes.Equal(existing, manifestData) {
+				_ = syncStageBlob(repoDir, "sysfig.yaml", manifestData)
 			}
 		}
 	}
@@ -358,9 +383,20 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 
 	// Push only when explicitly requested — never automatic.
 	if opts.Push {
-		// For bare repos, push works fine with just GIT_DIR set.
-		if err := syncGitBareRun(repoDir, 60*time.Second, nil, "push"); err != nil {
-			return nil, fmt.Errorf("core: sync: push: %w", err)
+		// Resolve branch name for --set-upstream.
+		branchBytes, _ := gitBareOutput(repoDir, 5*time.Second, nil,
+			"symbolic-ref", "--short", "HEAD")
+		branch := strings.TrimSpace(string(branchBytes))
+		if branch == "" {
+			branch = "main"
+		}
+
+		pushArgs := []string{"push", "--set-upstream", "origin", branch}
+		if opts.Force {
+			pushArgs = append(pushArgs, "--force")
+		}
+		if pushErr := syncGitBareRun(repoDir, 60*time.Second, nil, pushArgs...); pushErr != nil {
+			return nil, fmt.Errorf("core: sync: push: %w", pushErr)
 		}
 		result.Pushed = true
 	}
@@ -506,5 +542,43 @@ func isNothingToCommit(repoDir string) bool {
 		return false // exit 1 → staged changes present
 	}
 	return false // unexpected error → assume not clean
+}
+
+// buildManifest generates sysfig.yaml bytes from current state so that
+// `sysfig setup` on a new host can seed state.json automatically.
+// Staged into the bare repo as part of every sync commit.
+func buildManifest(s *types.State) ([]byte, error) {
+	type entry struct {
+		ID         string   `yaml:"id"`
+		SystemPath string   `yaml:"system_path"`
+		RepoPath   string   `yaml:"repo_path"`
+		Encrypt    bool     `yaml:"encrypt,omitempty"`
+		Template   bool     `yaml:"template,omitempty"`
+		Tags       []string `yaml:"tags,omitempty"`
+	}
+	type manifest struct {
+		Version      int     `yaml:"version"`
+		TrackedFiles []entry `yaml:"tracked_files"`
+	}
+
+	entries := make([]entry, 0, len(s.Files))
+	for _, rec := range s.Files {
+		entries = append(entries, entry{
+			ID:         rec.ID,
+			SystemPath: rec.SystemPath,
+			RepoPath:   rec.RepoPath,
+			Encrypt:    rec.Encrypt,
+			Template:   rec.Template,
+			Tags:       rec.Tags,
+		})
+	}
+	// Insertion sort for deterministic output.
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && entries[j].ID < entries[j-1].ID; j-- {
+			entries[j], entries[j-1] = entries[j-1], entries[j]
+		}
+	}
+	m := manifest{Version: 1, TrackedFiles: entries}
+	return yaml.Marshal(m)
 }
 

@@ -76,15 +76,45 @@ tracked_files: []
 
 const hooksExampleContent = `# sysfig hooks configuration example
 # Copy this file to ~/.sysfig/hooks.yaml and customize it.
-# Only predefined hook types are permitted (no arbitrary shell commands).
+# hooks.yaml is local-only — it is never committed to the repo.
 #
-# Supported hook types:
-#   - validate_nginx   : runs nginx -t
-#   - validate_sshd    : runs sshd -t
-#   - systemd_reload   : reloads a systemd unit
-#   - systemd_restart  : restarts a systemd unit
+# Each hook has:
+#   on:      list of tracked file IDs that trigger this hook (use sysfig status to see IDs)
+#   type:    exec | systemd_reload | systemd_restart
+#   cmd:     [binary, arg, ...] for exec hooks — binary must be in the allowlist
+#   service: unit name for systemd_reload / systemd_restart
+#
+# Hooks run after sysfig apply writes the file to disk.
+# To add a new binary to the exec allowlist edit execAllowlist in internal/core/hooks.go.
 
-hooks: {}
+# allowlist: binaries permitted in exec hooks — add any tool you need here.
+# allowlist: [nginx, sshd, apachectl, haproxy, postfix]
+
+hooks:
+  # nginx_validate:
+  #   on: [etc_nginx_nginx_conf]
+  #   type: exec
+  #   cmd: [nginx, -t]
+  #
+  # nginx_reload:
+  #   on: [etc_nginx_nginx_conf]
+  #   type: systemd_reload
+  #   service: nginx
+  #
+  # sshd_validate:
+  #   on: [etc_ssh_sshd_config]
+  #   type: exec
+  #   cmd: [sshd, -t]
+  #
+  # apache_validate:
+  #   on: [etc_apache2_apache2_conf]
+  #   type: exec
+  #   cmd: [apachectl, -t]
+  #
+  # haproxy_reload:
+  #   on: [etc_haproxy_haproxy_cfg]
+  #   type: systemd_reload
+  #   service: haproxy
 `
 
 // isBareRepoInitialised returns true when repoDir already contains a bare git
