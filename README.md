@@ -94,7 +94,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
 - [Installation](#installation)
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
-  - [First machine — init and track](#first-machine--init-and-track)
+  - [First machine — track and push](#first-machine--track-and-push)
   - [New machine — setup and apply](#new-machine--setup-and-apply)
   - [Daily workflow](#daily-workflow)
 - [Command Reference](#command-reference)
@@ -114,6 +114,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
   - [keys](#keys)
   - [doctor](#doctor)
   - [snap](#snap)
+  - [node](#node)
 - [Configuration File: sysfig.yaml](#configuration-file-sysfigyaml)
 - [state.json vs sysfig.yaml](#statejson-vs-sysfigyaml)
 - [Encryption](#encryption)
@@ -208,23 +209,28 @@ When you run `sysfig setup` on a new machine, sysfig reads `sysfig.yaml` from th
 
 ## Quick Start
 
-### First machine — init and track
+### First machine — track and push
 
 ```bash
-# 1. Initialise sysfig (creates ~/.sysfig/ with a bare git repo)
-sysfig init
-
-# 2. Start tracking config files
-sysfig track /etc/nginx/nginx.conf
+# Track dotfiles (no sudo) — ~/.sysfig is created automatically on first track
 sysfig track ~/.bashrc
-sysfig track /etc/ssh/sshd_config
+sysfig track ~/.vimrc
 
-# 3. Commit everything to the local repo
+# Track system configs (sudo reads the file, repo stays in your ~/.sysfig)
+sudo sysfig track /etc/nginx/nginx.conf
+sudo sysfig track /etc/ssh/sshd_config
+
+# Track secrets (encrypted with age)
+sysfig keys generate
+sysfig track --encrypt ~/.config/tokens.env
+sudo sysfig track --encrypt /etc/app/secret.env
+
+# Commit everything to the local repo
 sysfig sync --message "initial commit"
 
-# 4. Add a remote and push
-git --git-dir ~/.sysfig/repo.git remote add origin git@github.com:you/myconfigs.git
-sysfig push
+# Set remote and push (--force for first push to a non-empty remote)
+sysfig remote set git@github.com:you/myconfigs.git
+sysfig sync --push --force
 ```
 
 ### New machine — deploy (one command)
@@ -444,6 +450,8 @@ sysfig init [options]
 
 Creates `~/.sysfig/` with a bare git repo, empty state, a `sysfig.yaml` template, and optionally generates a master encryption key. Idempotent — safe to run twice.
 
+> **`init` is optional.** `sysfig track` auto-initialises `~/.sysfig` on the first run if it does not already exist. You only need `init` explicitly if you want to generate an encryption key before tracking any files, or to customise the base dir.
+
 **Options:**
 
 | Flag         | Default     | Description                                    |
@@ -476,6 +484,10 @@ sysfig track --recursive <dir> [options]
 ```
 
 Copies the file into the bare git repo's index (staged, not yet committed), records its BLAKE3 hash and `uid`/`gid`/`mode` metadata in `state.json`, and updates `sysfig.yaml`.
+
+**`~/.sysfig` is created automatically** on the first `track` — no explicit `sysfig init` needed.
+
+**`sudo sysfig track /etc/...`** — runs as root to read privileged files, but the repo and state live in the **invoking user's** `~/.sysfig` (resolved via `SUDO_USER`). No second repo, no flags needed. After every sudo write, sysfig re-chowns `~/.sysfig` back to the invoking user, so subsequent non-sudo commands (`sysfig node add`, `sysfig status`, etc.) work without permission errors.
 
 **Run `sysfig sync` after tracking to create a commit.**
 
@@ -755,6 +767,33 @@ sysfig sync --pull --push      # full round-trip: pull → commit → push
 ```
 
 > **Note:** `--pull` is non-fatal. If the remote is unreachable, sysfig prints a warning and continues with the local commit.
+
+---
+
+### `remote`
+
+Manage the git remote for the sysfig repo without touching raw git commands.
+
+```
+sysfig remote <subcommand> [options]
+```
+
+| Subcommand | Description |
+|---|---|
+| `set <url>` | Set (or replace) the origin remote URL |
+| `show` | Print the current remote URL |
+| `remove` | Remove the origin remote |
+
+```bash
+# Set remote (idempotent — works whether origin exists or not)
+sysfig remote set git@github.com:you/conf.git
+
+# Show current remote
+sysfig remote show
+
+# First push to a non-empty remote (e.g. GitHub repo with a README)
+sysfig sync --push --force
+```
 
 ---
 
@@ -1175,6 +1214,47 @@ The first column is the **short hash** — use it directly in `snap restore`, `s
 
 ---
 
+### `node`
+
+Register remote machines so that encrypted files can be decrypted on each machine using its own key — without sharing the primary master key.
+
+```
+sysfig node add    <name> <age-public-key>
+sysfig node list
+sysfig node remove <name>
+```
+
+Each node stores an [age](https://age-encryption.org/) public key. During `sysfig sync`, every encrypted file is re-encrypted to the local master key **plus** all registered node public keys (age multi-recipient). Any single key is sufficient for decryption.
+
+**Typical two-machine workflow:**
+
+```bash
+# On the remote machine: get its public key
+age-keygen -o ~/.sysfig/keys/master.age-identity
+# (note the "Public key: age1..." line printed to stdout)
+
+# On the primary machine: register the remote node
+sysfig node add server age1qwerty...serverkey
+
+# Sync — encrypted files now have two recipients
+sysfig sync
+
+# On the remote machine: apply normally — decrypts with its own key
+sysfig apply
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+| ---------- | ----------- |
+| `node add <name> <pubkey>` | Register a node's age public key |
+| `node list` | List all registered nodes |
+| `node remove <name>` | Remove a node (takes effect on next `sync`) |
+
+> After removing a node, run `sysfig sync` to re-encrypt files to the remaining recipients only.
+
+---
+
 ## Configuration File: sysfig.yaml
 
 `sysfig.yaml` lives at the root of your config repo and is committed to git. It is the shared manifest that tells `sysfig setup` what to seed on a new machine.
@@ -1261,6 +1341,10 @@ sysfig sync
 3. The encrypted content is stored in the bare repo. The master key is **never** committed.
 4. `sysfig apply` decrypts automatically when the master key is present.
 
+**Multi-recipient (multi-node) encryption:**
+
+If you have registered nodes via `sysfig node add`, encrypted files are re-encrypted during `sysfig sync` to **all** registered public keys plus the local master key. Each machine can decrypt using only its own key. See [`node`](#node) for details.
+
 **Moving to a new machine:**
 
 ```bash
@@ -1299,33 +1383,47 @@ This catches common accidental permission changes (e.g., an editor that recreate
 
 ## Hooks
 
-Hooks run typed actions after `apply` completes — for example, reloading nginx after its config changes. They are **machine-local and never committed to git**.
-
-`hooks.yaml` is written from `hooks.yaml.example` in your config repo when you run `sysfig setup`. Edit it on each machine to match the local environment.
+Hooks run after `sysfig apply` writes a file to disk — validate the config, reload the service, or any other safe action. They live in `~/.sysfig/hooks.yaml`, which is **local-only and never committed to git**.
 
 **Format:**
 
 ```yaml
+# Binaries permitted in exec hooks — add any tool you need, no code changes required
+allowlist: [nginx, sshd, apachectl, haproxy, postfix]
+
 hooks:
-  - on: apply
-    id: nginx_main
-    action: reload
+  nginx_validate:
+    on: [etc_nginx_nginx_conf]   # file ID from 'sysfig status'
+    type: exec
+    cmd: [nginx, -t]             # runs: nginx -t
+
+  nginx_reload:
+    on: [etc_nginx_nginx_conf]
+    type: systemd_reload
     service: nginx
 
-  - on: apply
-    id: sshd_config
-    action: restart
-    service: sshd
+  sshd_validate:
+    on: [etc_ssh_sshd_config]
+    type: exec
+    cmd: [sshd, -t]
+
+  haproxy_reload:
+    on: [etc_haproxy_haproxy_cfg]
+    type: systemd_reload
+    service: haproxy
 ```
 
-**Supported `action` values:**
+**Supported types:**
 
-| Action    | Effect                             |
-| --------- | ---------------------------------- |
-| `reload`  | `systemctl reload <service>`       |
-| `restart` | `systemctl restart <service>`      |
+| Type | Effect |
+| --- | --- |
+| `exec` | Runs `cmd: [binary, args...]` — binary must appear in `allowlist` |
+| `systemd_reload` | `systemctl reload <service>` |
+| `systemd_restart` | `systemctl restart <service>` |
 
-No arbitrary shell commands are permitted. The hook system is intentionally limited to prevent `hooks.yaml` from becoming an attack surface.
+**Hook failures propagate as errors:** if a hook fails, `sysfig apply` prints `✗ Applied (hook failed)`, includes `Hook failed: N` in the summary, and exits with code 1.
+
+Adding a new service requires only editing `hooks.yaml` — no code changes.
 
 ---
 
