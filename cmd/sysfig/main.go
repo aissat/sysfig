@@ -18,6 +18,7 @@ import (
 	"golang.org/x/term"
 	"github.com/aissat/sysfig/internal/core"
 	"github.com/aissat/sysfig/internal/crypto"
+	"github.com/aissat/sysfig/internal/state"
 )
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -230,6 +231,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newPushCmd(),
 		newPullCmd(),
 		newLogCmd(),
+		newRollbackCmd(),
 		newDoctorCmd(),
 		newSnapCmd(),
 		newWatchCmd(),
@@ -2088,7 +2090,9 @@ This replaces the standalone 'push' and 'pull' commands.`,
 				info("Nothing to commit — shadow repo is clean.")
 				return nil
 			}
-			ok("Committed: %s", clrBold.Sprint(result.Message))
+			for _, f := range result.CommittedFiles {
+				ok("Committed: %s", clrBold.Sprint(f))
+			}
 			ok("Repo:      %s", clrDim.Sprint(result.RepoDir))
 			if result.Pushed {
 				ok("Pushed to remote.")
@@ -2166,37 +2170,133 @@ func newPullCmd() *cobra.Command {
 
 func newLogCmd() *cobra.Command {
 	var (
-		baseDir string
-		file    string
-		n       int
+		baseDir  string
+		filePath string
+		id       string
+		n        int
 	)
 
 	cmd := &cobra.Command{
-		Use:   "log",
-		Short: "Show commit history as a tree",
+		Use:   "log [system-path]",
+		Short: "Show commit history with changed paths",
+		Long: `Show git commit history. Each commit is expanded to one line per top-level
+directory that changed, so you can see at a glance what was touched.
+
+Filter to a specific path or ID:
+  sysfig log /etc/pacman.d
+  sysfig log --id 7734be1e`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
 			repoDir := filepath.Join(baseDir, "repo.git")
-			gitArgs := []string{
-				"--git-dir=" + repoDir,
-				"log", "--graph",
-				"--pretty=format:%C(yellow)%h%Creset %C(cyan)%ad%Creset %s%C(green)%d%Creset",
-				"--date=short",
-				"--all",
+
+			// Resolve positional system path or --id to a repo-relative filter path.
+			var filterPath string // if set, only show commits touching this path
+			if len(args) == 1 {
+				sysArg := strings.TrimSuffix(args[0], "/")
+				// Convert absolute system path to repo-relative path by stripping
+				// the leading "/". Works for both files and directories deterministically.
+				filterPath = strings.TrimPrefix(sysArg, "/")
 			}
-			if n > 0 {
-				gitArgs = append(gitArgs, fmt.Sprintf("-n%d", n))
+			if id != "" && filterPath == "" {
+				sm := state.NewManager(filepath.Join(baseDir, "state.json"))
+				s, err := sm.Load()
+				if err == nil {
+					for _, rec := range s.Files {
+						if core.DeriveID(rec.SystemPath) == id {
+							filterPath = rec.RepoPath
+							break
+						}
+					}
+				}
+				if filterPath == "" {
+					return fmt.Errorf("no tracked file found for id %q", id)
+				}
 			}
-			if file != "" {
-				gitArgs = append(gitArgs, "--", file)
+			if filePath != "" {
+				filterPath = filePath
 			}
 
-			c := exec.Command("git", gitArgs...)
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
-			c.Env = os.Environ()
-			if err := c.Run(); err != nil {
+			// Step 1: get list of commits (hash, date, subject, decoration).
+			listArgs := []string{
+				"--no-pager", "--git-dir=" + repoDir,
+				"log", "--pretty=format:%h\t%ad\t%s\t%D",
+				"--date=short", "--all",
+			}
+			if n > 0 {
+				listArgs = append(listArgs, fmt.Sprintf("-n%d", n))
+			}
+			if filterPath != "" {
+				listArgs = append(listArgs, "--follow", "--", filterPath)
+			}
+			out, err := exec.Command("git", listArgs...).Output()
+			if err != nil {
 				os.Exit(1)
+			}
+
+			// ANSI helpers (no fatih/color — keep it inline).
+			const (
+				yellow  = "\033[33m"
+				cyan    = "\033[36m"
+				magenta = "\033[35m"
+				green   = "\033[32m"
+				reset   = "\033[0m"
+				dim     = "\033[2m"
+			)
+
+			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+			for _, line := range lines {
+				if line == "" {
+					continue
+				}
+				parts := strings.SplitN(line, "\t", 4)
+				if len(parts) < 3 {
+					continue
+				}
+				hash, date, subject := parts[0], parts[1], parts[2]
+				decoration := ""
+				if len(parts) == 4 && parts[3] != "" {
+					decoration = " " + green + "(" + parts[3] + ")" + reset
+				}
+
+				// Step 2: get files changed in this commit.
+				dtOut, _ := exec.Command("git",
+					"--no-pager", "--git-dir="+repoDir,
+					"diff-tree", "--no-commit-id", "-r", "--name-only", hash,
+				).Output()
+
+				// Collect changed files, skip sysfig.yaml.
+				var paths []string
+				for _, f := range strings.Split(strings.TrimSpace(string(dtOut)), "\n") {
+					if f == "" || f == "sysfig.yaml" {
+						continue
+					}
+					if filterPath != "" && f != filterPath &&
+						!strings.HasPrefix(f, strings.TrimSuffix(filterPath, "/")+"/") {
+						continue
+					}
+					paths = append(paths, f)
+				}
+
+				if len(paths) == 0 {
+					fmt.Printf("* %s%s%s %s%s%s  %s%s\n",
+						yellow, hash, reset,
+						cyan, date, reset,
+						subject, decoration)
+					continue
+				}
+
+				// Single file → one clean line.
+				// Multiple files → first path + "+N more" collapsed on one line.
+				pathLabel := paths[0]
+				if len(paths) > 1 {
+					pathLabel = fmt.Sprintf("%s +%d", paths[0], len(paths)-1)
+				}
+				fmt.Printf("* %s%s%s %s%s%s %s%s%s  %s%s\n",
+					yellow, hash, reset,
+					cyan, date, reset,
+					magenta, pathLabel, reset,
+					subject, decoration)
 			}
 			return nil
 		},
@@ -2204,8 +2304,120 @@ func newLogCmd() *cobra.Command {
 
 	f := cmd.Flags()
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
-	f.StringVar(&file, "file", "", "show only commits touching this repo-relative path")
+	f.StringVar(&filePath, "path", "", "filter by repo-relative path")
+	f.StringVar(&id, "id", "", "filter by tracking ID")
 	f.IntVarP(&n, "number", "n", 0, "limit to last N commits (0 = unlimited)")
+	return cmd
+}
+
+// ── rollback ──────────────────────────────────────────────────────────────────
+
+func newRollbackCmd() *cobra.Command {
+	var (
+		baseDir string
+		id      string
+		dryRun  bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "rollback <commit>",
+		Short: "Restore tracked file(s) to a previous commit",
+		Long: `Restore one or all tracked files to the state they were in at <commit>.
+
+Examples:
+  sysfig rollback 9b43458              # restore ALL tracked files to that commit
+  sysfig rollback 9b43458 --id 7734be1e  # restore only ~/.zshrc`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			commit := args[0]
+			repoDir := filepath.Join(baseDir, "repo.git")
+
+			sm := state.NewManager(filepath.Join(baseDir, "state.json"))
+			s, err := sm.Load()
+			if err != nil {
+				return fmt.Errorf("rollback: load state: %w", err)
+			}
+
+			// Build list of records to restore.
+			var targets []*struct {
+				repoPath   string
+				systemPath string
+			}
+			for _, rec := range s.Files {
+				if id != "" && core.DeriveID(rec.SystemPath) != id {
+					continue
+				}
+				r := rec
+				targets = append(targets, &struct {
+					repoPath   string
+					systemPath string
+				}{r.RepoPath, r.SystemPath})
+			}
+
+			if len(targets) == 0 {
+				if id != "" {
+					return fmt.Errorf("no tracked file found for id %q", id)
+				}
+				info("Nothing to rollback (no tracked files).")
+				return nil
+			}
+
+			for _, t := range targets {
+				if dryRun {
+					fmt.Printf("  %s %s → %s\n", clrDim.Sprint("[dry-run]"), clrInfo.Sprint(commit), t.systemPath)
+					continue
+				}
+
+				// git checkout <commit> -- <repoPath> into a temp work tree.
+				workDir, err := os.MkdirTemp("", "sysfig-rollback-*")
+				if err != nil {
+					return err
+				}
+				defer os.RemoveAll(workDir)
+
+				checkoutArgs := []string{
+					"--git-dir=" + repoDir,
+					"--work-tree=" + workDir,
+					"checkout", commit, "--", t.repoPath,
+				}
+				out, err := exec.Command("git", checkoutArgs...).CombinedOutput()
+				if err != nil {
+					fail("git checkout failed for %s: %s", t.repoPath, strings.TrimSpace(string(out)))
+					continue
+				}
+
+				src := filepath.Join(workDir, t.repoPath)
+				content, err := os.ReadFile(src)
+				if err != nil {
+					fail("read restored file %s: %v", src, err)
+					continue
+				}
+
+				// Preserve existing permissions if file exists.
+				var perm os.FileMode = 0o644
+				if info, err := os.Stat(t.systemPath); err == nil {
+					perm = info.Mode().Perm()
+				}
+
+				if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(t.systemPath, content, perm); err != nil {
+					fail("write %s: %v", t.systemPath, err)
+					continue
+				}
+				ok("Restored: %s", clrBold.Sprint(t.systemPath))
+				fmt.Printf("     %s %s\n", clrDim.Sprint("from commit:"), clrInfo.Sprint(commit))
+			}
+			return nil
+		},
+	}
+
+	f := cmd.Flags()
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
+	f.StringVar(&id, "id", "", "restore only the file with this tracking ID")
+	f.BoolVar(&dryRun, "dry-run", false, "show what would be restored without writing files")
 	return cmd
 }
 

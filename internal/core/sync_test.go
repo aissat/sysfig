@@ -295,7 +295,7 @@ func TestSync_DefaultMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync failed: %v", err)
 	}
-	if !strings.HasPrefix(result.Message, "sysfig: sync ") {
+	if !strings.HasPrefix(result.Message, "sysfig: update ") {
 		t.Errorf("expected default message prefix, got: %q", result.Message)
 	}
 }

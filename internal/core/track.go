@@ -72,6 +72,9 @@ type TrackOptions struct {
 	// /tmp/sysfig-sandbox/real_system) while the repo and state still record
 	// the canonical system path (e.g. /var/app/settings.conf).
 	SysRoot string
+	// Group, when non-empty, marks this file as part of a directory track.
+	// Sync uses this to commit all files in the same group together.
+	Group string
 }
 
 // TrackResult is returned by Track on success.
@@ -280,6 +283,7 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 			Template:    opts.Template,
 			Tags:        opts.Tags,
 			Meta:        meta,
+			Group:       opts.Group,
 		}
 		return nil
 	}); err != nil {
@@ -503,6 +507,7 @@ func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
 			Encrypt:    opts.Encrypt,
 			Template:   opts.Template,
 			SysRoot:    opts.SysRoot,
+			Group:      opts.DirPath,
 		})
 
 		entry := TrackDirEntry{Path: path}

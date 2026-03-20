@@ -41,6 +41,10 @@ type FileRecord struct {
 	Encrypt     bool       `json:"encrypt,omitempty"`
 	Template    bool       `json:"template,omitempty"`
 	Tags        []string   `json:"tags,omitempty"`
+	// Group is the directory path used when this file was tracked as part of
+	// a directory (e.g. "sysfig track /etc/pacman.d/"). Empty for individually
+	// tracked files. Sync uses this to group directory files into one commit.
+	Group       string     `json:"group,omitempty"`
 	// Meta holds the file's owner, group, and permission bits captured
 	// at the last track or sync. Nil means metadata was never recorded
 	// (e.g. records created before this feature was added).

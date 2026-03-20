@@ -178,11 +178,56 @@ type SyncResult struct {
 	RepoDir         string
 	Pulled          bool     // true if pull ran and succeeded
 	PullErr         error    // non-nil if pull was attempted but failed (non-fatal)
-	Committed       bool     // true if a commit was created (i.e. there were staged changes)
+	Committed       bool     // true if at least one commit was created
 	Pushed          bool     // true if push was attempted and succeeded
-	Message         string
+	Message         string   // message of the last commit
+	CommittedFiles  []string // repo-relative paths committed in this sync
 	UpdatedFiles    []string // IDs of files whose state hash was refreshed
 	NodeWarnings    []string // non-fatal warnings from invalid node public keys
+}
+
+// buildSyncMessage inspects the git index to produce a meaningful commit
+// message summarising which top-level directories changed.
+//
+// Examples:
+//
+//	"sysfig: update home/aye7/.zshrc"
+//	"sysfig: update etc/pacman.d, home/aye7"
+//	"sysfig: sync 3 directories"  (when more than 2)
+func buildSyncMessage(repoDir string) string {
+	cmd := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+		"diff", "--cached", "--name-only")
+	out, err := cmd.Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		return fmt.Sprintf("sysfig: sync %s", time.Now().UTC().Format("2006-01-02"))
+	}
+
+	// Collect unique top-level paths (dir/file or dir/subdir).
+	seen := map[string]bool{}
+	var parts []string
+	for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f = strings.TrimSpace(f)
+		if f == "" || f == "sysfig.yaml" {
+			continue
+		}
+		segs := strings.SplitN(f, "/", 3)
+		key := segs[0]
+		if len(segs) > 1 {
+			key = segs[0] + "/" + segs[1]
+		}
+		if !seen[key] {
+			seen[key] = true
+			parts = append(parts, key)
+		}
+	}
+
+	if len(parts) == 0 {
+		return fmt.Sprintf("sysfig: sync %s", time.Now().UTC().Format("2006-01-02"))
+	}
+	if len(parts) <= 2 {
+		return "sysfig: update " + strings.Join(parts, ", ")
+	}
+	return fmt.Sprintf("sysfig: update %d paths (%s, …)", len(parts), strings.Join(parts[:2], ", "))
 }
 
 // Sync stages all tracked files into the bare repo and creates a git commit.
@@ -201,9 +246,6 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
 
 	msg := opts.Message
-	if msg == "" {
-		msg = fmt.Sprintf("sysfig: sync %s", time.Now().UTC().Format(time.RFC3339))
-	}
 
 	result := &SyncResult{
 		RepoDir: repoDir,
@@ -234,147 +276,176 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 	nodeRecipients, nodeWarnings := NodeRecipients(currentState.Nodes)
 	result.NodeWarnings = nodeWarnings
 
-	// Stage each tracked file individually into the bare repo.
-	// We never do `git add -A` against the bare repo — that would try to walk
-	// the entire filesystem through GIT_WORK_TREE=/ which is not what we want.
+	now := time.Now()
+
+	// fileEntry holds one changed file ready to be staged.
+	type fileEntry struct {
+		id      string
+		rec     *types.FileRecord
+		relPath string
+		sysPath string
+		data    []byte
+	}
+
+	// Step 1: read all file data and skip unchanged files.
+	// Group by rec.Group (set when tracked as a directory) so that all files
+	// from the same directory land in one commit. Individually tracked files
+	// (empty Group) each get their own commit — keyed by their unique ID.
+	groups := map[string][]fileEntry{} // key = group dir path or file ID
+	var groupOrder []string            // preserve insertion order for deterministic commits
+
 	for id, rec := range currentState.Files {
-		relPath := rec.RepoPath // git-relative, e.g. "etc/nginx/nginx.conf"
+		relPath := rec.RepoPath
+		sysPath := rec.SystemPath
+		if opts.SysRoot != "" {
+			sysPath = filepath.Join(opts.SysRoot, rec.SystemPath)
+		}
 
+		var data []byte
 		if rec.Encrypt {
-			// Encrypted files: read the live system file, re-encrypt, and
-			// store the ciphertext as a blob.
-			sysPath := rec.SystemPath
-			if opts.SysRoot != "" {
-				sysPath = filepath.Join(opts.SysRoot, rec.SystemPath)
-			}
-
 			plaintext, err := os.ReadFile(sysPath)
 			if err != nil {
-				// System file missing — skip this record gracefully.
 				continue
 			}
-
 			keysDir := filepath.Join(opts.BaseDir, "keys")
 			km := crypto.NewKeyManager(keysDir)
 			master, err := km.Load()
 			if err != nil {
 				return nil, fmt.Errorf("core: sync: encrypt %q: master key not found: %w", id, err)
 			}
-			// Encrypt to local master key + all registered node public keys.
 			encrypted, err := crypto.EncryptForFile(plaintext, master, id, nodeRecipients...)
 			if err != nil {
 				return nil, fmt.Errorf("core: sync: encrypt %q: %w", id, err)
 			}
-
-			if err := syncStageBlob(repoDir, relPath, encrypted); err != nil {
-				return nil, err
-			}
+			data = encrypted
 		} else {
-			// Plaintext files: read from disk and store as a blob.
-			// Avoids GIT_WORK_TREE resolution issues for paths outside a
-			// typical project root (e.g. dotfiles in ~/).
-			sysPath := rec.SystemPath
-			if opts.SysRoot != "" {
-				sysPath = filepath.Join(opts.SysRoot, rec.SystemPath)
-			}
-			data, err := os.ReadFile(sysPath)
+			d, err := os.ReadFile(sysPath)
 			if err != nil {
 				continue
 			}
-			if err := syncStageBlob(repoDir, relPath, data); err != nil {
+			data = d
+		}
+
+		// Skip unchanged files, but still refresh their state hash.
+		if existing, err := gitShowBytes(repoDir, relPath); err == nil && bytes.Equal(existing, data) {
+			if sysHash, err := hash.File(sysPath); err == nil {
+				_ = sm.WithLock(func(s *types.State) error {
+					r := s.Files[id]
+					r.CurrentHash = sysHash
+					r.LastSync = &now
+					if newMeta, err := sysfigfs.ReadMeta(sysPath); err == nil {
+						r.Meta = newMeta
+					}
+					s.Files[id] = r
+					return nil
+				})
+			}
+			continue
+		}
+
+		// Files tracked as part of a directory share a Group key → one commit.
+		// Individually tracked files use their unique ID → one commit each.
+		groupKey := rec.Group
+		if groupKey == "" {
+			groupKey = id
+		}
+		if _, exists := groups[groupKey]; !exists {
+			groupOrder = append(groupOrder, groupKey)
+		}
+		groups[groupKey] = append(groups[groupKey], fileEntry{id, rec, relPath, sysPath, data})
+	}
+
+	// Step 2: for each group, stage all files then create ONE commit.
+	for _, groupKey := range groupOrder {
+		entries := groups[groupKey]
+
+		// Reset index to HEAD before staging this group.
+		_ = syncGitBareRun(repoDir, 10*time.Second, nil, "read-tree", "HEAD")
+
+		for _, e := range entries {
+			if err := syncStageBlob(repoDir, e.relPath, e.data); err != nil {
 				return nil, err
 			}
 		}
+
+		// Build commit message.
+		groupMsg := msg
+		if groupMsg == "" {
+			paths := make([]string, len(entries))
+			for i, e := range entries {
+				paths[i] = e.relPath
+			}
+			if len(paths) == 1 {
+				groupMsg = "sysfig: update " + paths[0]
+			} else {
+				groupMsg = "sysfig: update " + groupKey + " (" + strings.Join(paths, ", ") + ")"
+			}
+		}
+
+		commitErr := syncGitBareRun(repoDir, 30*time.Second,
+			[]string{"GIT_WORK_TREE=/"},
+			"commit", "-m", groupMsg,
+		)
+		if commitErr != nil && !isNothingToCommit(repoDir) {
+			return nil, fmt.Errorf("core: sync: commit %q: %w", groupKey, commitErr)
+		}
+		if commitErr == nil {
+			result.Committed = true
+			result.Message = groupMsg
+			for _, e := range entries {
+				result.CommittedFiles = append(result.CommittedFiles, e.relPath)
+			}
+		}
+
+		// Refresh state hashes for all files in the group.
+		for _, e := range entries {
+			_ = sm.WithLock(func(s *types.State) error {
+				r := s.Files[e.id]
+				if e.rec.Encrypt {
+					sysHash, err := hash.File(e.sysPath)
+					if err != nil {
+						return nil
+					}
+					r.CurrentHash = sysHash
+				} else {
+					repoContent, err := gitShowBytes(repoDir, e.relPath)
+					if err != nil {
+						return nil
+					}
+					sysHash, err := hash.File(e.sysPath)
+					if err != nil {
+						return nil
+					}
+					if hash.Bytes(repoContent) != sysHash {
+						return nil
+					}
+					r.CurrentHash = sysHash
+				}
+				r.LastSync = &now
+				if newMeta, err := sysfigfs.ReadMeta(e.sysPath); err == nil {
+					r.Meta = newMeta
+				}
+				s.Files[e.id] = r
+				result.UpdatedFiles = append(result.UpdatedFiles, e.id)
+				return nil
+			})
+		}
 	}
 
-	// Auto-update sysfig.yaml manifest so that `sysfig setup` on a new host
-	// picks up all currently tracked files without a manual manifest edit.
-	// Only stage when there are tracked files AND the content differs from
-	// what is already committed — avoids spurious commits.
+	// Update sysfig.yaml manifest in its own commit if it changed.
 	if len(currentState.Files) > 0 {
 		if manifestData, err := buildManifest(currentState); err == nil {
 			existing, _ := gitShowBytes(repoDir, "sysfig.yaml")
 			if !bytes.Equal(existing, manifestData) {
-				_ = syncStageBlob(repoDir, "sysfig.yaml", manifestData)
+				if err := syncStageBlob(repoDir, "sysfig.yaml", manifestData); err == nil {
+					_ = syncGitBareRun(repoDir, 30*time.Second,
+						[]string{"GIT_WORK_TREE=/"},
+						"commit", "-m", "sysfig: update manifest",
+					)
+				}
 			}
 		}
 	}
-
-	// Commit. `git commit` exits non-zero when there is nothing to commit;
-	// we treat that as a successful no-op (Committed stays false).
-	commitErr := syncGitBareRun(repoDir, 30*time.Second,
-		[]string{"GIT_WORK_TREE=/"},
-		"commit", "-m", msg,
-	)
-	if commitErr != nil {
-		// "nothing to commit" is not an error for sysfig.
-		if !isNothingToCommit(repoDir) {
-			return nil, fmt.Errorf("core: sync: commit: %w", commitErr)
-		}
-		// Fall through — still refresh state hashes even when there was
-		// nothing new to commit (e.g. git already has the change but
-		// state.json was never updated from a previous run).
-	} else {
-		result.Committed = true
-	}
-
-	// Refresh state.json so that current_hash reflects what is now committed.
-	// This runs whether or not a new commit was created.
-	_ = sm.WithLock(func(s *types.State) error {
-		now := time.Now()
-		for id, rec := range s.Files {
-			// Resolve the real on-disk path, honouring the sandbox SysRoot.
-			sysPath := rec.SystemPath
-			if opts.SysRoot != "" {
-				sysPath = filepath.Join(opts.SysRoot, rec.SystemPath)
-			}
-
-			if rec.Encrypt {
-				// Encrypted files: hash the plaintext system file.
-				// We cannot recover plaintext from the repo ciphertext,
-				// so we re-hash the live system file directly.
-				sysHash, err := hash.File(sysPath)
-				if err != nil {
-					// System file missing or unreadable — leave hash alone.
-					continue
-				}
-				rec.CurrentHash = sysHash
-				rec.LastSync = &now
-				if newMeta, err := sysfigfs.ReadMeta(sysPath); err == nil {
-					rec.Meta = newMeta
-				}
-				s.Files[id] = rec
-				result.UpdatedFiles = append(result.UpdatedFiles, id)
-			} else {
-				// Plain files: read the committed blob from the bare repo and
-				// compare its hash to the live system file.  Only update the
-				// record when they agree — if they differ the user still needs
-				// to run `sysfig apply`.
-				repoContent, err := gitShowBytes(repoDir, rec.RepoPath)
-				if err != nil {
-					// File not yet committed (e.g. HEAD doesn't exist yet).
-					continue
-				}
-				repoHash := hash.Bytes(repoContent)
-
-				sysHash, err := hash.File(sysPath)
-				if err != nil {
-					continue
-				}
-
-				if repoHash == sysHash {
-					rec.CurrentHash = sysHash
-					rec.LastSync = &now
-					if newMeta, err := sysfigfs.ReadMeta(sysPath); err == nil {
-						rec.Meta = newMeta
-					}
-					s.Files[id] = rec
-					result.UpdatedFiles = append(result.UpdatedFiles, id)
-				}
-			}
-		}
-		return nil
-	})
 
 	// Push only when explicitly requested — never automatic.
 	if opts.Push {

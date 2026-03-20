@@ -77,13 +77,28 @@ PATH / STATUS
   4 files  ·  1 synced  ·  1 dirty  ·  1 pending  ·  1 encrypted
 ```
 
-**Commit history as a tree:**
+**Commit history — one line per file, meaningful messages:**
 
 ```
-* a3f2b1c 2026-03-18 hardened sshd_config (HEAD -> master)
-* 8d4e92a 2026-03-17 sysfig: sync 2026-03-17T14:22:01
-* 1c7f03b 2026-03-15 added bashrc and vimrc
-* 3e9d01f 2026-03-10 initial commit
+* a3f2b1c 2026-03-20 etc/nginx/nginx.conf   sysfig: update etc/nginx/nginx.conf (HEAD -> master)
+* 8d4e92a 2026-03-20 home/you/.zshrc        sysfig: update home/you/.zshrc
+* 1c7f03b 2026-03-19 etc/pacman.d/mirrorlist +3  sysfig: update etc/pacman.d (4 files)
+* 3e9d01f 2026-03-18                         sysfig: initialise configuration
+```
+
+Filter by path or ID:
+
+```bash
+sysfig log /etc/nginx          # all commits touching /etc/nginx/*
+sysfig log --id a3f2b1c        # commits for one tracked file
+```
+
+**Roll back a file to any previous commit:**
+
+```bash
+sysfig rollback a3f2b1c --id <hash>   # restore one file
+sysfig rollback a3f2b1c               # restore all tracked files
+sysfig rollback a3f2b1c --dry-run     # preview without writing
 ```
 
 ---
@@ -112,6 +127,7 @@ PATH / STATUS
   - [push](#push-deprecated) _(deprecated)_
   - [pull](#pull-deprecated) _(deprecated)_
   - [log](#log)
+  - [rollback](#rollback)
   - [profile](#profile)
   - [keys](#keys)
   - [doctor](#doctor)
@@ -761,30 +777,32 @@ The watch mode clears the screen on the first frame, then redraws in-place to av
 
 ### `diff`
 
-Show a unified diff between system files and repo versions.
+Show changes between system files and repo versions.
 
 ```
 sysfig diff [options]
 ```
 
-Requires `diff` on `$PATH`. Output is colorized automatically when stdout is a TTY (`+` lines green, `-` lines red, `@@` headers cyan).
+Colorized output with word-level inline highlighting — changed tokens are shown with dark red/green background so you can see exactly what changed within a line.
 
 **Exit codes:** `0` = no differences, `1` = differences found, `2` = error.
 
 **Options:**
 
-| Flag         | Default    | Description                         |
-| ------------ | ---------- | ----------------------------------- |
-| `--id`       | all        | Diff only this ID (repeatable)      |
-| `--color`    | auto (TTY) | Force or disable colorized output   |
-| `--base-dir` | `~/.sysfig`| Directory where sysfig stores data  |
+| Flag              | Default    | Description                                        |
+| ----------------- | ---------- | -------------------------------------------------- |
+| `--id`            | all        | Diff only this ID (repeatable)                     |
+| `--side-by-side`/`-y` | false  | Side-by-side view (default: unified)               |
+| `--color`         | auto (TTY) | Force or disable colorized output                  |
+| `--base-dir`      | `~/.sysfig`| Directory where sysfig stores data                 |
 
 **Examples:**
 
 ```bash
-sysfig diff
-sysfig diff --id nginx_main
-sysfig diff --no-color | grep "^[+-]"
+sysfig diff                           # unified diff, all dirty files
+sysfig diff -y                        # side-by-side view
+sysfig diff --id nginx_main           # diff one file
+sysfig diff --no-color | grep "^[+-]" # scriptable
 
 # In a script: exit 1 if anything differs
 sysfig diff --id sshd_config || echo "sshd_config has drifted"
@@ -802,29 +820,35 @@ sysfig sync [options]
 
 Stages any modified tracked files, creates a git commit in the local bare repo, and updates `state.json` hashes and timestamps. No network access required. Use `--push` to also push in one step; use `--pull` to fetch remote changes before committing.
 
+**Commit strategy:**
+
+- Each changed file gets its **own commit** with a meaningful message (`sysfig: update etc/nginx/nginx.conf`)
+- Files tracked as a **directory** (`sysfig track /etc/pacman.d/`) are grouped — all changed files in that directory land in one commit
+- Files tracked **individually** always get separate commits regardless of folder
+- Unchanged files are skipped entirely (no empty commits)
+
 **Options:**
 
-| Flag         | Default                    | Description                                           |
-| ------------ | -------------------------- | ----------------------------------------------------- |
-| `--message`  | `sysfig: sync <timestamp>` | Commit message                                        |
-| `--push`     | `false`                    | Also push to remote after committing                  |
-| `--pull`     | `false`                    | Fetch remote changes before committing (non-fatal)    |
-| `--base-dir` | `~/.sysfig`                | Directory where sysfig stores data                    |
+| Flag         | Default                       | Description                                           |
+| ------------ | ----------------------------- | ----------------------------------------------------- |
+| `--message`  | auto (`sysfig: update <path>`)| Override commit message                               |
+| `--push`     | `false`                       | Also push to remote after committing                  |
+| `--pull`     | `false`                       | Fetch remote changes before committing (non-fatal)    |
+| `--base-dir` | `~/.sysfig`                   | Directory where sysfig stores data                    |
 
 **Examples:**
 
 ```bash
 sysfig sync
-sysfig sync --message "hardened sshd_config"
 sysfig sync --push             # commit + push in one step
-sysfig sync --pull             # pull first, then commit locally
 sysfig sync --pull --push      # full round-trip: pull → commit → push
 ```
 
 **Example output:**
 
 ```
-  ✓ Committed: hardened sshd_config
+  ✓ Committed: etc/nginx/nginx.conf
+  ✓ Committed: home/you/.zshrc
   ✓ Repo:      /home/you/.sysfig/repo.git
   ℹ Not pushed. Run sysfig sync --push when online.
 ```
@@ -954,10 +978,10 @@ sysfig apply          # deploy to system
 
 ### `log`
 
-Show the commit history of your config repo as a graph tree.
+Show the commit history of your config repo. Each commit is expanded to show which file(s) changed, one line per commit with a meaningful path label.
 
 ```
-sysfig log [options]
+sysfig log [system-path] [options]
 ```
 
 **Options:**
@@ -965,16 +989,50 @@ sysfig log [options]
 | Flag         | Default     | Description                                                  |
 | ------------ | ----------- | ------------------------------------------------------------ |
 | `-n`         | unlimited   | Limit to last N commits                                      |
-| `--file`     | —           | Show only commits touching a specific path (repo-relative)   |
+| `--id`       | —           | Show only commits touching the file with this tracking ID    |
+| `--path`     | —           | Filter by repo-relative path                                 |
 | `--base-dir` | `~/.sysfig` | Directory where sysfig stores data                           |
 
 **Examples:**
 
 ```bash
-sysfig log                                      # full history
-sysfig log -n 10                                # last 10 commits
-sysfig log --file etc/nginx/nginx.conf          # nginx history only
-sysfig log --file etc/ssh/sshd_config -n 5     # last 5 sshd changes
+sysfig log                          # full history
+sysfig log -n 10                    # last 10 commits
+sysfig log /etc/nginx               # all commits touching /etc/nginx/*
+sysfig log /home/you/.zshrc         # history for one file
+sysfig log --id 7734be1e            # history by tracking ID
+```
+
+**Example output:**
+
+```
+* a3f2b1c 2026-03-20 etc/nginx/nginx.conf    sysfig: update etc/nginx/nginx.conf (HEAD -> master)
+* 8d4e92a 2026-03-20 home/you/.zshrc         sysfig: update home/you/.zshrc
+* 1c7f03b 2026-03-19 etc/pacman.d/mirrorlist +3  sysfig: update etc/pacman.d (4 files)
+```
+
+### `rollback`
+
+Restore tracked file(s) to the state they were in at a previous commit.
+
+```
+sysfig rollback <commit> [options]
+```
+
+**Options:**
+
+| Flag         | Default     | Description                                        |
+| ------------ | ----------- | -------------------------------------------------- |
+| `--id`       | —           | Restore only the file with this tracking ID        |
+| `--dry-run`  | `false`     | Preview what would be restored without writing     |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores data                 |
+
+**Examples:**
+
+```bash
+sysfig rollback a3f2b1c                    # restore ALL tracked files
+sysfig rollback a3f2b1c --id 7734be1e      # restore only one file
+sysfig rollback a3f2b1c --dry-run          # preview first
 ```
 
 ---
