@@ -62,16 +62,17 @@ $ sysfig deploy git@github.com:you/configs.git
    sysfig doctor   Run a health check if anything seems wrong
 ```
 
-**Daily status check:**
+**Daily status check (grouped by directory):**
 
 ```
-ID                                       STATUS               SYSTEM PATH
+PATH / STATUS
 ────────────────────────────────────────────────────────────────────────────
-nginx_main                               SYNCED               /etc/nginx/nginx.conf
-sshd_config                              DIRTY/MODIFIED       /etc/ssh/sshd_config
+/etc/nginx/
+└ nginx.conf                             DIRTY/MODIFIED
    ⚠ mode:   0644 → 0600
-bashrc                                   PENDING/APPLY        /home/you/.bashrc
-server_key                               ENCRYPTED            /etc/ssl/private/server.key
+/etc/ssh/                                1 synced
+/etc/ssl/private/server.key              ENCRYPTED
+/home/you/.bashrc                        PENDING/APPLY
 ────────────────────────────────────────────────────────────────────────────
   4 files  ·  1 synced  ·  1 dirty  ·  1 pending  ·  1 encrypted
 ```
@@ -102,6 +103,7 @@ server_key                               ENCRYPTED            /etc/ssl/private/s
   - [setup](#setup)
   - [init](#init)
   - [track](#track)
+  - [untrack](#untrack)
   - [apply](#apply)
   - [status](#status)
   - [diff](#diff)
@@ -480,7 +482,6 @@ Start tracking a config file (or an entire directory).
 
 ```
 sysfig track <path> [options]
-sysfig track --recursive <dir> [options]
 ```
 
 Copies the file into the bare git repo's index (staged, not yet committed), records its BLAKE3 hash and `uid`/`gid`/`mode` metadata in `state.json`, and updates `sysfig.yaml`.
@@ -499,17 +500,16 @@ Copies the file into the bare git repo's index (staged, not yet committed), reco
 | `--tag`       | —           | Label to attach (repeatable: `--tag web --tag nginx`)    |
 | `--encrypt`   | `false`     | Encrypt the file at rest in the repo                     |
 | `--template`  | `false`     | Mark as a template with `{{variable}}` expansions        |
-| `--recursive` | `false`     | Track all files under a directory recursively            |
-| `--exclude`   | —           | Path or glob to skip during `--recursive` walk (repeatable) |
+| `--exclude`   | —           | Path or glob to skip when tracking a directory (repeatable) |
 | `--base-dir`  | `~/.sysfig` | Directory where sysfig stores its data                   |
 
 **ID derivation:**
 
-If `--id` is omitted, the ID is derived from the absolute path: strip the leading `/`, replace `/` and `.` with `_`.
+If `--id` is omitted, the ID is derived from the absolute path: strip the leading `/`, replace `/` and `.` with `_`. Leading dots in a path component do not produce a double underscore.
 
 ```
 /etc/nginx/nginx.conf  →  etc_nginx_nginx_conf
-/home/you/.bashrc      →  home_you__bashrc
+/home/you/.bashrc      →  home_you_bashrc
 ```
 
 **Examples:**
@@ -524,14 +524,14 @@ sysfig track /etc/nginx/nginx.conf --id nginx_main --tag web --tag nginx
 # Encrypt a secret
 sysfig track /etc/myapp/secrets.env --encrypt
 
-# Recursively track a directory
-sysfig track --recursive /etc/nginx/
+# Track an entire directory — auto-detected, no --recursive flag needed
+sysfig track /etc/nginx/
 
-# Recursively track /etc but skip secrets
-sysfig track --recursive /etc --exclude /etc/ssl/private --exclude /etc/shadow.d
+# Track /etc but skip secrets
+sysfig track /etc --exclude /etc/ssl/private --exclude /etc/shadow.d
 
 # Glob pattern — skip all .bak files
-sysfig track --recursive /etc/nginx --exclude "*.bak"
+sysfig track /etc/nginx --exclude "*.bak"
 
 # Track a template file — placeholders substituted at apply time
 sysfig track ~/.gitconfig --template
@@ -571,6 +571,53 @@ Tracking /etc/nginx/nginx.conf
   ✓ ID:   nginx_main
   ✓ Repo: etc/nginx/nginx.conf
   ✓ Hash: 3a7f2b...
+```
+
+---
+
+### `untrack`
+
+Stop tracking one or more files without touching the system files.
+
+```
+sysfig untrack <path-or-id> [options]
+```
+
+Removes the matching record(s) from `state.json` and `sysfig.yaml`, and drops the file(s) from the git index. The actual system files are **never deleted** — only the tracking metadata is removed.
+
+Accepts:
+- An absolute file path: `sysfig untrack /etc/nginx/nginx.conf`
+- A bare tracking ID: `sysfig untrack etc_nginx_nginx_conf`
+- A directory path: removes all files tracked under that directory
+
+**Run `sysfig sync` after untracking to commit the manifest change.**
+
+**Options:**
+
+| Flag         | Default     | Description                                  |
+| ------------ | ----------- | -------------------------------------------- |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores its data       |
+
+**Examples:**
+
+```bash
+# Remove a single file by path
+sysfig untrack /etc/nginx/nginx.conf
+
+# Remove a single file by its tracking ID
+sysfig untrack etc_nginx_nginx_conf
+
+# Remove all files tracked under /etc/nginx/
+sysfig untrack /etc/nginx/
+
+# After untracking, commit the manifest change
+sysfig sync --message "stop tracking nginx"
+```
+
+**Example output:**
+
+```
+  ✓ Untracked: etc_nginx_nginx_conf  (/etc/nginx/nginx.conf)
 ```
 
 ---
@@ -652,6 +699,21 @@ sysfig status [options]
 
 Compares every tracked file against the repo using BLAKE3 content hashes. Also checks recorded `uid`/`gid`/`mode` against the current system state and reports drift inline.
 
+**Default output is grouped by directory.** Directories where every file is SYNCED are collapsed to a single summary line. Directories with any dirty or pending files expand to show each affected file on its own line. If only one file is tracked in a directory, its full path is shown rather than a folder line.
+
+```
+PATH / STATUS
+────────────────────────────────────────────────────────────────────────────
+/etc/pacman.d/        10 synced
+/etc/nginx/
+└ nginx.conf          DIRTY/MODIFIED
+/home/you/.zshrc      SYNCED
+────────────────────────────────────────────────────────────────────────────
+  12 files  ·  11 synced  ·  1 dirty
+```
+
+Use `--files` (or `-f`) to bypass grouping and see every tracked file individually on its own line.
+
 **Status labels:**
 
 | Label           | Meaning                                                             | Action                  |
@@ -666,12 +728,13 @@ Compares every tracked file against the repo using BLAKE3 content hashes. Also c
 
 **Options:**
 
-| Flag         | Short | Default     | Description                                      |
-| ------------ | ----- | ----------- | ------------------------------------------------ |
-| `--id`       | —     | all         | Check only this ID (repeatable)                  |
-| `--watch`    | `-w`  | `false`     | Continuously refresh status (Ctrl-C to stop)     |
-| `--interval` | —     | `3s`        | Refresh interval when `--watch` is set           |
-| `--base-dir` | —     | `~/.sysfig` | Directory where sysfig stores data               |
+| Flag         | Short | Default     | Description                                                    |
+| ------------ | ----- | ----------- | -------------------------------------------------------------- |
+| `--id`       | —     | all         | Check only this ID (repeatable)                                |
+| `--files`    | `-f`  | `false`     | Flat list — show every tracked file individually (no grouping) |
+| `--watch`    | `-w`  | `false`     | Continuously refresh status (Ctrl-C to stop)                   |
+| `--interval` | —     | `3s`        | Refresh interval when `--watch` is set                         |
+| `--base-dir` | —     | `~/.sysfig` | Directory where sysfig stores data                             |
 
 **Script-friendly:**
 

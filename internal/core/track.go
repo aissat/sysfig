@@ -237,9 +237,10 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 			return nil, fmt.Errorf("core: stage plain (sandbox) %q: %w", repoRel, err)
 		}
 	} else {
-		// Production path: the real file IS at /<repoRel>. Stage it directly
-		// using GIT_WORK_TREE=/ so git reads it from its natural location.
-		if err := stageFilePlain(opts.RepoDir, repoRel); err != nil {
+		// Production path: file content is already in `data` — stage it via
+		// hash-object + update-index. This avoids GIT_WORK_TREE resolution
+		// issues that occur with paths outside a typical project root.
+		if err := stageBlob(opts.RepoDir, repoRel, data); err != nil {
 			return nil, err
 		}
 	}
@@ -291,17 +292,57 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 	}, nil
 }
 
+// UntrackOptions configures an Untrack call.
+type UntrackOptions struct {
+	BaseDir string // ~/.sysfig
+	// Arg is either a bare ID (e.g. "home_aye7_zshrc") or an absolute path
+	// (e.g. "/home/aye7/.zshrc"). Both are accepted.
+	Arg string
+}
+
+// Untrack removes one or more files from sysfig tracking. The system files are
+// left untouched. Arg may be:
+//   - a bare ID           → removes that single entry
+//   - an absolute path    → removes that single file
+//   - an absolute dir     → removes all files under that directory
+//
+// Returns the list of IDs removed, or an error if nothing matched.
+func Untrack(opts UntrackOptions) ([]string, error) {
+	// Normalise: strip trailing slash so dir matching is consistent.
+	arg := strings.TrimRight(opts.Arg, "/")
+
+	statePath := filepath.Join(opts.BaseDir, "state.json")
+	sm := state.NewManager(statePath)
+	var removed []string
+	err := sm.WithLock(func(s *types.State) error {
+		for id, rec := range s.Files {
+			match := id == arg ||
+				rec.SystemPath == arg ||
+				strings.HasPrefix(rec.SystemPath, arg+"/")
+			if match {
+				delete(s.Files, id)
+				removed = append(removed, id)
+			}
+		}
+		if len(removed) == 0 {
+			return fmt.Errorf("not tracked: %q", opts.Arg)
+		}
+		return nil
+	})
+	return removed, err
+}
+
 // deriveID converts an absolute path into a stable, lowercase tracking ID.
 //
-//	/etc/nginx/nginx.conf → "etc_nginx_nginx_conf"
+//	/etc/nginx/nginx.conf  → "etc_nginx_nginx_conf"
+//	/home/aye7/.zshrc      → "home_aye7_zshrc"
 func deriveID(absPath string) string {
-	// Strip the leading slash.
-	s := strings.TrimPrefix(absPath, "/")
-	// Replace all remaining slashes with underscores.
-	s = strings.ReplaceAll(s, "/", "_")
-	// Replace dots with underscores.
+	parts := strings.Split(strings.TrimPrefix(absPath, "/"), "/")
+	for i, p := range parts {
+		parts[i] = strings.TrimLeft(p, ".")
+	}
+	s := strings.Join(parts, "_")
 	s = strings.ReplaceAll(s, ".", "_")
-	// Lowercase the whole thing.
 	return strings.ToLower(s)
 }
 

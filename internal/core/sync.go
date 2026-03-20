@@ -270,24 +270,19 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 				return nil, err
 			}
 		} else {
-			// Plaintext files.
-			// When SysRoot is empty (production) the real file lives exactly
-			// at /<relPath>, so GIT_WORK_TREE=/ git add <relPath> works.
-			// When SysRoot is set (sandbox/test) the real file lives at
-			// opts.SysRoot+rec.SystemPath, so we read it and store as a blob.
-			if opts.SysRoot == "" {
-				if err := syncStagePlain(repoDir, relPath); err != nil {
-					return nil, err
-				}
-			} else {
-				sysPath := filepath.Join(opts.SysRoot, rec.SystemPath)
-				data, err := os.ReadFile(sysPath)
-				if err != nil {
-					continue
-				}
-				if err := syncStageBlob(repoDir, relPath, data); err != nil {
-					return nil, err
-				}
+			// Plaintext files: read from disk and store as a blob.
+			// Avoids GIT_WORK_TREE resolution issues for paths outside a
+			// typical project root (e.g. dotfiles in ~/).
+			sysPath := rec.SystemPath
+			if opts.SysRoot != "" {
+				sysPath = filepath.Join(opts.SysRoot, rec.SystemPath)
+			}
+			data, err := os.ReadFile(sysPath)
+			if err != nil {
+				continue
+			}
+			if err := syncStageBlob(repoDir, relPath, data); err != nil {
+				return nil, err
 			}
 		}
 	}

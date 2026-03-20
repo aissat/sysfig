@@ -202,6 +202,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newSetupCmd(),
 		newInitCmd(),
 		newTrackCmd(),
+		newUntrackCmd(),
 		newKeysCmd(),
 		newApplyCmd(),
 		newStatusCmd(),
@@ -287,6 +288,12 @@ No sysfig installation is required on the remote host.`,
 					return err
 				}
 
+				deployIDW := 0
+				for _, r := range result.Results {
+					if len(r.ID) > deployIDW { deployIDW = len(r.ID) }
+				}
+				deployIDW += 2
+
 				for _, r := range result.Results {
 					switch {
 					case r.Err != nil:
@@ -294,15 +301,15 @@ No sysfig installation is required on the remote host.`,
 					case r.Skipped && r.SkipReason == "dry-run":
 						fmt.Printf("  %s %s %s\n",
 							clrDim.Sprint("[dry-run]"),
-							clrInfo.Sprint(r.ID),
+							clrInfo.Sprint(pad(r.ID, deployIDW)),
 							clrDim.Sprint("→ "+r.SystemPath))
 					case r.Skipped:
 						fmt.Printf("  %s %s  %s\n",
 							clrDim.Sprint("―"),
-							clrDim.Sprint(r.ID),
+							clrDim.Sprint(pad(r.ID, deployIDW)),
 							clrDim.Sprintf("(%s)", r.SkipReason))
 					default:
-						ok("%-36s → %s", clrBold.Sprint(r.ID), r.SystemPath)
+						ok("%s → %s", clrBold.Sprint(pad(r.ID, deployIDW)), r.SystemPath)
 					}
 				}
 
@@ -650,6 +657,13 @@ func newTrackCmd() *cobra.Command {
 				fixSudoOwnership(baseDir)
 			}
 
+			// Auto-detect directories so the user doesn't need --recursive.
+			if !recursive {
+				if info, err := os.Stat(targetPath); err == nil && info.IsDir() {
+					recursive = true
+				}
+			}
+
 			if recursive {
 				summary, err := core.TrackDir(core.TrackDirOptions{
 					DirPath:  targetPath,
@@ -739,6 +753,42 @@ func newTrackCmd() *cobra.Command {
 	f.StringVar(&sysRoot, "sys-root", "", "strip this prefix from paths before storing in repo and state")
 	f.StringArrayVar(&tags, "tag", nil, "label to attach (repeatable)")
 	f.StringArrayVar(&excludes, "exclude", nil, "path or glob to skip during --recursive walk (repeatable)")
+	return cmd
+}
+
+// ── untrack ───────────────────────────────────────────────────────────────────
+
+func newUntrackCmd() *cobra.Command {
+	var baseDir string
+	cmd := &cobra.Command{
+		Use:   "untrack <path-or-id>",
+		Short: "Stop tracking a file (removes from state, leaves system file untouched)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			arg := args[0]
+
+			// Resolve to an absolute path if it looks like a file path.
+			if !strings.Contains(arg, "/") {
+				// Looks like a bare ID — use as-is.
+			} else {
+				abs, err := filepath.Abs(arg)
+				if err == nil {
+					arg = abs
+				}
+			}
+
+			removed, err := core.Untrack(core.UntrackOptions{BaseDir: baseDir, Arg: arg})
+			if err != nil {
+				return err
+			}
+			for _, id := range removed {
+				ok("Untracked %s", id)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "override base dir")
 	return cmd
 }
 
@@ -920,57 +970,254 @@ func newApplyCmd() *cobra.Command {
 
 // ── status ────────────────────────────────────────────────────────────────────
 
-// printStatusTable renders the status table to stdout and returns true if any
-// file is not SYNCED/ENCRYPTED.
+// pad returns s left-padded with spaces to at least width visible characters.
+func pad(s string, width int) string {
+	if len(s) >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-len(s))
+}
+
+// statusLabel returns the display label for a status.
+func statusLabel(s core.FileStatusLabel) string {
+	switch s {
+	case core.StatusDirty:
+		return "DIRTY"
+	case core.StatusPending:
+		return "PENDING"
+	default:
+		return string(s)
+	}
+}
+
+// printStatusTable renders the status table grouped by directory.
+// Folders where all files are clean show one summary line.
+// Folders with any changed files expand to list those files.
+// Returns true if any file needs attention.
 func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
-	counts := map[string]int{}
+	type dirGroup struct {
+		dir     string
+		results []core.FileStatusResult
+	}
 
-	fmt.Printf("%-40s %-20s %s\n", clrBold.Sprint("ID"), clrBold.Sprint("STATUS"), clrBold.Sprint("SYSTEM PATH"))
-	divider()
-
+	// Group results by directory, preserving first-seen order.
+	dirOrder := []string{}
+	groups := map[string][]core.FileStatusResult{}
 	for _, r := range results {
-		label := string(r.Status)
+		dir := filepath.Dir(r.SystemPath)
+		if _, seen := groups[dir]; !seen {
+			dirOrder = append(dirOrder, dir)
+		}
+		groups[dir] = append(groups[dir], r)
+	}
+
+	// Count totals.
+	totals := map[string]int{}
+	for _, r := range results {
+		totals[string(r.Status)]++
 		switch r.Status {
-		case core.StatusDirty:
-			label = "DIRTY/MODIFIED"
-			hasDiff = true
-		case core.StatusPending:
-			label = "PENDING/APPLY"
-			hasDiff = true
-		case core.StatusMissing:
+		case core.StatusDirty, core.StatusPending, core.StatusMissing:
 			hasDiff = true
 		}
-		counts[string(r.Status)]++
-		coloredLabel := statusColored(r.Status, fmt.Sprintf("%-20s", label))
-		fmt.Printf("%-40s %s %s\n", r.ID, coloredLabel, clrDim.Sprint(r.SystemPath))
+	}
+
+	// Compute max row label width — must account for single-file rows that
+	// show the full path, not just the directory name.
+	dirW := len("PATH")
+	for _, d := range dirOrder {
+		files := groups[d]
+		var label string
+		if len(files) == 1 {
+			label = files[0].SystemPath
+		} else {
+			label = d + "/"
+		}
+		if len(label) > dirW {
+			dirW = len(label)
+		}
+	}
+	dirW += 2
+
+	fmt.Printf("%s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint("STATUS"))
+	divider()
+
+	for _, dir := range dirOrder {
+		files := groups[dir]
+		dirDisplay := dir + "/"
+
+		// Tally this dir's statuses.
+		dCounts := map[string]int{}
+		for _, r := range files {
+			dCounts[string(r.Status)]++
+		}
+
+		// Build summary. Single-file rows: plain status word. Multi-file: "N status" counts.
+		var summary string
+		if len(files) == 1 {
+			r := files[0]
+			summary = statusColored(r.Status, statusLabel(r.Status))
+		} else {
+			var parts []string
+			if n := dCounts[string(core.StatusSynced)]; n > 0 {
+				parts = append(parts, clrSynced.Sprintf("%d synced", n))
+			}
+			if n := dCounts[string(core.StatusEncrypted)]; n > 0 {
+				parts = append(parts, clrEncrypted.Sprintf("%d encrypted", n))
+			}
+			if n := dCounts[string(core.StatusDirty)]; n > 0 {
+				parts = append(parts, clrDirty.Sprintf("%d dirty", n))
+			}
+			if n := dCounts[string(core.StatusPending)]; n > 0 {
+				parts = append(parts, clrPending.Sprintf("%d pending", n))
+			}
+			if n := dCounts[string(core.StatusMissing)]; n > 0 {
+				parts = append(parts, clrMissing.Sprintf("%d missing", n))
+			}
+			summary = strings.Join(parts, clrDim.Sprint("  ·  "))
+		}
+
+		// Determine if this dir has any non-clean files.
+		dirDirty := dCounts[string(core.StatusDirty)]+
+			dCounts[string(core.StatusPending)]+
+			dCounts[string(core.StatusMissing)] > 0
+
+		// Single file in this dir: show the full path instead of the folder.
+		rowLabel := dirDisplay
+		if len(files) == 1 {
+			rowLabel = files[0].SystemPath
+		}
+
+		if dirDirty {
+			fmt.Printf("%s  %s\n", clrDirty.Sprint(pad(rowLabel, dirW)), summary)
+		} else {
+			fmt.Printf("%s  %s\n", clrBold.Sprint(pad(rowLabel, dirW)), summary)
+		}
+
+		// Expand changed files under the dir (skip if single-file row — it's already shown inline).
+		if dirDirty && len(files) > 1 {
+			// Compute filename column width for alignment within this dir.
+			nameW := 0
+			for _, r := range files {
+				switch r.Status {
+				case core.StatusDirty, core.StatusPending, core.StatusMissing:
+					name := filepath.Base(r.SystemPath)
+					if len(name) > nameW {
+						nameW = len(name)
+					}
+				}
+			}
+			nameW += 2
+
+			for _, r := range files {
+				switch r.Status {
+				case core.StatusDirty, core.StatusPending, core.StatusMissing:
+				default:
+					continue
+				}
+				name := filepath.Base(r.SystemPath)
+				label := statusLabel(r.Status)
+				coloredLabel := statusColored(r.Status, label)
+				fmt.Printf("  %s %s  %s\n",
+					clrDim.Sprint("└"),
+					clrDirty.Sprint(pad(name, nameW)),
+					coloredLabel)
+
+				// Meta drift detail.
+				if r.MetaDrift && r.RecordedMeta != nil && r.CurrentMeta != nil {
+					rec := r.RecordedMeta
+					cur := r.CurrentMeta
+					if rec.UID != cur.UID || rec.GID != cur.GID {
+						recOwner := rec.Owner
+						if recOwner == "" { recOwner = fmt.Sprintf("%d", rec.UID) }
+						recGroup := rec.Group
+						if recGroup == "" { recGroup = fmt.Sprintf("%d", rec.GID) }
+						curOwner := cur.Owner
+						if curOwner == "" { curOwner = fmt.Sprintf("%d", cur.UID) }
+						curGroup := cur.Group
+						if curGroup == "" { curGroup = fmt.Sprintf("%d", cur.GID) }
+						fmt.Printf("    %s owner: %s → %s\n",
+							clrWarn.Sprint("⚠"),
+							clrDim.Sprintf("%s:%s", recOwner, recGroup),
+							clrDirty.Sprintf("%s:%s", curOwner, curGroup))
+					}
+					if rec.Mode != cur.Mode {
+						fmt.Printf("    %s mode:  %s → %s\n",
+							clrWarn.Sprint("⚠"),
+							clrDim.Sprintf("%04o", rec.Mode),
+							clrDirty.Sprintf("%04o", cur.Mode))
+					}
+				}
+			}
+		}
+	}
+
+	divider()
+	summaryParts := []string{clrBold.Sprintf("%d files", len(results))}
+	if n := totals[string(core.StatusSynced)]; n > 0 {
+		summaryParts = append(summaryParts, clrSynced.Sprintf("%d synced", n))
+	}
+	if n := totals[string(core.StatusDirty)]; n > 0 {
+		summaryParts = append(summaryParts, clrDirty.Sprintf("%d dirty", n))
+	}
+	if n := totals[string(core.StatusPending)]; n > 0 {
+		summaryParts = append(summaryParts, clrPending.Sprintf("%d pending", n))
+	}
+	if n := totals[string(core.StatusMissing)]; n > 0 {
+		summaryParts = append(summaryParts, clrMissing.Sprintf("%d missing", n))
+	}
+	if n := totals[string(core.StatusEncrypted)]; n > 0 {
+		summaryParts = append(summaryParts, clrEncrypted.Sprintf("%d encrypted", n))
+	}
+	fmt.Printf("  %s\n", strings.Join(summaryParts, clrDim.Sprint("  ·  ")))
+	return hasDiff
+}
+
+// printStatusFlat renders every tracked file as its own row.
+func printStatusFlat(results []core.FileStatusResult) (hasDiff bool) {
+	pathW := len("PATH")
+	stW := len("STATUS")
+	for _, r := range results {
+		if len(r.SystemPath) > pathW {
+			pathW = len(r.SystemPath)
+		}
+		if len(statusLabel(r.Status)) > stW {
+			stW = len(statusLabel(r.Status))
+		}
+	}
+	pathW += 2
+	stW += 2
+
+	fmt.Printf("%s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint("STATUS"))
+	divider()
+
+	totals := map[string]int{}
+	for _, r := range results {
+		label := statusLabel(r.Status)
+		switch r.Status {
+		case core.StatusDirty, core.StatusPending, core.StatusMissing:
+			hasDiff = true
+		}
+		totals[string(r.Status)]++
+		fmt.Printf("%s  %s\n", pad(r.SystemPath, pathW), statusColored(r.Status, pad(label, stW)))
 
 		if r.MetaDrift && r.RecordedMeta != nil && r.CurrentMeta != nil {
-			rec := r.RecordedMeta
-			cur := r.CurrentMeta
+			rec, cur := r.RecordedMeta, r.CurrentMeta
 			if rec.UID != cur.UID || rec.GID != cur.GID {
 				recOwner := rec.Owner
-				if recOwner == "" {
-					recOwner = fmt.Sprintf("%d", rec.UID)
-				}
+				if recOwner == "" { recOwner = fmt.Sprintf("%d", rec.UID) }
 				recGroup := rec.Group
-				if recGroup == "" {
-					recGroup = fmt.Sprintf("%d", rec.GID)
-				}
+				if recGroup == "" { recGroup = fmt.Sprintf("%d", rec.GID) }
 				curOwner := cur.Owner
-				if curOwner == "" {
-					curOwner = fmt.Sprintf("%d", cur.UID)
-				}
+				if curOwner == "" { curOwner = fmt.Sprintf("%d", cur.UID) }
 				curGroup := cur.Group
-				if curGroup == "" {
-					curGroup = fmt.Sprintf("%d", cur.GID)
-				}
-				fmt.Printf("   %s owner:  %s → %s\n",
+				if curGroup == "" { curGroup = fmt.Sprintf("%d", cur.GID) }
+				fmt.Printf("   %s owner: %s → %s\n",
 					clrWarn.Sprint("⚠"),
 					clrDim.Sprintf("%s:%s", recOwner, recGroup),
 					clrDirty.Sprintf("%s:%s", curOwner, curGroup))
 			}
 			if rec.Mode != cur.Mode {
-				fmt.Printf("   %s mode:   %s → %s\n",
+				fmt.Printf("   %s mode:  %s → %s\n",
 					clrWarn.Sprint("⚠"),
 					clrDim.Sprintf("%04o", rec.Mode),
 					clrDirty.Sprintf("%04o", cur.Mode))
@@ -979,33 +1226,25 @@ func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
 	}
 
 	divider()
-	parts := []string{clrBold.Sprintf("%d files", len(results))}
-	if n := counts[string(core.StatusSynced)]; n > 0 {
-		parts = append(parts, clrSynced.Sprintf("%d synced", n))
-	}
-	if n := counts[string(core.StatusDirty)]; n > 0 {
-		parts = append(parts, clrDirty.Sprintf("%d dirty", n))
-	}
-	if n := counts[string(core.StatusPending)]; n > 0 {
-		parts = append(parts, clrPending.Sprintf("%d pending", n))
-	}
-	if n := counts[string(core.StatusMissing)]; n > 0 {
-		parts = append(parts, clrMissing.Sprintf("%d missing", n))
-	}
-	if n := counts[string(core.StatusEncrypted)]; n > 0 {
-		parts = append(parts, clrEncrypted.Sprintf("%d encrypted", n))
-	}
-	fmt.Printf("  %s\n", strings.Join(parts, clrDim.Sprint("  ·  ")))
+	var sp []string
+	sp = append(sp, clrBold.Sprintf("%d files", len(results)))
+	if n := totals[string(core.StatusSynced)]; n > 0 { sp = append(sp, clrSynced.Sprintf("%d synced", n)) }
+	if n := totals[string(core.StatusDirty)]; n > 0 { sp = append(sp, clrDirty.Sprintf("%d dirty", n)) }
+	if n := totals[string(core.StatusPending)]; n > 0 { sp = append(sp, clrPending.Sprintf("%d pending", n)) }
+	if n := totals[string(core.StatusMissing)]; n > 0 { sp = append(sp, clrMissing.Sprintf("%d missing", n)) }
+	if n := totals[string(core.StatusEncrypted)]; n > 0 { sp = append(sp, clrEncrypted.Sprintf("%d encrypted", n)) }
+	fmt.Printf("  %s\n", strings.Join(sp, clrDim.Sprint("  ·  ")))
 	return hasDiff
 }
 
 func newStatusCmd() *cobra.Command {
 	var (
-		baseDir  string
-		sysRoot  string
-		ids      []string
+		baseDir   string
+		sysRoot   string
+		ids       []string
 		watchMode bool
-		interval time.Duration
+		interval  time.Duration
+		flatFiles bool
 	)
 
 	cmd := &cobra.Command{
@@ -1025,7 +1264,13 @@ func newStatusCmd() *cobra.Command {
 				info("No tracked files.")
 				return nil
 			}
-			if printStatusTable(results) {
+			var dirty bool
+			if flatFiles {
+				dirty = printStatusFlat(results)
+			} else {
+				dirty = printStatusTable(results)
+			}
+			if dirty {
 				os.Exit(1)
 			}
 			return nil
@@ -1037,6 +1282,7 @@ func newStatusCmd() *cobra.Command {
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.StringArrayVar(&ids, "id", nil, "check only this ID (repeatable)")
 	f.BoolVarP(&watchMode, "watch", "w", false, "continuously refresh status (Ctrl-C to stop)")
+	f.BoolVarP(&flatFiles, "files", "f", false, "show every tracked file individually instead of grouping by directory")
 	f.DurationVar(&interval, "interval", 3*time.Second, "refresh interval when --watch is set")
 	return cmd
 }
@@ -1501,6 +1747,14 @@ func newDoctorCmd() *cobra.Command {
 			fmt.Println(clrDim.Sprint("  ─────────────────────────────────────────────"))
 			fmt.Println()
 
+			labelW := 0
+			for _, f := range result.Findings {
+				if len(f.Label) > labelW {
+					labelW = len(f.Label)
+				}
+			}
+			labelW += 2
+
 			lastCategory := ""
 			for _, f := range result.Findings {
 				if f.Category != lastCategory {
@@ -1515,16 +1769,16 @@ func newDoctorCmd() *cobra.Command {
 				switch f.Severity {
 				case core.SeverityOK:
 					icon = clrOK.Sprint("✓")
-					label = clrOK.Sprintf("%-30s", f.Label)
+					label = clrOK.Sprint(pad(f.Label, labelW))
 				case core.SeverityWarn:
 					icon = clrWarn.Sprint("⚠")
-					label = clrWarn.Sprintf("%-30s", f.Label)
+					label = clrWarn.Sprint(pad(f.Label, labelW))
 				case core.SeverityFail:
 					icon = clrErr.Sprint("✗")
-					label = clrErr.Sprintf("%-30s", f.Label)
+					label = clrErr.Sprint(pad(f.Label, labelW))
 				case core.SeverityInfo:
 					icon = clrInfo.Sprint("ℹ")
-					label = clrDim.Sprintf("%-30s", f.Label)
+					label = clrDim.Sprint(pad(f.Label, labelW))
 				}
 
 				fmt.Printf("    %s  %s  %s\n", icon, label, clrDim.Sprint(f.Detail))
@@ -1850,27 +2104,22 @@ func newProfileListCmd() *cobra.Command {
 			home := sysfigHome()
 			pDir := profilesDir()
 
-			// Always show the default profile first.
 			active := globalProfile
 			if active == "" {
 				active = os.Getenv("SYSFIG_PROFILE")
 			}
 
+			// Collect rows first so we can compute column width.
+			type profileRow struct{ name, path, marker string }
+			rows := []profileRow{}
 			defaultMarker := ""
 			if active == "" {
 				defaultMarker = clrOK.Sprint(" ◀ active")
 			}
-			fmt.Printf("  %-20s  %s%s\n",
-				clrBold.Sprint("default"),
-				clrDim.Sprint(home),
-				defaultMarker)
+			rows = append(rows, profileRow{"default", home, defaultMarker})
 
 			entries, err := os.ReadDir(pDir)
-			if err != nil {
-				if os.IsNotExist(err) {
-					// No named profiles yet — that's fine.
-					return nil
-				}
+			if err != nil && !os.IsNotExist(err) {
 				return err
 			}
 			for _, e := range entries {
@@ -1882,10 +2131,21 @@ func newProfileListCmd() *cobra.Command {
 				if name == active {
 					marker = clrOK.Sprint(" ◀ active")
 				}
-				fmt.Printf("  %-20s  %s%s\n",
-					clrBold.Sprint(name),
-					clrDim.Sprint(filepath.Join(pDir, name)),
-					marker)
+				rows = append(rows, profileRow{name, filepath.Join(pDir, name), marker})
+			}
+
+			nameW := len("NAME")
+			for _, r := range rows {
+				if len(r.name) > nameW {
+					nameW = len(r.name)
+				}
+			}
+			nameW += 2
+
+			fmt.Printf("  %s  %s\n", clrBold.Sprint(pad("NAME", nameW)), clrBold.Sprint("PATH"))
+			divider()
+			for _, r := range rows {
+				fmt.Printf("  %s  %s%s\n", clrBold.Sprint(pad(r.name, nameW)), clrDim.Sprint(r.path), r.marker)
 			}
 			return nil
 		},
@@ -2136,12 +2396,21 @@ Use --all / -a to show every snapshot regardless of path.`,
 				prefix = clrDim.Sprint("[dry-run] ")
 			}
 
-			clrBold.Printf("\n  Restoring snapshot: %s\n\n", args[0])
+			idW := 0
 			for _, f := range result.Restored {
-				fmt.Printf("  %s✓ %-30s → %s\n", prefix, clrInfo.Sprint(f.ID), f.SystemPath)
+				if len(f.ID) > idW { idW = len(f.ID) }
 			}
 			for _, f := range result.Skipped {
-				fmt.Printf("  %s  %-30s   %s\n", clrDim.Sprint("―"), clrDim.Sprint(f.ID), clrDim.Sprint("skipped"))
+				if len(f.ID) > idW { idW = len(f.ID) }
+			}
+			idW += 2
+
+			clrBold.Printf("\n  Restoring snapshot: %s\n\n", args[0])
+			for _, f := range result.Restored {
+				fmt.Printf("  %s✓ %s → %s\n", prefix, clrInfo.Sprint(pad(f.ID, idW)), f.SystemPath)
+			}
+			for _, f := range result.Skipped {
+				fmt.Printf("  %s  %s   %s\n", clrDim.Sprint("―"), clrDim.Sprint(pad(f.ID, idW)), clrDim.Sprint("skipped"))
 			}
 			divider()
 			if result.DryRun {
@@ -2226,13 +2495,22 @@ Use --all / -a to restore the most recent snapshot globally (all files).`,
 			if dir != "" {
 				scope = dir
 			}
+			idW2 := 0
+			for _, f := range result.Restored {
+				if len(f.ID) > idW2 { idW2 = len(f.ID) }
+			}
+			for _, f := range result.Skipped {
+				if len(f.ID) > idW2 { idW2 = len(f.ID) }
+			}
+			idW2 += 2
+
 			clrBold.Printf("\n  Undo → restoring snapshot: %s  [scope: %s]\n\n",
 				clrInfo.Sprint(snapID), clrDim.Sprint(scope))
 			for _, f := range result.Restored {
-				fmt.Printf("  %s✓ %-30s → %s\n", prefix, clrInfo.Sprint(f.ID), f.SystemPath)
+				fmt.Printf("  %s✓ %s → %s\n", prefix, clrInfo.Sprint(pad(f.ID, idW2)), f.SystemPath)
 			}
 			for _, f := range result.Skipped {
-				fmt.Printf("  %s  %-30s   %s\n", clrDim.Sprint("―"), clrDim.Sprint(f.ID), clrDim.Sprint("skipped"))
+				fmt.Printf("  %s  %s   %s\n", clrDim.Sprint("―"), clrDim.Sprint(pad(f.ID, idW2)), clrDim.Sprint("skipped"))
 			}
 			divider()
 			if result.DryRun {
@@ -2321,14 +2599,29 @@ func newNodeListCmd() *cobra.Command {
 				info("No nodes registered. Use 'sysfig node add <name> <age-pubkey>'.")
 				return nil
 			}
+			nameW := len("NAME")
+			keyW := len("PUBLIC KEY")
+			for _, n := range nodes {
+				if len(n.Name) > nameW {
+					nameW = len(n.Name)
+				}
+				if len(n.PublicKey) > keyW {
+					keyW = len(n.PublicKey)
+				}
+			}
+			nameW += 2
+			keyW += 2
+
 			divider()
-			fmt.Printf("  %-20s  %-54s  %s\n",
-				clrBold.Sprint("NAME"), clrBold.Sprint("PUBLIC KEY"), clrBold.Sprint("ADDED"))
+			fmt.Printf("  %s  %s  %s\n",
+				clrBold.Sprint(pad("NAME", nameW)),
+				clrBold.Sprint(pad("PUBLIC KEY", keyW)),
+				clrBold.Sprint("ADDED"))
 			divider()
 			for _, n := range nodes {
-				fmt.Printf("  %-20s  %-54s  %s\n",
-					n.Name,
-					clrDim.Sprint(n.PublicKey),
+				fmt.Printf("  %s  %s  %s\n",
+					pad(n.Name, nameW),
+					clrDim.Sprint(pad(n.PublicKey, keyW)),
 					n.AddedAt.Format("2006-01-02"))
 			}
 			divider()
