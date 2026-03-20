@@ -1400,44 +1400,59 @@ func newDiffCmd() *cobra.Command {
 				os.Exit(0)
 			}
 
-			hasDiff := false
+			// Separate changed vs clean.
+			var changed, clean []core.DiffResult
 			for _, r := range results {
-				statusTag := clrDim.Sprintf("[%s]", diffStatusLabel(r.Status))
+				if r.Diff != "" {
+					changed = append(changed, r)
+				} else {
+					clean = append(clean, r)
+				}
+			}
+
+			if len(changed) == 0 {
+				info("All %d tracked files are identical to the repo.", len(results))
+				os.Exit(0)
+			}
+
+			// Print only the changed files.
+			for i, r := range changed {
+				if i > 0 {
+					fmt.Println()
+				}
+				var statusTag string
 				switch r.Status {
 				case core.StatusDirty:
-					statusTag = clrDirty.Sprintf("[%s]", diffStatusLabel(r.Status))
+					statusTag = clrDirty.Sprint("DIRTY")
 				case core.StatusPending:
-					statusTag = clrPending.Sprintf("[%s]", diffStatusLabel(r.Status))
+					statusTag = clrPending.Sprint("PENDING")
 				case core.StatusMissing:
-					statusTag = clrMissing.Sprintf("[%s]", diffStatusLabel(r.Status))
-				case core.StatusSynced:
-					statusTag = clrSynced.Sprintf("[%s]", diffStatusLabel(r.Status))
-				}
-				fmt.Printf("%s %s  %s\n", clrBold.Sprint("──"), clrBold.Sprint(r.ID), statusTag)
-				fmt.Printf("   %s %s\n", clrDim.Sprint("system:"), r.SystemPath)
-				fmt.Printf("   %s %s\n", clrDim.Sprint("repo:  "), r.RepoPath)
-
-				switch {
-				case r.Skipped:
-					fmt.Printf("   %s\n\n", clrDim.Sprintf("(skipped: %s)", r.SkipReason))
-				case r.Diff == "":
-					fmt.Printf("   %s\n\n", clrSynced.Sprint("(identical)"))
+					statusTag = clrMissing.Sprint("MISSING")
 				default:
-					hasDiff = true
-					fmt.Println()
-					if useColor {
-						fmt.Print(colorize(r.Diff))
-					} else {
-						fmt.Print(r.Diff)
-					}
-					fmt.Println()
+					statusTag = clrDim.Sprint(string(r.Status))
+				}
+				fmt.Printf("%s %s  %s\n",
+					clrBold.Sprint("──"),
+					clrBold.Sprint(r.SystemPath),
+					statusTag)
+				if useColor {
+					fmt.Print(colorize(r.Diff))
+				} else {
+					fmt.Print(r.Diff)
 				}
 			}
 
-			if hasDiff {
-				os.Exit(1)
+			// One-line summary of clean files.
+			divider()
+			if len(clean) > 0 {
+				fmt.Printf("  %s  ·  %s\n",
+					clrDirty.Sprintf("%d changed", len(changed)),
+					clrDim.Sprintf("%d identical", len(clean)))
+			} else {
+				fmt.Printf("  %s\n", clrDirty.Sprintf("%d changed", len(changed)))
 			}
-			os.Exit(0)
+
+			os.Exit(1)
 			return nil
 		},
 	}
