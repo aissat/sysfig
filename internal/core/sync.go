@@ -171,6 +171,10 @@ type SyncOptions struct {
 	// re-hashing files after a commit. This mirrors the --sys-root sandbox
 	// override used by `sysfig status` and `sysfig apply`.
 	SysRoot string
+
+	// FileIDs, when non-empty, restricts the sync to only these tracking IDs.
+	// All other tracked files are skipped.
+	FileIDs []string
 }
 
 // SyncResult reports what happened during a sync.
@@ -294,7 +298,16 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 	groups := map[string][]fileEntry{} // key = group dir path or file ID
 	var groupOrder []string            // preserve insertion order for deterministic commits
 
+	// Build a quick lookup set for FileIDs filter.
+	fileIDSet := make(map[string]bool, len(opts.FileIDs))
+	for _, fid := range opts.FileIDs {
+		fileIDSet[fid] = true
+	}
+
 	for id, rec := range currentState.Files {
+		if len(fileIDSet) > 0 && !fileIDSet[id] {
+			continue
+		}
 		relPath := rec.RepoPath
 		sysPath := rec.SystemPath
 		if opts.SysRoot != "" {

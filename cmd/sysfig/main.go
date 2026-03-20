@@ -18,7 +18,9 @@ import (
 	"golang.org/x/term"
 	"github.com/aissat/sysfig/internal/core"
 	"github.com/aissat/sysfig/internal/crypto"
+	"github.com/aissat/sysfig/internal/hash"
 	"github.com/aissat/sysfig/internal/state"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -232,6 +234,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newPullCmd(),
 		newLogCmd(),
 		newRollbackCmd(),
+		newRestoreCmd(),
 		newDoctorCmd(),
 		newSnapCmd(),
 		newWatchCmd(),
@@ -1927,20 +1930,43 @@ func colorize(diff string) string {
 		red   = "\033[31m"
 		green = "\033[32m"
 		cyan  = "\033[36m"
+		dim   = "\033[2m"
 		reset = "\033[0m"
 	)
 
-	// Split into lines for word-level pairing.
 	lines := strings.SplitAfter(diff, "\n")
 
 	var out bytes.Buffer
+	oldLine, newLine := 0, 0
+
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 		isRemoved := len(line) > 0 && line[0] == '-' && (len(line) < 4 || line[:3] != "---")
 		isAdded := len(line) > 0 && line[0] == '+' && (len(line) < 4 || line[:3] != "+++")
+		isHunk := len(line) > 2 && line[:2] == "@@"
+		isHeader := (len(line) >= 3 && line[:3] == "---") || (len(line) >= 3 && line[:3] == "+++")
+
+		if isHunk {
+			// Parse @@ -oldStart,.. +newStart,.. @@ to reset line counters.
+			var o, n int
+			fmt.Sscanf(line, "@@ -%d", &o)
+			if idx := strings.Index(line, " +"); idx >= 0 {
+				fmt.Sscanf(line[idx+1:], "+%d", &n)
+			}
+			oldLine, newLine = o, n
+			out.WriteString(cyan + line + reset)
+			continue
+		}
+
+		if isHeader {
+			out.WriteString(dim + line + reset)
+			continue
+		}
 
 		if isRemoved {
-			// Look ahead for a matching '+' line to do inline highlighting.
+			numStr := fmt.Sprintf("%s%4d%s ", dim, oldLine, reset)
+			oldLine++
+			// Look ahead for inline highlight.
 			if i+1 < len(lines) {
 				next := lines[i+1]
 				nextIsAdded := len(next) > 0 && next[0] == '+' && (len(next) < 4 || next[:3] != "+++")
@@ -1948,17 +1974,25 @@ func colorize(diff string) string {
 					oldTxt := strings.TrimRight(line[1:], "\n")
 					newTxt := strings.TrimRight(next[1:], "\n")
 					oldHL, newHL := inlineHighlight(oldTxt, newTxt)
-					out.WriteString(red + "-" + oldHL + reset + "\n")
-					out.WriteString(green + "+" + newHL + reset + "\n")
-					i++ // skip the next line
+					newNumStr := fmt.Sprintf("%s%4d%s ", dim, newLine, reset)
+					newLine++
+					out.WriteString(red + "-" + numStr + oldHL + reset + "\n")
+					out.WriteString(green + "+" + newNumStr + newHL + reset + "\n")
+					i++
 					continue
 				}
 			}
-			out.WriteString(red + line + reset)
+			out.WriteString(red + "-" + numStr + strings.TrimRight(line[1:], "\n") + reset + "\n")
 		} else if isAdded {
-			out.WriteString(green + line + reset)
-		} else if len(line) > 2 && line[:2] == "@@" {
-			out.WriteString(cyan + line + reset)
+			numStr := fmt.Sprintf("%s%4d%s ", dim, newLine, reset)
+			newLine++
+			out.WriteString(green + "+" + numStr + strings.TrimRight(line[1:], "\n") + reset + "\n")
+		} else if line != "" && line != "\n" {
+			// Context line — show both line numbers.
+			numStr := fmt.Sprintf("%s%4d%s ", dim, oldLine, reset)
+			oldLine++
+			newLine++
+			out.WriteString(numStr + line)
 		} else {
 			out.WriteString(line)
 		}
@@ -2170,10 +2204,11 @@ func newPullCmd() *cobra.Command {
 
 func newLogCmd() *cobra.Command {
 	var (
-		baseDir  string
-		filePath string
-		id       string
-		n        int
+		baseDir      string
+		filePath     string
+		id           string
+		n            int
+		noRollbacks  bool
 	)
 
 	cmd := &cobra.Command{
@@ -2254,6 +2289,9 @@ Filter to a specific path or ID:
 					continue
 				}
 				hash, date, subject := parts[0], parts[1], parts[2]
+				if noRollbacks && strings.HasPrefix(subject, "sysfig: rollback ") {
+					continue
+				}
 				decoration := ""
 				if len(parts) == 4 && parts[3] != "" {
 					decoration = " " + green + "(" + parts[3] + ")" + reset
@@ -2307,6 +2345,7 @@ Filter to a specific path or ID:
 	f.StringVar(&filePath, "path", "", "filter by repo-relative path")
 	f.StringVar(&id, "id", "", "filter by tracking ID")
 	f.IntVarP(&n, "number", "n", 0, "limit to last N commits (0 = unlimited)")
+	f.BoolVar(&noRollbacks, "no-rollbacks", false, "hide rollback commits from output")
 	return cmd
 }
 
@@ -2316,22 +2355,46 @@ func newRollbackCmd() *cobra.Command {
 	var (
 		baseDir string
 		id      string
+		all     bool
 		dryRun  bool
+		force   bool
 	)
 
 	cmd := &cobra.Command{
-		Use:   "rollback <commit>",
-		Short: "Restore tracked file(s) to a previous commit",
-		Long: `Restore one or all tracked files to the state they were in at <commit>.
+		Use:   "rollback <commit> [path]",
+		Short: "Reset repo history to a previous commit (destructive)",
+		Long: `Move the repo HEAD back to <commit>, discarding all commits after it.
+On-disk files are restored to match that commit state.
+
+This rewrites history — commits after <commit> are lost.
+Provide a system path or --all to scope the operation.
 
 Examples:
-  sysfig rollback 9b43458              # restore ALL tracked files to that commit
-  sysfig rollback 9b43458 --id 7734be1e  # restore only ~/.zshrc`,
-		Args: cobra.ExactArgs(1),
+  sysfig rollback 2b8e60e /home/aye7/.zshrc   # rollback one file by path
+  sysfig rollback 9b43458 --all               # rollback ALL tracked files (prompts)
+  sysfig rollback 9b43458 --all --force       # skip confirmation`,
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			baseDir = resolveBaseDir(baseDir)
 			commit := args[0]
+			var pathArg string
+			if len(args) == 2 {
+				pathArg = filepath.Clean(args[1])
+			}
+
+			if pathArg == "" && id == "" && !all {
+				return fmt.Errorf("provide a path, --id <tracking-id>, or --all\n\nexample: sysfig rollback %s /home/aye7/.zshrc", commit)
+			}
+
+			baseDir = resolveBaseDir(baseDir)
 			repoDir := filepath.Join(baseDir, "repo.git")
+
+			// Resolve full commit hash.
+			fullHash, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+				"rev-parse", "--verify", commit).Output()
+			if err != nil {
+				return fmt.Errorf("commit %q not found in repo", commit)
+			}
+			fullCommit := strings.TrimSpace(string(fullHash))
 
 			sm := state.NewManager(filepath.Join(baseDir, "state.json"))
 			s, err := sm.Load()
@@ -2339,23 +2402,27 @@ Examples:
 				return fmt.Errorf("rollback: load state: %w", err)
 			}
 
-			// Build list of records to restore.
-			var targets []*struct {
+			type rollbackTarget struct {
 				repoPath   string
 				systemPath string
 			}
+			var targets []rollbackTarget
 			for _, rec := range s.Files {
-				if id != "" && core.DeriveID(rec.SystemPath) != id {
+				sp := filepath.Clean(rec.SystemPath)
+				if pathArg != "" {
+					if sp != pathArg && !strings.HasPrefix(sp, pathArg+string(filepath.Separator)) {
+						continue
+					}
+				} else if id != "" && core.DeriveID(rec.SystemPath) != id {
 					continue
 				}
-				r := rec
-				targets = append(targets, &struct {
-					repoPath   string
-					systemPath string
-				}{r.RepoPath, r.SystemPath})
+				targets = append(targets, rollbackTarget{rec.RepoPath, rec.SystemPath})
 			}
 
 			if len(targets) == 0 {
+				if pathArg != "" {
+					return fmt.Errorf("no tracked files found matching %q", pathArg)
+				}
 				if id != "" {
 					return fmt.Errorf("no tracked file found for id %q", id)
 				}
@@ -2363,41 +2430,182 @@ Examples:
 				return nil
 			}
 
+				// --all: true git reset — moves entire repo HEAD, affects all files.
+			// per-file (path/--id): creates a new revert commit so other files are untouched.
+			isFullReset := all
+
+			if dryRun {
+				for _, t := range targets {
+					fmt.Printf("  %s  would restore %s → %s\n",
+						clrDim.Sprint("[dry-run]"), clrInfo.Sprint(commit[:7]), t.systemPath)
+				}
+				if isFullReset {
+					fmt.Printf("  %s  would reset HEAD to %s (all other files affected)\n",
+						clrDim.Sprint("[dry-run]"), clrInfo.Sprint(commit[:7]))
+				} else {
+					fmt.Printf("  %s  would create revert commit (other files untouched)\n",
+						clrDim.Sprint("[dry-run]"))
+				}
+				return nil
+			}
+
+			if isFullReset {
+				if !force {
+					clrWarn.Printf("  ⚠  This will reset HEAD to %s and discard ALL later commits.\n", commit[:7])
+					fmt.Printf("     %d file(s) will be restored on disk.\n", len(targets))
+					fmt.Print("  Continue? [y/N] ")
+					var answer string
+					fmt.Scanln(&answer)
+					if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+						info("Aborted.")
+						return nil
+					}
+				}
+
+				if out, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+					"update-ref", "refs/heads/master", fullCommit).CombinedOutput(); err != nil {
+					return fmt.Errorf("git update-ref failed: %s", strings.TrimSpace(string(out)))
+				}
+
+				for _, t := range targets {
+					content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+						"show", fullCommit+":"+t.repoPath).Output()
+					if err != nil {
+						continue
+					}
+					var perm os.FileMode = 0o644
+					if fi, err := os.Stat(t.systemPath); err == nil {
+						perm = fi.Mode().Perm()
+					}
+					if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
+						return err
+					}
+					if err := os.WriteFile(t.systemPath, content, perm); err != nil {
+						fail("write %s: %v", t.systemPath, err)
+						continue
+					}
+					if sysHash, err := hash.File(t.systemPath); err == nil {
+						_ = sm.WithLock(func(st *types.State) error {
+							if r, ok := st.Files[core.DeriveID(t.systemPath)]; ok {
+								r.CurrentHash = sysHash
+							}
+							return nil
+						})
+					}
+					ok("Restored: %s", clrBold.Sprint(t.systemPath))
+				}
+				info("HEAD reset to %s", clrInfo.Sprint(commit[:7]))
+			} else {
+				// Per-file: restore on disk + new revert commit (other files unaffected).
+				for _, t := range targets {
+					content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+						"show", fullCommit+":"+t.repoPath).Output()
+					if err != nil {
+						fail("commit %s does not contain %s — skipping", commit[:7], t.repoPath)
+						continue
+					}
+					var perm os.FileMode = 0o644
+					if fi, err := os.Stat(t.systemPath); err == nil {
+						perm = fi.Mode().Perm()
+					}
+					if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
+						return err
+					}
+					if err := os.WriteFile(t.systemPath, content, perm); err != nil {
+						fail("write %s: %v", t.systemPath, err)
+						continue
+					}
+					revertMsg := fmt.Sprintf("sysfig: rollback %s to %s", t.repoPath, commit[:7])
+					syncRes, syncErr := core.Sync(core.SyncOptions{
+						BaseDir: baseDir,
+						Message: revertMsg,
+						FileIDs: []string{core.DeriveID(t.systemPath)},
+					})
+					if syncErr != nil {
+						warn("restored %s on disk but sync failed: %v", t.systemPath, syncErr)
+					} else if syncRes != nil && syncRes.Committed {
+						ok("Rolled back: %s", clrBold.Sprint(t.systemPath))
+						fmt.Printf("     %s %s\n", clrDim.Sprint("from commit:"), clrInfo.Sprint(commit[:7]))
+					} else {
+						ok("Restored: %s %s", clrBold.Sprint(t.systemPath), clrDim.Sprint("(already up-to-date)"))
+					}
+				}
+				info("use 'sysfig log --no-rollbacks' to hide revert commits")
+			}
+			return nil
+		},
+	}
+
+	f := cmd.Flags()
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
+	f.StringVar(&id, "id", "", "rollback only the file with this tracking ID")
+	f.BoolVar(&all, "all", false, "full git reset — resets entire repo HEAD (affects all files)")
+	f.BoolVar(&dryRun, "dry-run", false, "show what would happen without making changes")
+	f.BoolVar(&force, "force", false, "skip confirmation prompt")
+	return cmd
+}
+
+// ── restore ───────────────────────────────────────────────────────────────────
+
+func newRestoreCmd() *cobra.Command {
+	var (
+		baseDir string
+		dryRun  bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "restore <path>",
+		Short: "Discard unsaved changes — restore file from last sync (HEAD)",
+		Long: `Overwrite a tracked file on disk with the version from the last sync.
+
+Useful when you edited a tracked file and want to undo the changes without
+needing a commit hash.
+
+Examples:
+  sysfig restore /etc/pacman.conf      # restore one file from HEAD
+  sysfig restore /etc/pacman.d/        # restore all files under a directory`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			repoDir := filepath.Join(baseDir, "repo.git")
+
+			sm := state.NewManager(filepath.Join(baseDir, "state.json"))
+			s, err := sm.Load()
+			if err != nil {
+				return fmt.Errorf("restore: load state: %w", err)
+			}
+
+			arg := filepath.Clean(args[0])
+
+			var targets []struct{ repoPath, systemPath string }
+			for _, rec := range s.Files {
+				sp := filepath.Clean(rec.SystemPath)
+				if sp != arg && !strings.HasPrefix(sp, arg+string(filepath.Separator)) {
+					continue
+				}
+				targets = append(targets, struct{ repoPath, systemPath string }{rec.RepoPath, rec.SystemPath})
+			}
+
+			if len(targets) == 0 {
+				return fmt.Errorf("no tracked files found matching %q", arg)
+			}
+
 			for _, t := range targets {
 				if dryRun {
-					fmt.Printf("  %s %s → %s\n", clrDim.Sprint("[dry-run]"), clrInfo.Sprint(commit), t.systemPath)
+					fmt.Printf("  %s  %s\n", clrDim.Sprint("[dry-run]"), t.systemPath)
 					continue
 				}
 
-				// git checkout <commit> -- <repoPath> into a temp work tree.
-				workDir, err := os.MkdirTemp("", "sysfig-rollback-*")
+				content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+					"show", "HEAD:"+t.repoPath).Output()
 				if err != nil {
-					return err
-				}
-				defer os.RemoveAll(workDir)
-
-				checkoutArgs := []string{
-					"--git-dir=" + repoDir,
-					"--work-tree=" + workDir,
-					"checkout", commit, "--", t.repoPath,
-				}
-				out, err := exec.Command("git", checkoutArgs...).CombinedOutput()
-				if err != nil {
-					fail("git checkout failed for %s: %s", t.repoPath, strings.TrimSpace(string(out)))
+					fail("HEAD does not contain %s — never synced?", t.repoPath)
 					continue
 				}
 
-				src := filepath.Join(workDir, t.repoPath)
-				content, err := os.ReadFile(src)
-				if err != nil {
-					fail("read restored file %s: %v", src, err)
-					continue
-				}
-
-				// Preserve existing permissions if file exists.
 				var perm os.FileMode = 0o644
-				if info, err := os.Stat(t.systemPath); err == nil {
-					perm = info.Mode().Perm()
+				if fi, err := os.Stat(t.systemPath); err == nil {
+					perm = fi.Mode().Perm()
 				}
 
 				if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
@@ -2407,8 +2615,17 @@ Examples:
 					fail("write %s: %v", t.systemPath, err)
 					continue
 				}
+
+				// Refresh state hash so status shows SYNCED again.
+				if sysHash, err := hash.File(t.systemPath); err == nil {
+					_ = sm.WithLock(func(st *types.State) error {
+						if r, ok := st.Files[core.DeriveID(t.systemPath)]; ok {
+							r.CurrentHash = sysHash
+						}
+						return nil
+					})
+				}
 				ok("Restored: %s", clrBold.Sprint(t.systemPath))
-				fmt.Printf("     %s %s\n", clrDim.Sprint("from commit:"), clrInfo.Sprint(commit))
 			}
 			return nil
 		},
@@ -2416,8 +2633,7 @@ Examples:
 
 	f := cmd.Flags()
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
-	f.StringVar(&id, "id", "", "restore only the file with this tracking ID")
-	f.BoolVar(&dryRun, "dry-run", false, "show what would be restored without writing files")
+	f.BoolVar(&dryRun, "dry-run", false, "show what would be restored without writing")
 	return cmd
 }
 
@@ -2517,7 +2733,8 @@ func newDoctorCmd() *cobra.Command {
 func watchRun(baseDir, sysRoot string, debounce time.Duration, dryRun bool) error {
 	clrBold.Println("Watching tracked files for changes  (Ctrl-C to stop)")
 	fmt.Printf("  %s %s\n", clrDim.Sprint("base-dir:"), clrDim.Sprint(baseDir))
-	fmt.Printf("  %s %v\n\n", clrDim.Sprint("debounce:"), debounce)
+	fmt.Printf("  %s %v\n", clrDim.Sprint("debounce:"), debounce)
+	divider()
 
 	stop := make(chan struct{})
 
@@ -2537,14 +2754,19 @@ func watchRun(baseDir, sysRoot string, debounce time.Duration, dryRun bool) erro
 			return
 		}
 		if err != nil {
-			fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrErr.Sprint("ERROR"), err)
+			fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrErr.Sprint("error"), err)
 			return
 		}
-		if result != nil && !result.Committed {
+		if result == nil || !result.Committed {
 			return
 		}
-		fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrOK.Sprint("synced"), path)
-		if result != nil && result.Message != "" {
+		fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrWarn.Sprint("changed"), path)
+		if len(result.CommittedFiles) > 0 {
+			for _, f := range result.CommittedFiles {
+				fmt.Printf("            %s %s\n", clrOK.Sprint("committed"), clrDim.Sprint(f))
+			}
+		}
+		if result.Message != "" {
 			fmt.Printf("            %s\n", clrDim.Sprint(result.Message))
 		}
 	}
