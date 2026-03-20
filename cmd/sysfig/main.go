@@ -179,10 +179,18 @@ func isatty() bool {
 
 // ── Root command ──────────────────────────────────────────────────────────────
 
+// Build-time variables injected via -ldflags.
+var (
+	version   = "dev"
+	commit    = "none"
+	buildDate = "unknown"
+)
+
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "sysfig",
-		Short: "Config management that thinks like a sysadmin, not a git wrapper",
+		Use:     "sysfig",
+		Short:   "Config management that thinks like a sysadmin, not a git wrapper",
+		Version: fmt.Sprintf("%s (commit %s, built %s)", version, commit, buildDate),
 		Long: `sysfig — security-first configuration management for Linux.
 
 Version-control your config files in a bare git repo, deploy them across
@@ -198,6 +206,15 @@ ownership and permissions, and stay fully offline-capable.`,
 		"use named profile (~/.sysfig/profiles/<name>); overrides --base-dir default")
 
 	root.AddCommand(
+		&cobra.Command{
+			Use:   "version",
+			Short: "Show version information",
+			Run: func(cmd *cobra.Command, args []string) {
+				fmt.Printf("sysfig %s\n", version)
+				fmt.Printf("  commit:  %s\n", commit)
+				fmt.Printf("  built:   %s\n", buildDate)
+			},
+		},
 		newDeployCmd(),
 		newSetupCmd(),
 		newInitCmd(),
