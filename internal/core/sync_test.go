@@ -525,9 +525,10 @@ func TestSync_WorksOffline(t *testing.T) {
 		t.Error("Push should be false in offline mode")
 	}
 
-	// The commit must be accessible in the bare repo via git-show.
+	// With branch-per-track, the file is committed to its dedicated branch,
+	// not HEAD (master). Derive the expected branch name the same way sync does.
 	repoDir := filepath.Join(baseDir, "repo.git")
-	showCmd := exec.Command("git", "--git-dir="+repoDir, "show", "HEAD:etc/app/config.conf")
+	showCmd := exec.Command("git", "--git-dir="+repoDir, "show", "track/etc/app/config.conf:etc/app/config.conf")
 	showCmd.Env = os.Environ()
 	out, err := showCmd.CombinedOutput()
 	if err != nil {
@@ -547,9 +548,9 @@ func writeMinimalState(t *testing.T, baseDir, id, systemPath, relPath, recordedH
 	t.Helper()
 
 	type fileMeta struct {
-		UID   int    `json:"uid"`
-		GID   int    `json:"gid"`
-		Mode  uint32 `json:"mode"`
+		UID  int    `json:"uid"`
+		GID  int    `json:"gid"`
+		Mode uint32 `json:"mode"`
 	}
 	type fileRecord struct {
 		ID          string    `json:"id"`
@@ -561,9 +562,9 @@ func writeMinimalState(t *testing.T, baseDir, id, systemPath, relPath, recordedH
 		Meta        *fileMeta `json:"meta,omitempty"`
 	}
 	type state struct {
-		Version int                       `json:"version"`
-		Files   map[string]*fileRecord    `json:"files"`
-		Backups map[string][]interface{}  `json:"backups"`
+		Version int                      `json:"version"`
+		Files   map[string]*fileRecord   `json:"files"`
+		Backups map[string][]interface{} `json:"backups"`
 	}
 
 	s := &state{

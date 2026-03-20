@@ -85,6 +85,14 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 		byPath[rec.SystemPath] = rec
 	}
 
+	// trackRef returns the git ref for a file's track branch.
+	trackRef := func(rec *types.FileRecord) string {
+		if rec.Branch != "" {
+			return rec.Branch
+		}
+		return "track/" + SanitizeBranchName(rec.RepoPath)
+	}
+
 	var results []DiffResult
 
 	for _, sr := range statuses {
@@ -123,7 +131,7 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 			//
 			// Read repo content from the bare repo and write it to a temp file
 			// since there is no checked-out working tree.
-			repoContent, err := gitShowBytes(repoDir, rec.RepoPath)
+			repoContent, err := gitShowBytesAt(repoDir, trackRef(rec), rec.RepoPath)
 			if err != nil {
 				return nil, fmt.Errorf("core: diff: %s: read repo: %w", sr.ID, err)
 			}
@@ -147,7 +155,7 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 			// a = system (current), b = repo (incoming).
 			//
 			// Read repo content from the bare repo and write it to a temp file.
-			repoContent, err := gitShowBytes(repoDir, rec.RepoPath)
+			repoContent, err := gitShowBytesAt(repoDir, trackRef(rec), rec.RepoPath)
 			if err != nil {
 				return nil, fmt.Errorf("core: diff: %s: read repo: %w", sr.ID, err)
 			}
@@ -168,7 +176,7 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 
 		default:
 			// Unknown status — treat conservatively as dirty.
-			repoContent, err := gitShowBytes(repoDir, rec.RepoPath)
+			repoContent, err := gitShowBytesAt(repoDir, trackRef(rec), rec.RepoPath)
 			if err != nil {
 				return nil, fmt.Errorf("core: diff: %s: read repo: %w", sr.ID, err)
 			}

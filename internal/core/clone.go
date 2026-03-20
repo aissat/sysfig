@@ -205,8 +205,12 @@ func Clone(opts CloneOptions) (*CloneResult, error) {
 	sm := state.NewManager(stateFile)
 
 	if err := sm.WithLock(func(s *types.State) error {
-		// Read sysfig.yaml from the bare repo HEAD.
-		data, err := gitShow(repoDir, "HEAD", "sysfig.yaml")
+		// Read sysfig.yaml from the manifest branch (branch-per-track arch).
+		// Fall back to HEAD for repos created before the branch-per-track migration.
+		data, err := gitShow(repoDir, "manifest", "sysfig.yaml")
+		if err != nil {
+			data, err = gitShow(repoDir, "HEAD", "sysfig.yaml")
+		}
 		if err != nil {
 			// sysfig.yaml not present in the remote repo — nothing to seed.
 			// state.json is still initialised (empty) by WithLock.

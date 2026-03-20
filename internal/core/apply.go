@@ -199,7 +199,11 @@ func applyOne(opts ApplyOptions, bm *backup.Manager, rec *types.FileRecord) (App
 	// 3. Read the repo file from the bare repo via git-show.
 	//    rec.RepoPath is the git-relative path (e.g. "etc/nginx/nginx.conf").
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
-	repoData, err := gitShowBytes(repoDir, rec.RepoPath)
+	trackBranch := rec.Branch
+	if trackBranch == "" {
+		trackBranch = "track/" + SanitizeBranchName(rec.RepoPath)
+	}
+	repoData, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath)
 	if err != nil {
 		return result, fmt.Errorf("core: apply: repo file missing for id %q: %w", rec.ID, err)
 	}

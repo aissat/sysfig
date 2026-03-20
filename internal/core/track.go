@@ -58,10 +58,10 @@ func IsDenied(path string) bool {
 
 // TrackOptions holds the parameters for tracking a file.
 type TrackOptions struct {
-	SystemPath string   // absolute path to the file on disk
-	RepoDir    string   // bare git repo directory (e.g. ~/.sysfig/repo.git)
-	StateDir   string   // directory containing state.json (e.g. ~/.sysfig)
-	ID         string   // user-supplied ID; if empty, derived from path
+	SystemPath string // absolute path to the file on disk
+	RepoDir    string // bare git repo directory (e.g. ~/.sysfig/repo.git)
+	StateDir   string // directory containing state.json (e.g. ~/.sysfig)
+	ID         string // user-supplied ID; if empty, derived from path
 	Tags       []string
 	Platform   []string
 	Encrypt    bool
@@ -83,7 +83,6 @@ type TrackResult struct {
 	RepoPath string // git-relative path where the file is stored (e.g. "etc/nginx/nginx.conf")
 	Hash     string // BLAKE3 hex hash of the file
 }
-
 
 // stageFilePlain stages a real on-disk file (at its absolute system path)
 // directly into the bare repo index under relPath (git-relative, no leading /).
@@ -272,6 +271,14 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		}
 
 		now := time.Now()
+		// Branch name: "track/<repoPath>" for individual files,
+		// "track/<group>" for directory-tracked groups.
+		branchBase := repoRel
+		if opts.Group != "" {
+			branchBase = strings.TrimPrefix(opts.Group, "/")
+		}
+		branch := "track/" + SanitizeBranchName(branchBase)
+
 		s.Files[id] = &types.FileRecord{
 			ID:          id,
 			SystemPath:  logicalPath,
@@ -284,6 +291,7 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 			Tags:        opts.Tags,
 			Meta:        meta,
 			Group:       opts.Group,
+			Branch:      branch,
 		}
 		return nil
 	}); err != nil {
@@ -323,7 +331,9 @@ func Untrack(opts UntrackOptions) ([]string, error) {
 		for id, rec := range s.Files {
 			match := id == arg ||
 				rec.SystemPath == arg ||
-				strings.HasPrefix(rec.SystemPath, arg+"/")
+				strings.HasPrefix(rec.SystemPath, arg+"/") ||
+				rec.Group == arg ||
+				strings.HasPrefix(rec.Group, arg+"/")
 			if match {
 				delete(s.Files, id)
 				removed = append(removed, id)
