@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // TestLoad_Empty verifies that loading from a non-existent path returns a

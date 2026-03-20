@@ -10,8 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/sysfig-dev/sysfig/internal/core"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/internal/core"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // ---------------------------------------------------------------------------

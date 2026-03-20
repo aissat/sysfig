@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sysfig-dev/sysfig/internal/crypto"
+	"github.com/aissat/sysfig/internal/crypto"
 )
 
 // TestNewSecureKey_Basic creates a SecureKey from a known byte slice, verifies

@@ -21,7 +21,7 @@ Download the latest binary for your architecture:
 
 ```sh
 curl -Lo /usr/local/bin/sysfig \
-  https://github.com/sysfig-dev/sysfig/releases/latest/download/sysfig-linux-amd64
+  https://github.com/aissat/sysfig/releases/latest/download/sysfig-linux-amd64
 chmod +x /usr/local/bin/sysfig
 ```
 

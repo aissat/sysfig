@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/sysfig-dev/sysfig/internal/core"
+	"github.com/aissat/sysfig/internal/core"
 )
 
 func testVars() core.TemplateVars {

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sysfig-dev/sysfig/internal/crypto"
-	sysfigfs "github.com/sysfig-dev/sysfig/internal/fs"
-	"github.com/sysfig-dev/sysfig/internal/hash"
-	"github.com/sysfig-dev/sysfig/internal/state"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/internal/crypto"
+	sysfigfs "github.com/aissat/sysfig/internal/fs"
+	"github.com/aissat/sysfig/internal/hash"
+	"github.com/aissat/sysfig/internal/state"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // systemDenylist is the hardcoded set of paths that sysfig refuses to track.

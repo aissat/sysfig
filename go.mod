@@ -1,4 +1,4 @@
-module github.com/sysfig-dev/sysfig
+module github.com/aissat/sysfig
 
 go 1.26.1
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"filippo.io/age"
-	sysfigfs "github.com/sysfig-dev/sysfig/internal/fs"
+	sysfigfs "github.com/aissat/sysfig/internal/fs"
 )
 
 const masterKeyFile = "master.key"

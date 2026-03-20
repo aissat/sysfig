@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/sysfig-dev/sysfig/internal/hash"
+	"github.com/aissat/sysfig/internal/hash"
 )
 
 func TestBytes_Deterministic(t *testing.T) {

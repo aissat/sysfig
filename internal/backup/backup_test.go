@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sysfig-dev/sysfig/internal/backup"
+	"github.com/aissat/sysfig/internal/backup"
 )
 
 // writeTempFile creates a temporary file with the given content inside dir and

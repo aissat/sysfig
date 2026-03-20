@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/sysfig-dev/sysfig/internal/state"
+	"github.com/aissat/sysfig/internal/state"
 )
 
 // WatchOptions configures a sysfig watch operation.

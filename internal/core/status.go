@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"sort"
 
-	sysfigfs "github.com/sysfig-dev/sysfig/internal/fs"
-	"github.com/sysfig-dev/sysfig/internal/hash"
-	"github.com/sysfig-dev/sysfig/internal/state"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	sysfigfs "github.com/aissat/sysfig/internal/fs"
+	"github.com/aissat/sysfig/internal/hash"
+	"github.com/aissat/sysfig/internal/state"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // FileStatusLabel is the display status string.

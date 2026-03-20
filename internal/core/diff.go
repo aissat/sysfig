@@ -8,9 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
-	"github.com/sysfig-dev/sysfig/internal/state"
+	"github.com/aissat/sysfig/internal/state"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // DiffResult holds the unified diff output for one tracked file.
@@ -76,10 +78,22 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 		return nil, fmt.Errorf("core: diff: load state: %w", err)
 	}
 
+	// Build a lookup by SystemPath since IDs are now computed hashes and
+	// may not match the keys stored in state.json.
+	byPath := make(map[string]*types.FileRecord, len(s.Files))
+	for _, rec := range s.Files {
+		byPath[rec.SystemPath] = rec
+	}
+
 	var results []DiffResult
 
 	for _, sr := range statuses {
-		rec, ok := s.Files[sr.ID]
+		// Strip sysRoot prefix to get the logical path for lookup.
+		logicalPath := sr.SystemPath
+		if opts.SysRoot != "" {
+			logicalPath = strings.TrimPrefix(sr.SystemPath, opts.SysRoot)
+		}
+		rec, ok := byPath[logicalPath]
 		if !ok {
 			continue
 		}

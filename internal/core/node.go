@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/sysfig-dev/sysfig/internal/state"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/internal/state"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // NodeAddOptions configures a node add operation.

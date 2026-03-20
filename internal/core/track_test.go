@@ -9,9 +9,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/sysfig-dev/sysfig/internal/core"
-	"github.com/sysfig-dev/sysfig/internal/hash"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/internal/core"
+	"github.com/aissat/sysfig/internal/hash"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // initTestBareRepo creates a bare git repo at repoDir and seeds it with an
@@ -278,13 +278,14 @@ func TestTrack_IDDerivation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// With SysRoot stripped, the logical path is /etc/nginx/nginx.conf
-	// so the derived ID must be "etc_nginx_nginx_conf".
-	assert.Equal(t, "etc_nginx_nginx_conf", result.ID)
+	// With SysRoot stripped, the logical path is /etc/nginx/nginx.conf.
+	// The derived ID must be the 8-char SHA-256 hash of that path.
+	expectedID := core.DeriveID("/etc/nginx/nginx.conf")
+	assert.Equal(t, expectedID, result.ID)
 
 	// The ID must also appear in state.json.
 	s := readState(t, stateDir)
-	_, ok := s.Files["etc_nginx_nginx_conf"]
+	_, ok := s.Files[expectedID]
 	assert.True(t, ok, "state.json must contain a record keyed by the derived ID")
 }
 

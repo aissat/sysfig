@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	sysfigfs "github.com/sysfig-dev/sysfig/internal/fs"
+	sysfigfs "github.com/aissat/sysfig/internal/fs"
 )
 
 func TestWriteFileAtomic_Basic(t *testing.T) {

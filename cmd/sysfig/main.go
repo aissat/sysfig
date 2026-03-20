@@ -15,8 +15,8 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/sysfig-dev/sysfig/internal/core"
-	"github.com/sysfig-dev/sysfig/internal/crypto"
+	"github.com/aissat/sysfig/internal/core"
+	"github.com/aissat/sysfig/internal/crypto"
 )
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -2149,7 +2149,7 @@ func newWatchRunCmd() *cobra.Command {
 
 const watchServiceTemplate = `[Unit]
 Description=sysfig config watcher — auto-sync tracked files
-Documentation=https://github.com/sysfig-dev/sysfig
+Documentation=https://github.com/aissat/sysfig
 After=default.target
 
 [Service]

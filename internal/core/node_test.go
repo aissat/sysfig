@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/sysfig-dev/sysfig/internal/state"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/internal/state"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // testPubKey generates a fresh age X25519 key pair and returns the public key string.

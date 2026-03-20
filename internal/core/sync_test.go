@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sysfig-dev/sysfig/internal/core"
+	"github.com/aissat/sysfig/internal/core"
 )
 
 // requireGitSync skips the test if the git binary is not available on PATH.

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // ReadMeta reads the ownership and permission metadata of the file at path

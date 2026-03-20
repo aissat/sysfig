@@ -10,9 +10,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/sysfig-dev/sysfig/internal/core"
-	"github.com/sysfig-dev/sysfig/internal/hash"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/internal/core"
+	"github.com/aissat/sysfig/internal/hash"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -115,8 +115,8 @@ func buildDiffFixture(t *testing.T, repoContent []byte) (baseDir, id, sysPath, r
 	baseDir = t.TempDir()
 	repoDir := filepath.Join(baseDir, "repo.git")
 
-	id = "etc_app_conf"
 	sysPath = "/etc/app.conf"
+	id = core.DeriveID(sysPath)
 	relPath = "etc/app.conf"
 
 	// Seed the bare repo with the committed file.
@@ -408,17 +408,17 @@ func TestDiff_ResultsSortedByID(t *testing.T) {
 	content := []byte("v=1\n")
 	recordedHash := hash.Bytes(content)
 
-	ids := []string{"zzz_last", "aaa_first", "mmm_middle"}
-	files := make(map[string]*types.FileRecord, len(ids))
+	sysPaths := []string{"/alpha/file.conf", "/beta/file.conf", "/gamma/file.conf"}
+	files := make(map[string]*types.FileRecord, len(sysPaths))
 
 	// Initialise the bare repo with the first file to get HEAD established,
 	// then push additional files in subsequent commits.
-	firstRelPath := ids[0] + "/file.conf"
+	firstRelPath := sysPaths[0][1:] // strip leading /
 	initBareRepoDiff(t, repoDir, firstRelPath, content)
-
-	files[ids[0]] = &types.FileRecord{
-		ID:          ids[0],
-		SystemPath:  "/" + ids[0] + "/file.conf",
+	firstID := core.DeriveID(sysPaths[0])
+	files[firstID] = &types.FileRecord{
+		ID:          firstID,
+		SystemPath:  sysPaths[0],
 		RepoPath:    firstRelPath,
 		CurrentHash: recordedHash,
 		LastSync:    &now,
@@ -426,12 +426,13 @@ func TestDiff_ResultsSortedByID(t *testing.T) {
 	}
 
 	// Push additional files into the same bare repo.
-	for _, id := range ids[1:] {
-		relPath := id + "/file.conf"
+	for _, sysPath := range sysPaths[1:] {
+		relPath := sysPath[1:]
 		pushNewContentDiff(t, repoDir, relPath, content)
-		files[id] = &types.FileRecord{
-			ID:          id,
-			SystemPath:  "/" + id + "/file.conf",
+		fileID := core.DeriveID(sysPath)
+		files[fileID] = &types.FileRecord{
+			ID:          fileID,
+			SystemPath:  sysPath,
 			RepoPath:    relPath,
 			CurrentHash: recordedHash,
 			LastSync:    &now,
@@ -456,9 +457,10 @@ func TestDiff_ResultsSortedByID(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 3)
 
-	assert.Equal(t, "aaa_first", results[0].ID)
-	assert.Equal(t, "mmm_middle", results[1].ID)
-	assert.Equal(t, "zzz_last", results[2].ID)
+	// Results must be sorted by ID (hash) — just verify ordering is consistent.
+	for i := 1; i < len(results); i++ {
+		assert.True(t, results[i-1].ID <= results[i].ID, "results must be sorted by ID")
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	sysfigfs "github.com/sysfig-dev/sysfig/internal/fs"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	sysfigfs "github.com/aissat/sysfig/internal/fs"
+	"github.com/aissat/sysfig/pkg/types"
 	"golang.org/x/sys/unix"
 )
 

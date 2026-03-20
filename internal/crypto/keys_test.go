@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/sysfig-dev/sysfig/internal/crypto"
+	"github.com/aissat/sysfig/internal/crypto"
 )
 
 // TestGenerate_CreatesFile verifies that Generate writes master.key at the

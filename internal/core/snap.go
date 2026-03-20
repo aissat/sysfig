@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sysfig-dev/sysfig/internal/hash"
-	"github.com/sysfig-dev/sysfig/internal/state"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/internal/hash"
+	"github.com/aissat/sysfig/internal/state"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // SnapDir returns the snaps directory inside baseDir.

@@ -10,9 +10,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/sysfig-dev/sysfig/internal/core"
-	"github.com/sysfig-dev/sysfig/internal/hash"
-	"github.com/sysfig-dev/sysfig/pkg/types"
+	"github.com/aissat/sysfig/internal/core"
+	"github.com/aissat/sysfig/internal/hash"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -78,8 +78,8 @@ func buildStatusFixture(t *testing.T, content []byte) (baseDir, id, sysPath stri
 	baseDir = t.TempDir()
 	repoDir := filepath.Join(baseDir, "repo.git")
 
-	id = "etc_myapp_conf"
 	sysPath = "/etc/myapp.conf"
+	id = core.DeriveID(sysPath)
 	relPath := "etc/myapp.conf" // git-relative path stored in FileRecord.RepoPath
 
 	// Seed the bare repo with the file committed.

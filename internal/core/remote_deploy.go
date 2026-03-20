@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sysfig-dev/sysfig/internal/crypto"
-	"github.com/sysfig-dev/sysfig/internal/state"
+	"github.com/aissat/sysfig/internal/crypto"
+	"github.com/aissat/sysfig/internal/state"
 )
 
 // RemoteDeployOptions configures an SSH-based remote deploy operation.

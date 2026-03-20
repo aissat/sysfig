@@ -167,7 +167,7 @@ PATH / STATUS
 **From source:**
 
 ```bash
-git clone https://github.com/sysfig-dev/sysfig
+git clone https://github.com/aissat/sysfig
 cd sysfig
 go build -o sysfig ./cmd/sysfig
 sudo mv sysfig /usr/local/bin/
