@@ -15,6 +15,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"github.com/aissat/sysfig/internal/core"
 	"github.com/aissat/sysfig/internal/crypto"
 )
@@ -1549,11 +1550,12 @@ func runStatusWatch(baseDir, sysRoot string, ids []string, interval time.Duratio
 
 func newDiffCmd() *cobra.Command {
 	var (
-		baseDir    string
-		sysRoot    string
-		colorFlag  bool
-		colorSet   bool
-		ids        []string
+		baseDir      string
+		sysRoot      string
+		colorFlag    bool
+		colorSet     bool
+		ids          []string
+		sideBySide   bool
 	)
 
 	cmd := &cobra.Command{
@@ -1601,6 +1603,7 @@ func newDiffCmd() *cobra.Command {
 			}
 
 			// Print only the changed files.
+			termW := termWidth()
 			for i, r := range changed {
 				if i > 0 {
 					fmt.Println()
@@ -1620,7 +1623,9 @@ func newDiffCmd() *cobra.Command {
 					clrBold.Sprint("──"),
 					clrBold.Sprint(r.SystemPath),
 					statusTag)
-				if useColor {
+				if sideBySide {
+					fmt.Print(renderSideBySide(r.Diff, termW))
+				} else if useColor {
 					fmt.Print(colorize(r.Diff))
 				} else {
 					fmt.Print(r.Diff)
@@ -1646,8 +1651,256 @@ func newDiffCmd() *cobra.Command {
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.BoolVar(&colorFlag, "color", true, "colorize diff output (default: true when stdout is a TTY)")
+	f.BoolVarP(&sideBySide, "side-by-side", "y", false, "show diff in side-by-side view")
 	f.StringArrayVar(&ids, "id", nil, "diff only this ID (repeatable)")
 	return cmd
+}
+
+// termWidth returns the current terminal column width, defaulting to 160.
+func termWidth() int {
+	// Try to read the terminal size via ioctl.
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+		return w
+	}
+	return 160
+}
+
+// renderSideBySide formats a unified diff as a side-by-side view with line
+// numbers, red-highlighted removed lines on the left and blue-highlighted
+// added lines on the right.
+func renderSideBySide(diff string, totalWidth int) string {
+	const (
+		lineNoW  = 4  // digits for line number
+		gutterW  = 2  // " │" separator
+		padBetween = 2 // gap between left and right panels
+	)
+
+	// ANSI codes (no fatih/color — direct codes keep it simple here).
+	const (
+		reset    = "\033[0m"
+		bold     = "\033[1m"
+		dim      = "\033[2m"
+		red      = "\033[38;2;255;255;255m\033[48;2;139;0;0m"   // white text, dark red bg
+		green    = "\033[38;2;255;255;255m\033[48;2;0;100;0m"   // white text, dark green bg
+		dimLine  = "\033[2m"
+	)
+
+	// Each panel gets half the width minus line-number and gutter columns.
+	panelW := (totalWidth-padBetween)/2 - lineNoW - gutterW
+	if panelW < 20 {
+		panelW = 20
+	}
+
+	// truncate or pad a string to exactly w visible chars (no ANSI).
+	fit := func(s string, w int) string {
+		if len(s) >= w {
+			return s[:w]
+		}
+		return s + strings.Repeat(" ", w-len(s))
+	}
+
+	// Parse the unified diff into side-by-side rows.
+	type row struct {
+		leftNo  int    // 0 = empty
+		leftTxt string
+		leftChg bool   // removed line
+		rightNo int
+		rightTxt string
+		rightChg bool  // added line
+		header  string // non-empty for @@ lines
+	}
+
+	var rows []row
+	leftLine, rightLine := 0, 0
+
+	// Pre-parse: group each hunk's - and + lines, pair them up.
+	lines := strings.Split(diff, "\n")
+	i := 0
+	for i < len(lines) {
+		l := lines[i]
+		if strings.HasPrefix(l, "@@") {
+			// Parse line numbers from @@ -a,b +c,d @@
+			var la, lc int
+			fmt.Sscanf(l, "@@ -%d", &la)
+			fmt.Sscanf(l[strings.Index(l, "+"):], "+%d", &lc)
+			leftLine = la
+			rightLine = lc
+			rows = append(rows, row{header: l})
+			i++
+			continue
+		}
+		if strings.HasPrefix(l, "---") || strings.HasPrefix(l, "+++") {
+			i++
+			continue
+		}
+		if strings.HasPrefix(l, " ") || l == "" {
+			txt := ""
+			if len(l) > 0 {
+				txt = l[1:]
+			}
+			rows = append(rows, row{
+				leftNo: leftLine, leftTxt: txt,
+				rightNo: rightLine, rightTxt: txt,
+			})
+			leftLine++
+			rightLine++
+			i++
+			continue
+		}
+		// Collect a block of - and + lines together, pair them.
+		var removed, added []string
+		for i < len(lines) && strings.HasPrefix(lines[i], "-") {
+			removed = append(removed, lines[i][1:])
+			i++
+		}
+		for i < len(lines) && strings.HasPrefix(lines[i], "+") {
+			added = append(added, lines[i][1:])
+			i++
+		}
+		maxLen := len(removed)
+		if len(added) > maxLen {
+			maxLen = len(added)
+		}
+		for j := 0; j < maxLen; j++ {
+			r := row{}
+			if j < len(removed) {
+				r.leftNo = leftLine
+				r.leftTxt = removed[j]
+				r.leftChg = true
+				leftLine++
+			}
+			if j < len(added) {
+				r.rightNo = rightLine
+				r.rightTxt = added[j]
+				r.rightChg = true
+				rightLine++
+			}
+			rows = append(rows, r)
+		}
+	}
+
+	// Render rows.
+	var out strings.Builder
+	sep := dim + " │ " + reset
+	for _, r := range rows {
+		if r.header != "" {
+			hdr := fit(r.header, totalWidth-2)
+			out.WriteString(bold + dim + hdr + reset + "\n")
+			continue
+		}
+
+		// Left panel.
+		var leftNum, rightNum string
+		if r.leftNo > 0 {
+			leftNum = fmt.Sprintf("%*d", lineNoW, r.leftNo)
+		} else {
+			leftNum = strings.Repeat(" ", lineNoW)
+		}
+		if r.rightNo > 0 {
+			rightNum = fmt.Sprintf("%*d", lineNoW, r.rightNo)
+		} else {
+			rightNum = strings.Repeat(" ", lineNoW)
+		}
+
+		leftTxt := r.leftTxt
+		rightTxt := r.rightTxt
+		if r.leftChg && r.rightChg {
+			leftTxt, rightTxt = inlineHighlight(leftTxt, rightTxt)
+		}
+		leftContent := fit(leftTxt, panelW)
+		rightContent := fit(rightTxt, panelW)
+
+		var leftFmt, rightFmt string
+		if r.leftChg {
+			leftFmt = red + leftNum + " " + leftContent + reset
+		} else {
+			leftFmt = dimLine + leftNum + reset + " " + leftContent
+		}
+		if r.rightChg {
+			rightFmt = green + rightNum + " " + rightContent + reset
+		} else {
+			rightFmt = dimLine + rightNum + reset + " " + rightContent
+		}
+
+		out.WriteString(leftFmt + sep + rightFmt + "\n")
+	}
+
+	return out.String()
+}
+
+// wordTokens splits s into a slice of word/non-word tokens for word-level diff.
+func wordTokens(s string) []string {
+	var tokens []string
+	start := -1
+	for i, c := range s {
+		isWord := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_'
+		if isWord {
+			if start < 0 {
+				start = i
+			}
+		} else {
+			if start >= 0 {
+				tokens = append(tokens, s[start:i])
+				start = -1
+			}
+			tokens = append(tokens, string(c))
+		}
+	}
+	if start >= 0 {
+		tokens = append(tokens, s[start:])
+	}
+	return tokens
+}
+
+// inlineHighlight computes word-level differences between oldLine and newLine
+// and returns both lines with changed tokens highlighted using ANSI bg colors.
+func inlineHighlight(oldLine, newLine string) (oldHL, newHL string) {
+	const (
+		hlRed   = "\033[48;2;139;0;0m\033[38;2;255;255;255m"   // dark red bg
+		hlGreen = "\033[48;2;0;100;0m\033[38;2;255;255;255m"   // dark green bg
+		hlReset = "\033[0m"
+	)
+
+	a := wordTokens(oldLine)
+	b := wordTokens(newLine)
+
+	// LCS DP table.
+	m, n := len(a), len(b)
+	dp := make([][]int, m+1)
+	for i := range dp {
+		dp[i] = make([]int, n+1)
+	}
+	for i := m - 1; i >= 0; i-- {
+		for j := n - 1; j >= 0; j-- {
+			if a[i] == b[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] > dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+
+	// Trace back to build highlighted strings.
+	var leftB, rightB strings.Builder
+	i, j := 0, 0
+	for i < m || j < n {
+		if i < m && j < n && a[i] == b[j] {
+			leftB.WriteString(a[i])
+			rightB.WriteString(b[j])
+			i++
+			j++
+		} else if j < n && (i >= m || dp[i][j+1] >= dp[i+1][j]) {
+			rightB.WriteString(hlGreen + b[j] + hlReset)
+			j++
+		} else {
+			leftB.WriteString(hlRed + a[i] + hlReset)
+			i++
+		}
+	}
+	return leftB.String(), rightB.String()
 }
 
 func diffStatusLabel(s core.FileStatusLabel) string {
@@ -1674,23 +1927,38 @@ func colorize(diff string) string {
 		cyan  = "\033[36m"
 		reset = "\033[0m"
 	)
+
+	// Split into lines for word-level pairing.
+	lines := strings.SplitAfter(diff, "\n")
+
 	var out bytes.Buffer
-	start := 0
-	for i := 0; i < len(diff); i++ {
-		if diff[i] == '\n' || i == len(diff)-1 {
-			end := i + 1
-			line := diff[start:end]
-			switch {
-			case len(line) > 0 && line[0] == '+' && (len(line) < 4 || line[:3] != "+++"):
-				out.WriteString(green + line + reset)
-			case len(line) > 0 && line[0] == '-' && (len(line) < 4 || line[:3] != "---"):
-				out.WriteString(red + line + reset)
-			case len(line) > 2 && line[:2] == "@@":
-				out.WriteString(cyan + line + reset)
-			default:
-				out.WriteString(line)
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		isRemoved := len(line) > 0 && line[0] == '-' && (len(line) < 4 || line[:3] != "---")
+		isAdded := len(line) > 0 && line[0] == '+' && (len(line) < 4 || line[:3] != "+++")
+
+		if isRemoved {
+			// Look ahead for a matching '+' line to do inline highlighting.
+			if i+1 < len(lines) {
+				next := lines[i+1]
+				nextIsAdded := len(next) > 0 && next[0] == '+' && (len(next) < 4 || next[:3] != "+++")
+				if nextIsAdded {
+					oldTxt := strings.TrimRight(line[1:], "\n")
+					newTxt := strings.TrimRight(next[1:], "\n")
+					oldHL, newHL := inlineHighlight(oldTxt, newTxt)
+					out.WriteString(red + "-" + oldHL + reset + "\n")
+					out.WriteString(green + "+" + newHL + reset + "\n")
+					i++ // skip the next line
+					continue
+				}
 			}
-			start = end
+			out.WriteString(red + line + reset)
+		} else if isAdded {
+			out.WriteString(green + line + reset)
+		} else if len(line) > 2 && line[:2] == "@@" {
+			out.WriteString(cyan + line + reset)
+		} else {
+			out.WriteString(line)
 		}
 	}
 	return out.String()
