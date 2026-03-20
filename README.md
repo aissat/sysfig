@@ -93,12 +93,12 @@ sysfig log /etc/nginx          # all commits touching /etc/nginx/*
 sysfig log --id a3f2b1c        # commits for one tracked file
 ```
 
-**Roll back a file to any previous commit:**
+**Undo changes — one command for both discard and rewind:**
 
 ```bash
-sysfig rollback a3f2b1c --id <hash>   # restore one file
-sysfig rollback a3f2b1c               # restore all tracked files
-sysfig rollback a3f2b1c --dry-run     # preview without writing
+sysfig undo /etc/nginx/nginx.conf               # discard unsaved edits, restore from last sync
+sysfig undo a3f2b1c /etc/nginx/nginx.conf       # rewind file's branch to that commit
+sysfig undo a3f2b1c --all --force               # rewind every track branch (no prompt)
 ```
 
 ---
@@ -127,7 +127,7 @@ sysfig rollback a3f2b1c --dry-run     # preview without writing
   - [push](#push-deprecated) _(deprecated)_
   - [pull](#pull-deprecated) _(deprecated)_
   - [log](#log)
-  - [rollback](#rollback)
+  - [undo](#undo)
   - [profile](#profile)
   - [keys](#keys)
   - [doctor](#doctor)
@@ -223,6 +223,23 @@ sysfig
 
 When you run `sysfig setup` on a new machine, sysfig reads `sysfig.yaml` from the cloned repo and builds `state.json` locally. They are separate by design: the manifest is the source of truth for *what* is tracked; state is the per-machine cache for *how in sync* each file is.
 
+**Branch-per-track storage:**
+
+Each tracked path gets its own dedicated git branch:
+
+```
+master                       ← initialisation commit only (HEAD)
+manifest                     ← sysfig.yaml updates
+track/etc/pacman.conf        ← only pacman.conf commits
+track/home/aye7/dot-zshrc   ← only .zshrc commits (dotfiles sanitized)
+track/tmp/sysfig-test-dir    ← all files in a directory-tracked group
+```
+
+Each commit uses an isolated git index (`GIT_INDEX_FILE`) so the branch tree contains **only** the file it owns — no full-tree noise. This means:
+- `sysfig log /path` reads a single clean branch — no filtering needed
+- `sysfig undo` resets one branch without touching others
+- `git push origin 'refs/heads/track/*:refs/heads/track/*'` syncs everything in one refspec
+
 ---
 
 ## Quick Start
@@ -244,7 +261,7 @@ sysfig track --encrypt ~/.config/tokens.env
 sudo sysfig track --encrypt /etc/app/secret.env
 
 # Commit everything to the local repo
-sysfig sync --message "initial commit"
+sysfig sync -m "initial commit"
 
 # Set remote and push (--force for first push to a non-empty remote)
 sysfig remote set git@github.com:you/myconfigs.git
@@ -284,7 +301,7 @@ sysfig status
 sysfig diff --id nginx_main
 
 # Commit the change locally (no network needed)
-sysfig sync --message "tuned worker_processes"
+sysfig sync -m "tuned worker_processes"
 
 # Push when you're back online
 sysfig push
@@ -627,7 +644,7 @@ sysfig untrack etc_nginx_nginx_conf
 sysfig untrack /etc/nginx/
 
 # After untracking, commit the manifest change
-sysfig sync --message "stop tracking nginx"
+sysfig sync -m "stop tracking nginx"
 ```
 
 **Example output:**
@@ -820,6 +837,8 @@ sysfig sync [options]
 
 Stages any modified tracked files, creates a git commit in the local bare repo, and updates `state.json` hashes and timestamps. No network access required. Use `--push` to also push in one step; use `--pull` to fetch remote changes before committing.
 
+**A commit message is required.** Pass `-m "..."` for a custom message or `--auto` to let sysfig generate one (`sysfig: update <path>`). Running `sysfig sync` with neither flag exits with an error and a helpful hint.
+
 **Commit strategy:**
 
 - Each changed file gets its **own commit** with a meaningful message (`sysfig: update etc/nginx/nginx.conf`)
@@ -829,19 +848,21 @@ Stages any modified tracked files, creates a git commit in the local bare repo, 
 
 **Options:**
 
-| Flag         | Default                       | Description                                           |
-| ------------ | ----------------------------- | ----------------------------------------------------- |
-| `--message`  | auto (`sysfig: update <path>`)| Override commit message                               |
-| `--push`     | `false`                       | Also push to remote after committing                  |
-| `--pull`     | `false`                       | Fetch remote changes before committing (non-fatal)    |
-| `--base-dir` | `~/.sysfig`                   | Directory where sysfig stores data                    |
+| Flag            | Default     | Description                                                      |
+| --------------- | ----------- | ---------------------------------------------------------------- |
+| `-m`, `--message` | _(required)_ | Custom commit message (mutually exclusive with `--auto`)      |
+| `--auto`        | `false`     | Auto-generate message: `sysfig: update <path>`                   |
+| `--push`        | `false`     | Also push to remote after committing                             |
+| `--pull`        | `false`     | Fetch remote changes before committing (non-fatal)               |
+| `--base-dir`    | `~/.sysfig` | Directory where sysfig stores data                               |
 
 **Examples:**
 
 ```bash
-sysfig sync
-sysfig sync --push             # commit + push in one step
-sysfig sync --pull --push      # full round-trip: pull → commit → push
+sysfig sync -m "tuned worker_processes"   # custom message
+sysfig sync --auto                        # auto-generated message
+sysfig sync --auto --push                 # commit + push in one step
+sysfig sync --auto --pull --push          # full round-trip: pull → commit → push
 ```
 
 **Example output:**
@@ -923,10 +944,16 @@ sysfig watch --dry-run          # preview only
 Watching tracked files for changes  (Ctrl-C to stop)
   base-dir: /home/you/.sysfig
   debounce: 2s
-
-  10:42:15  synced  /etc/nginx/nginx.conf
-            sysfig: sync 2026-03-18T10:42:15Z
+────────────────────────────────────────────────────────────────────────────
+  10:42:15  changed  /etc/nginx/nginx.conf
+            committed etc/nginx/nginx.conf
+            sysfig: update etc/nginx/nginx.conf
 ```
+
+Each event line shows:
+- `changed` — the file on disk that triggered the sync
+- `committed` — each repo path actually committed (one per file; grouped for dir-tracked files)
+- The commit message (`sysfig: update <path>`)
 
 #### Service mode (systemd)
 
@@ -1011,29 +1038,45 @@ sysfig log --id 7734be1e            # history by tracking ID
 * 1c7f03b 2026-03-19 etc/pacman.d/mirrorlist +3  sysfig: update etc/pacman.d (4 files)
 ```
 
-### `rollback`
+### `undo`
 
-Restore tracked file(s) to the state they were in at a previous commit.
+One command for two undo modes — choose the form that matches your situation:
+
+| Form | What it does |
+|---|---|
+| `sysfig undo <path>` | **Non-destructive.** Restores the on-disk file from the HEAD of its track branch. No commit is created; git history is unchanged. Use this to discard accidental edits. |
+| `sysfig undo <commit> <path>` | **Destructive.** Rewinds the file's track branch to `<commit>` via `git update-ref`. The branch pointer moves back; no new commit is added. Other branches are untouched. |
+
+A path or `--all` is required. `--all` is only valid with a commit hash.
 
 ```
-sysfig rollback <commit> [options]
+sysfig undo <path> [options]
+sysfig undo <commit> <path> [options]
+sysfig undo <commit> --all  [options]
 ```
 
 **Options:**
 
-| Flag         | Default     | Description                                        |
-| ------------ | ----------- | -------------------------------------------------- |
-| `--id`       | —           | Restore only the file with this tracking ID        |
-| `--dry-run`  | `false`     | Preview what would be restored without writing     |
-| `--base-dir` | `~/.sysfig` | Directory where sysfig stores data                 |
+| Flag         | Default     | Description                                               |
+| ------------ | ----------- | --------------------------------------------------------- |
+| `--all`      | `false`     | Apply the commit reset to every `track/*` branch          |
+| `--force`    | `false`     | Skip the confirmation prompt (destructive form only)      |
+| `--dry-run`  | `false`     | Preview what would be changed without making any edits    |
+| `--base-dir` | `~/.sysfig` | Directory where sysfig stores data                        |
 
 **Examples:**
 
 ```bash
-sysfig rollback a3f2b1c                    # restore ALL tracked files
-sysfig rollback a3f2b1c --id 7734be1e      # restore only one file
-sysfig rollback a3f2b1c --dry-run          # preview first
+sysfig undo /etc/nginx/nginx.conf                # discard unsaved edits (non-destructive)
+sysfig undo a3f2b1c /etc/nginx/nginx.conf        # rewind one file's branch to that commit
+sysfig undo a3f2b1c --all                        # rewind all track branches (prompts)
+sysfig undo a3f2b1c --all --force                # same, no prompt
+sysfig undo a3f2b1c --all --dry-run              # preview what would change
 ```
+
+> `sysfig undo <path>` does **not** create a commit. If you want the reverted content recorded in history, run `sysfig sync --auto` after restoring.
+
+> `rollback` and `restore` still work as hidden aliases for backward compatibility.
 
 ---
 

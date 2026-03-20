@@ -8,19 +8,19 @@ import (
 	"os/exec"
 	"os/signal"
 	"os/user"
-	"syscall"
-	"time"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
-	"github.com/fatih/color"
-	"github.com/spf13/cobra"
-	"golang.org/x/term"
 	"github.com/aissat/sysfig/internal/core"
 	"github.com/aissat/sysfig/internal/crypto"
 	"github.com/aissat/sysfig/internal/hash"
 	"github.com/aissat/sysfig/internal/state"
 	"github.com/aissat/sysfig/pkg/types"
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -233,6 +233,8 @@ ownership and permissions, and stay fully offline-capable.`,
 		newPushCmd(),
 		newPullCmd(),
 		newLogCmd(),
+		newShowCmd(),
+		newUndoCmd(),
 		newRollbackCmd(),
 		newRestoreCmd(),
 		newDoctorCmd(),
@@ -922,10 +924,13 @@ func newUntrackCmd() *cobra.Command {
 			baseDir = resolveBaseDir(baseDir)
 			arg := args[0]
 
-			// Resolve to an absolute path if it looks like a file path.
-			if !strings.Contains(arg, "/") {
-				// Looks like a bare ID — use as-is.
-			} else {
+			// Resolve to an absolute path if it looks like a file/dir path.
+			// A bare tracking ID is 8 hex chars with no slashes or dots.
+			// Anything starting with '.', '/', or containing '/' is a path.
+			looksLikePath := strings.Contains(arg, "/") ||
+				strings.HasPrefix(arg, ".") ||
+				strings.HasPrefix(arg, "~")
+			if looksLikePath {
 				abs, err := filepath.Abs(arg)
 				if err == nil {
 					arg = abs
@@ -1766,6 +1771,11 @@ func renderSideBySide(diff string, totalWidth int) string {
 		if len(added) > maxLen {
 			maxLen = len(added)
 		}
+		// Unrecognized line (e.g. "diff --git", "index ...") — skip it.
+		if maxLen == 0 {
+			i++
+			continue
+		}
 		for j := 0; j < maxLen; j++ {
 			r := row{}
 			if j < len(removed) {
@@ -2073,6 +2083,7 @@ func newSyncCmd() *cobra.Command {
 	var (
 		baseDir string
 		message string
+		auto    bool
 		push    bool
 		pull    bool
 		force   bool
@@ -2084,16 +2095,18 @@ func newSyncCmd() *cobra.Command {
 		Short: "Commit local changes, optionally pull first and/or push after",
 		Long: `Stages all modified tracked files and creates a local git commit (offline-safe).
 
-Use --pull to fetch remote changes first (full round-trip with --push):
-  sysfig sync --pull --push
+A message is required: use -m for a custom message or --auto for the default.
 
-This replaces the standalone 'push' and 'pull' commands.`,
-		Example: `  sysfig sync                        # local commit only
-  sysfig sync --message "tuned nginx" # with custom message
-  sysfig sync --push                  # commit + push
-  sysfig sync --pull                  # pull first, then commit
-  sysfig sync --pull --push           # full round-trip`,
+Use --pull to fetch remote changes first (full round-trip with --push):
+  sysfig sync --pull --push`,
+		Example: `  sysfig sync -m "tuned nginx"        # custom message
+  sysfig sync --auto                  # auto-generated message
+  sysfig sync --auto --push           # commit + push
+  sysfig sync --auto --pull --push    # full round-trip`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if message == "" && !auto {
+				return fmt.Errorf("message required: use -m \"your message\" or --auto for the default message")
+			}
 			baseDir = resolveBaseDir(baseDir)
 			result, err := core.Sync(core.SyncOptions{
 				BaseDir: baseDir,
@@ -2139,7 +2152,8 @@ This replaces the standalone 'push' and 'pull' commands.`,
 
 	f := cmd.Flags()
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
-	f.StringVar(&message, "message", "", "commit message (default: sysfig: sync <timestamp>)")
+	f.StringVarP(&message, "message", "m", "", "commit message")
+	f.BoolVar(&auto, "auto", false, "use auto-generated commit message (sysfig: update <path>)")
 	f.BoolVar(&pull, "pull", false, "pull from remote before committing (requires network)")
 	f.BoolVar(&push, "push", false, "push to remote after committing (requires network)")
 	f.BoolVar(&force, "force", false, "force push (use for first push to a non-empty remote)")
@@ -2252,17 +2266,43 @@ Filter to a specific path or ID:
 				filterPath = filePath
 			}
 
-			// Step 1: get list of commits (hash, date, subject, decoration).
+			// Step 1: get list of commits.
+			// When filtering by path/id, use that file's dedicated branch for
+			// clean per-file history. Otherwise show all track/* branches.
 			listArgs := []string{
 				"--no-pager", "--git-dir=" + repoDir,
 				"log", "--pretty=format:%h\t%ad\t%s\t%D",
-				"--date=short", "--all",
+				"--date=format:%Y-%m-%d %H:%M",
+			}
+			if filterPath != "" {
+				// Find branch(es) for this path from state.
+				var trackBranches []string
+				seenBranch := map[string]bool{}
+				sm2 := state.NewManager(filepath.Join(baseDir, "state.json"))
+				if s2, err2 := sm2.Load(); err2 == nil {
+					for _, rec := range s2.Files {
+						sp := filepath.Clean(rec.SystemPath)
+						rp := rec.RepoPath
+						if sp == filepath.Clean("/"+filterPath) || rp == filterPath ||
+							strings.HasPrefix(rp, strings.TrimSuffix(filterPath, "/")+"/") {
+							if rec.Branch != "" && !seenBranch[rec.Branch] {
+								trackBranches = append(trackBranches, rec.Branch)
+								seenBranch[rec.Branch] = true
+							}
+						}
+					}
+				}
+				if len(trackBranches) > 0 {
+					listArgs = append(listArgs, trackBranches...)
+				} else {
+					listArgs = append(listArgs, "--all", "--", filterPath)
+				}
+			} else {
+				// Show all track/* branches merged into one timeline.
+				listArgs = append(listArgs, "--all")
 			}
 			if n > 0 {
 				listArgs = append(listArgs, fmt.Sprintf("-n%d", n))
-			}
-			if filterPath != "" {
-				listArgs = append(listArgs, "--follow", "--", filterPath)
 			}
 			out, err := exec.Command("git", listArgs...).Output()
 			if err != nil {
@@ -2302,6 +2342,14 @@ Filter to a specific path or ID:
 					"--no-pager", "--git-dir="+repoDir,
 					"diff-tree", "--no-commit-id", "-r", "--name-only", hash,
 				).Output()
+				// Orphan commits (first commit on a track branch) have no parent,
+				// so diff-tree returns nothing. Fall back to ls-tree.
+				if len(strings.TrimSpace(string(dtOut))) == 0 {
+					dtOut, _ = exec.Command("git",
+						"--no-pager", "--git-dir="+repoDir,
+						"ls-tree", "-r", "--name-only", hash,
+					).Output()
+				}
 
 				// Collect changed files, skip sysfig.yaml.
 				var paths []string
@@ -2330,11 +2378,28 @@ Filter to a specific path or ID:
 				if len(paths) > 1 {
 					pathLabel = fmt.Sprintf("%s +%d", paths[0], len(paths)-1)
 				}
-				fmt.Printf("* %s%s%s %s%s%s %s%s%s  %s%s\n",
+
+				// Diff stat: lines added/deleted in this commit.
+				statLabel := ""
+				nsOut, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+					"diff-tree", "--numstat", "--no-commit-id", hash).Output()
+				if len(strings.TrimSpace(string(nsOut))) == 0 {
+					nsOut, _ = exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+						"show", "--numstat", "--format=", hash).Output()
+				}
+				for _, sl := range strings.Split(strings.TrimSpace(string(nsOut)), "\n") {
+					fields := strings.Fields(sl)
+					if len(fields) >= 2 && (fields[0] != "0" || fields[1] != "0") {
+						statLabel = dim + " [+" + fields[0] + "/-" + fields[1] + "]" + reset
+						break
+					}
+				}
+
+				fmt.Printf("* %s%s%s %s%s%s %s%s%s  %s%s%s\n",
 					yellow, hash, reset,
 					cyan, date, reset,
 					magenta, pathLabel, reset,
-					subject, decoration)
+					subject, statLabel, decoration)
 			}
 			return nil
 		},
@@ -2346,6 +2411,55 @@ Filter to a specific path or ID:
 	f.StringVar(&id, "id", "", "filter by tracking ID")
 	f.IntVarP(&n, "number", "n", 0, "limit to last N commits (0 = unlimited)")
 	f.BoolVar(&noRollbacks, "no-rollbacks", false, "hide rollback commits from output")
+	return cmd
+}
+
+// ── show ──────────────────────────────────────────────────────────────────────
+
+func newShowCmd() *cobra.Command {
+	var (
+		baseDir    string
+		sideBySide bool
+	)
+	cmd := &cobra.Command{
+		Use:   "show <commit>",
+		Short: "Show what changed in a commit, diff-style",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			repoDir := filepath.Join(baseDir, "repo.git")
+			hash := args[0]
+
+			out, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+				"show", "--format=", "-p", hash).Output()
+			if err != nil {
+				return fmt.Errorf("commit %q not found", hash)
+			}
+			diff := strings.TrimPrefix(string(out), "\n")
+			if diff == "" {
+				fmt.Println("(no changes)")
+				return nil
+			}
+
+			const maxLines = 500
+			if strings.Count(diff, "\n") > maxLines {
+				warn("diff too large (%d lines) — showing stat only", strings.Count(diff, "\n"))
+				stat, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+					"show", "--format=", "--stat", hash).Output()
+				fmt.Print(strings.TrimPrefix(string(stat), "\n"))
+				return nil
+			}
+
+			if sideBySide {
+				fmt.Print(renderSideBySide(diff, termWidth()))
+			} else {
+				fmt.Print(colorize(diff))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&sideBySide, "side-by-side", "y", false, "Side-by-side view")
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig base directory")
 	return cmd
 }
 
@@ -2361,8 +2475,9 @@ func newRollbackCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "rollback <commit> [path]",
-		Short: "Reset repo history to a previous commit (destructive)",
+		Use:    "rollback <commit> [path]",
+		Short:  "Reset repo history to a previous commit (destructive)",
+		Hidden: true, // use 'undo' instead
 		Long: `Move the repo HEAD back to <commit>, discarding all commits after it.
 On-disk files are restored to match that commit state.
 
@@ -2405,6 +2520,7 @@ Examples:
 			type rollbackTarget struct {
 				repoPath   string
 				systemPath string
+				branch     string
 			}
 			var targets []rollbackTarget
 			for _, rec := range s.Files {
@@ -2416,7 +2532,7 @@ Examples:
 				} else if id != "" && core.DeriveID(rec.SystemPath) != id {
 					continue
 				}
-				targets = append(targets, rollbackTarget{rec.RepoPath, rec.SystemPath})
+				targets = append(targets, rollbackTarget{rec.RepoPath, rec.SystemPath, rec.Branch})
 			}
 
 			if len(targets) == 0 {
@@ -2451,7 +2567,7 @@ Examples:
 
 			if isFullReset {
 				if !force {
-					clrWarn.Printf("  ⚠  This will reset HEAD to %s and discard ALL later commits.\n", commit[:7])
+					clrWarn.Printf("  ⚠  This will reset ALL track branches to %s and discard later commits.\n", commit[:7])
 					fmt.Printf("     %d file(s) will be restored on disk.\n", len(targets))
 					fmt.Print("  Continue? [y/N] ")
 					var answer string
@@ -2462,9 +2578,22 @@ Examples:
 					}
 				}
 
-				if out, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
-					"update-ref", "refs/heads/master", fullCommit).CombinedOutput(); err != nil {
-					return fmt.Errorf("git update-ref failed: %s", strings.TrimSpace(string(out)))
+				// Reset each file's own track branch.
+				seen := map[string]bool{}
+				for _, t := range targets {
+					branch := t.branch
+					if branch == "" {
+						branch = "track/" + core.SanitizeBranchName(t.repoPath)
+					}
+					if seen[branch] {
+						continue
+					}
+					seen[branch] = true
+					ref := "refs/heads/" + branch
+					if out, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+						"update-ref", ref, fullCommit).CombinedOutput(); err != nil {
+						warn("update-ref %s: %s", branch, strings.TrimSpace(string(out)))
+					}
 				}
 
 				for _, t := range targets {
@@ -2496,8 +2625,31 @@ Examples:
 				}
 				info("HEAD reset to %s", clrInfo.Sprint(commit[:7]))
 			} else {
-				// Per-file: restore on disk + new revert commit (other files unaffected).
+				// Per-file: reset only the file's own track branch + restore on disk.
+				// Other files' branches are completely untouched.
+				if !force {
+					clrWarn.Printf("  ⚠  This will reset %d file(s) to %s and discard later commits on their branches.\n", len(targets), commit[:7])
+					fmt.Print("  Continue? [y/N] ")
+					var answer string
+					fmt.Scanln(&answer)
+					if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+						info("Aborted.")
+						return nil
+					}
+				}
 				for _, t := range targets {
+					branch := t.branch
+					if branch == "" {
+						branch = "track/" + core.SanitizeBranchName(t.repoPath)
+					}
+					// Reset only this file's track branch.
+					ref := "refs/heads/" + branch
+					if out, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+						"update-ref", ref, fullCommit).CombinedOutput(); err != nil {
+						fail("git update-ref %s: %s", branch, strings.TrimSpace(string(out)))
+						continue
+					}
+					// Restore file on disk from that commit.
 					content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
 						"show", fullCommit+":"+t.repoPath).Output()
 					if err != nil {
@@ -2515,22 +2667,17 @@ Examples:
 						fail("write %s: %v", t.systemPath, err)
 						continue
 					}
-					revertMsg := fmt.Sprintf("sysfig: rollback %s to %s", t.repoPath, commit[:7])
-					syncRes, syncErr := core.Sync(core.SyncOptions{
-						BaseDir: baseDir,
-						Message: revertMsg,
-						FileIDs: []string{core.DeriveID(t.systemPath)},
-					})
-					if syncErr != nil {
-						warn("restored %s on disk but sync failed: %v", t.systemPath, syncErr)
-					} else if syncRes != nil && syncRes.Committed {
-						ok("Rolled back: %s", clrBold.Sprint(t.systemPath))
-						fmt.Printf("     %s %s\n", clrDim.Sprint("from commit:"), clrInfo.Sprint(commit[:7]))
-					} else {
-						ok("Restored: %s %s", clrBold.Sprint(t.systemPath), clrDim.Sprint("(already up-to-date)"))
+					if sysHash, err := hash.File(t.systemPath); err == nil {
+						_ = sm.WithLock(func(st *types.State) error {
+							if r, ok := st.Files[core.DeriveID(t.systemPath)]; ok {
+								r.CurrentHash = sysHash
+							}
+							return nil
+						})
 					}
+					ok("Rolled back: %s", clrBold.Sprint(t.systemPath))
+					fmt.Printf("     %s %s\n", clrDim.Sprint("branch reset to:"), clrInfo.Sprint(commit[:7]))
 				}
-				info("use 'sysfig log --no-rollbacks' to hide revert commits")
 			}
 			return nil
 		},
@@ -2545,6 +2692,196 @@ Examples:
 	return cmd
 }
 
+// ── undo ──────────────────────────────────────────────────────────────────────
+
+func newUndoCmd() *cobra.Command {
+	var (
+		baseDir string
+		all     bool
+		force   bool
+		dryRun  bool
+	)
+
+	isHash := func(s string) bool {
+		if len(s) < 7 || len(s) > 40 {
+			return false
+		}
+		for _, c := range s {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+		return true
+	}
+
+	cmd := &cobra.Command{
+		Use:   "undo [<commit>] <path>",
+		Short: "Undo changes to a tracked file",
+		Long: `Undo changes to a tracked file — two modes:
+
+  sysfig undo <path>           discard unsaved edits, restore from last sync
+  sysfig undo <commit> <path>  rewind the file's history to a specific commit
+
+The first form is non-destructive (no history change).
+The second form resets the file's track branch — commits after <commit> are lost.
+
+Examples:
+  sysfig undo /home/aye7/.zshrc             # discard uncommitted edits
+  sysfig undo 2b8e60e /home/aye7/.zshrc     # rewind to that commit
+  sysfig undo 9b43458 --all                 # rewind all tracked files`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			repoDir := filepath.Join(baseDir, "repo.git")
+
+			sm := state.NewManager(filepath.Join(baseDir, "state.json"))
+			s, err := sm.Load()
+			if err != nil {
+				return fmt.Errorf("undo: load state: %w", err)
+			}
+
+			// Disambiguate: undo <path>  vs  undo <hash> <path>
+			var commitHash, pathArg string
+			if len(args) == 2 {
+				commitHash = args[0]
+				pathArg = filepath.Clean(args[1])
+			} else if isHash(args[0]) {
+				// undo <hash> --all
+				commitHash = args[0]
+				if !all {
+					return fmt.Errorf("provide a path after the commit hash, or use --all\n\nexample: sysfig undo %s /home/aye7/.zshrc", args[0])
+				}
+			} else {
+				pathArg = filepath.Clean(args[0])
+			}
+
+			type target struct{ repoPath, systemPath, branch string }
+			var targets []target
+			for _, rec := range s.Files {
+				sp := filepath.Clean(rec.SystemPath)
+				if pathArg != "" {
+					if sp != pathArg && !strings.HasPrefix(sp, pathArg+string(filepath.Separator)) {
+						continue
+					}
+				}
+				branch := rec.Branch
+				if branch == "" {
+					branch = "track/" + core.SanitizeBranchName(rec.RepoPath)
+				}
+				targets = append(targets, target{rec.RepoPath, rec.SystemPath, branch})
+			}
+
+			if len(targets) == 0 {
+				return fmt.Errorf("no tracked files found matching %q", pathArg)
+			}
+
+			// ── Mode 1: restore from last sync (no commit hash) ──────────────
+			if commitHash == "" {
+				for _, t := range targets {
+					if dryRun {
+						fmt.Printf("  %s  would restore %s from last sync\n", clrDim.Sprint("[dry-run]"), t.systemPath)
+						continue
+					}
+					content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+						"show", t.branch+":"+t.repoPath).Output()
+					if err != nil {
+						fail("%s not in repo yet — never synced?", t.repoPath)
+						continue
+					}
+					var perm os.FileMode = 0o644
+					if fi, err := os.Stat(t.systemPath); err == nil {
+						perm = fi.Mode().Perm()
+					}
+					if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
+						return err
+					}
+					if err := os.WriteFile(t.systemPath, content, perm); err != nil {
+						fail("write %s: %v", t.systemPath, err)
+						continue
+					}
+					if sysHash, err := hash.File(t.systemPath); err == nil {
+						_ = sm.WithLock(func(st *types.State) error {
+							if r, ok := st.Files[core.DeriveID(t.systemPath)]; ok {
+								r.CurrentHash = sysHash
+							}
+							return nil
+						})
+					}
+					ok("Restored: %s", clrBold.Sprint(t.systemPath))
+				}
+				return nil
+			}
+
+			// ── Mode 2: rewind track branch to commit ────────────────────────
+			fullHash, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+				"rev-parse", "--verify", commitHash).Output()
+			if err != nil {
+				return fmt.Errorf("commit %q not found in repo", commitHash)
+			}
+			fullCommit := strings.TrimSpace(string(fullHash))
+
+			if !force {
+				clrWarn.Printf("  ⚠  This will reset %d file(s) to %s and discard later commits on their branches.\n", len(targets), commitHash[:7])
+				fmt.Print("  Continue? [y/N] ")
+				var answer string
+				fmt.Scanln(&answer)
+				if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+					info("Aborted.")
+					return nil
+				}
+			}
+
+			for _, t := range targets {
+				if dryRun {
+					fmt.Printf("  %s  would reset %s → %s\n", clrDim.Sprint("[dry-run]"), t.systemPath, commitHash[:7])
+					continue
+				}
+				ref := "refs/heads/" + t.branch
+				if out, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+					"update-ref", ref, fullCommit).CombinedOutput(); err != nil {
+					fail("git update-ref %s: %s", t.branch, strings.TrimSpace(string(out)))
+					continue
+				}
+				content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+					"show", fullCommit+":"+t.repoPath).Output()
+				if err != nil {
+					fail("commit %s does not contain %s — skipping", commitHash[:7], t.repoPath)
+					continue
+				}
+				var perm os.FileMode = 0o644
+				if fi, err := os.Stat(t.systemPath); err == nil {
+					perm = fi.Mode().Perm()
+				}
+				if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(t.systemPath, content, perm); err != nil {
+					fail("write %s: %v", t.systemPath, err)
+					continue
+				}
+				if sysHash, err := hash.File(t.systemPath); err == nil {
+					_ = sm.WithLock(func(st *types.State) error {
+						if r, ok := st.Files[core.DeriveID(t.systemPath)]; ok {
+							r.CurrentHash = sysHash
+						}
+						return nil
+					})
+				}
+				ok("Rewound: %s", clrBold.Sprint(t.systemPath))
+				fmt.Printf("     %s %s\n", clrDim.Sprint("branch reset to:"), clrInfo.Sprint(commitHash[:7]))
+			}
+			return nil
+		},
+	}
+
+	f := cmd.Flags()
+	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
+	f.BoolVar(&all, "all", false, "apply to all tracked files (use with a commit hash)")
+	f.BoolVar(&force, "force", false, "skip confirmation prompt")
+	f.BoolVar(&dryRun, "dry-run", false, "show what would happen without making changes")
+	return cmd
+}
+
 // ── restore ───────────────────────────────────────────────────────────────────
 
 func newRestoreCmd() *cobra.Command {
@@ -2554,8 +2891,9 @@ func newRestoreCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "restore <path>",
-		Short: "Discard unsaved changes — restore file from last sync (HEAD)",
+		Use:    "restore <path>",
+		Hidden: true, // use 'undo' instead
+		Short:  "Discard unsaved changes — restore file from last sync (HEAD)",
 		Long: `Overwrite a tracked file on disk with the version from the last sync.
 
 Useful when you edited a tracked file and want to undo the changes without
@@ -2577,13 +2915,17 @@ Examples:
 
 			arg := filepath.Clean(args[0])
 
-			var targets []struct{ repoPath, systemPath string }
+			var targets []struct{ repoPath, systemPath, branch string }
 			for _, rec := range s.Files {
 				sp := filepath.Clean(rec.SystemPath)
 				if sp != arg && !strings.HasPrefix(sp, arg+string(filepath.Separator)) {
 					continue
 				}
-				targets = append(targets, struct{ repoPath, systemPath string }{rec.RepoPath, rec.SystemPath})
+				branch := rec.Branch
+				if branch == "" {
+					branch = "track/" + core.SanitizeBranchName(rec.RepoPath)
+				}
+				targets = append(targets, struct{ repoPath, systemPath, branch string }{rec.RepoPath, rec.SystemPath, branch})
 			}
 
 			if len(targets) == 0 {
@@ -2597,9 +2939,9 @@ Examples:
 				}
 
 				content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
-					"show", "HEAD:"+t.repoPath).Output()
+					"show", t.branch+":"+t.repoPath).Output()
 				if err != nil {
-					fail("HEAD does not contain %s — never synced?", t.repoPath)
+					fail("%s does not contain %s — never synced?", t.branch, t.repoPath)
 					continue
 				}
 

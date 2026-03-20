@@ -105,36 +105,40 @@ func syncStagePlain(repoDir, relPath string) error {
 // Steps:
 //  1. git hash-object -w <tmpfile>  → blob hash
 //  2. git update-index --add --cacheinfo 100644,<blobHash>,<relPath>
-func syncStageBlob(repoDir, relPath string, data []byte) error {
-	// Write to a temp file so hash-object can read it.
+// syncHashBlob stores data as a git blob object and returns its 40-char SHA.
+// The blob is written to the object store but NOT added to any index.
+func syncHashBlob(repoDir string, data []byte) (string, error) {
 	tmp, err := os.CreateTemp("", "sysfig-sync-blob-*")
 	if err != nil {
-		return fmt.Errorf("core: sync: stage blob %q: create temp: %w", relPath, err)
+		return "", fmt.Errorf("core: sync: hash blob: create temp: %w", err)
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return fmt.Errorf("core: sync: stage blob %q: write temp: %w", relPath, err)
+		return "", fmt.Errorf("core: sync: hash blob: write temp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("core: sync: stage blob %q: close temp: %w", relPath, err)
+		return "", fmt.Errorf("core: sync: hash blob: close temp: %w", err)
 	}
 
-	// 1. Store the blob, get its SHA.
-	out, err := syncGitBareOutput(repoDir, 15*time.Second, nil,
-		"hash-object", "-w", tmpPath,
-	)
+	out, err := syncGitBareOutput(repoDir, 15*time.Second, nil, "hash-object", "-w", tmpPath)
 	if err != nil {
-		return fmt.Errorf("core: sync: stage blob %q: hash-object: %w", relPath, err)
+		return "", fmt.Errorf("core: sync: hash blob: hash-object: %w", err)
 	}
 	blobHash := strings.TrimSpace(string(out))
 	if blobHash == "" {
-		return fmt.Errorf("core: sync: stage blob %q: hash-object returned empty hash", relPath)
+		return "", fmt.Errorf("core: sync: hash blob: hash-object returned empty hash")
 	}
+	return blobHash, nil
+}
 
-	// 2. Add blob to the index.
+func syncStageBlob(repoDir, relPath string, data []byte) error {
+	blobHash, err := syncHashBlob(repoDir, data)
+	if err != nil {
+		return fmt.Errorf("core: sync: stage blob %q: %w", relPath, err)
+	}
 	cacheinfo := "100644," + blobHash + "," + relPath
 	if err := syncGitBareRun(repoDir, 15*time.Second, nil,
 		"update-index", "--add", "--cacheinfo", cacheinfo,
@@ -284,11 +288,12 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 
 	// fileEntry holds one changed file ready to be staged.
 	type fileEntry struct {
-		id      string
-		rec     *types.FileRecord
-		relPath string
-		sysPath string
-		data    []byte
+		id       string
+		rec      *types.FileRecord
+		relPath  string
+		sysPath  string
+		data     []byte
+		blobHash string // populated after git hash-object
 	}
 
 	// Step 1: read all file data and skip unchanged files.
@@ -340,7 +345,12 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		}
 
 		// Skip unchanged files, but still refresh their state hash.
-		if existing, err := gitShowBytes(repoDir, relPath); err == nil && bytes.Equal(existing, data) {
+		// Read from the file's own branch (falls back to HEAD for old records).
+		showRef := rec.Branch
+		if showRef == "" {
+			showRef = "HEAD"
+		}
+		if existing, err := gitShowBytesAt(repoDir, showRef, relPath); err == nil && bytes.Equal(existing, data) {
 			if sysHash, err := hash.File(sysPath); err == nil {
 				_ = sm.WithLock(func(s *types.State) error {
 					r := s.Files[id]
@@ -365,20 +375,22 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		if _, exists := groups[groupKey]; !exists {
 			groupOrder = append(groupOrder, groupKey)
 		}
-		groups[groupKey] = append(groups[groupKey], fileEntry{id, rec, relPath, sysPath, data})
+		groups[groupKey] = append(groups[groupKey], fileEntry{id, rec, relPath, sysPath, data, ""})
 	}
 
 	// Step 2: for each group, stage all files then create ONE commit.
 	for _, groupKey := range groupOrder {
 		entries := groups[groupKey]
 
-		// Reset index to HEAD before staging this group.
-		_ = syncGitBareRun(repoDir, 10*time.Second, nil, "read-tree", "HEAD")
-
-		for _, e := range entries {
-			if err := syncStageBlob(repoDir, e.relPath, e.data); err != nil {
+		// Hash all blobs for this group (writes to object store, no index touch).
+		blobs := make([]BlobEntry, 0, len(entries))
+		for i := range entries {
+			blobHash, err := syncHashBlob(repoDir, entries[i].data)
+			if err != nil {
 				return nil, err
 			}
+			entries[i].blobHash = blobHash
+			blobs = append(blobs, BlobEntry{BlobHash: blobHash, RelPath: entries[i].relPath})
 		}
 
 		// Build commit message.
@@ -395,19 +407,25 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			}
 		}
 
-		commitErr := syncGitBareRun(repoDir, 30*time.Second,
-			[]string{"GIT_WORK_TREE=/"},
-			"commit", "-m", groupMsg,
-		)
-		if commitErr != nil && !isNothingToCommit(repoDir) {
+		// Determine which branch this group commits to.
+		groupBranch := entries[0].rec.Branch
+		if groupBranch == "" {
+			if entries[0].rec.Group != "" {
+				groupBranch = "track/" + strings.TrimPrefix(entries[0].rec.Group, "/")
+			} else {
+				groupBranch = "track/" + entries[0].relPath
+			}
+		}
+
+		// Commit using isolated index — only these blobs, no shared index state.
+		commitErr := gitCommitToBranch(repoDir, groupBranch, groupMsg, blobs, 30*time.Second)
+		if commitErr != nil {
 			return nil, fmt.Errorf("core: sync: commit %q: %w", groupKey, commitErr)
 		}
-		if commitErr == nil {
-			result.Committed = true
-			result.Message = groupMsg
-			for _, e := range entries {
-				result.CommittedFiles = append(result.CommittedFiles, e.relPath)
-			}
+		result.Committed = true
+		result.Message = groupMsg
+		for _, e := range entries {
+			result.CommittedFiles = append(result.CommittedFiles, e.relPath)
 		}
 
 		// Refresh state hashes for all files in the group.
@@ -421,7 +439,7 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 					}
 					r.CurrentHash = sysHash
 				} else {
-					repoContent, err := gitShowBytes(repoDir, e.relPath)
+					repoContent, err := gitShowBytesAt(repoDir, groupBranch, e.relPath)
 					if err != nil {
 						return nil
 					}
@@ -445,16 +463,15 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		}
 	}
 
-	// Update sysfig.yaml manifest in its own commit if it changed.
+	// Update sysfig.yaml manifest on the "manifest" branch if it changed.
 	if len(currentState.Files) > 0 {
 		if manifestData, err := buildManifest(currentState); err == nil {
-			existing, _ := gitShowBytes(repoDir, "sysfig.yaml")
+			existing, _ := gitShowBytesAt(repoDir, "manifest", "sysfig.yaml")
 			if !bytes.Equal(existing, manifestData) {
-				if err := syncStageBlob(repoDir, "sysfig.yaml", manifestData); err == nil {
-					_ = syncGitBareRun(repoDir, 30*time.Second,
-						[]string{"GIT_WORK_TREE=/"},
-						"commit", "-m", "sysfig: update manifest",
-					)
+				if blobHash, err := syncHashBlob(repoDir, manifestData); err == nil {
+					_ = gitCommitToBranch(repoDir, "manifest", "sysfig: update manifest",
+						[]BlobEntry{{BlobHash: blobHash, RelPath: "sysfig.yaml"}},
+						30*time.Second)
 				}
 			}
 		}
@@ -462,18 +479,17 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 
 	// Push only when explicitly requested — never automatic.
 	if opts.Push {
-		// Resolve branch name for --set-upstream.
-		branchBytes, _ := gitBareOutput(repoDir, 5*time.Second, nil,
-			"symbolic-ref", "--short", "HEAD")
-		branch := strings.TrimSpace(string(branchBytes))
-		if branch == "" {
-			branch = "main"
+		// Push all track/* branches and the manifest branch in one operation.
+		// refs/heads/track/*:refs/heads/track/* pushes every track branch.
+		refspecs := []string{
+			"refs/heads/track/*:refs/heads/track/*",
+			"refs/heads/manifest:refs/heads/manifest",
 		}
-
-		pushArgs := []string{"push", "--set-upstream", "origin", branch}
+		pushArgs := []string{"push", "origin"}
 		if opts.Force {
 			pushArgs = append(pushArgs, "--force")
 		}
+		pushArgs = append(pushArgs, refspecs...)
 		if pushErr := syncGitBareRun(repoDir, 60*time.Second, nil, pushArgs...); pushErr != nil {
 			return nil, fmt.Errorf("core: sync: push: %w", pushErr)
 		}

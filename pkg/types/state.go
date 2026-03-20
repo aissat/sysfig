@@ -45,6 +45,10 @@ type FileRecord struct {
 	// a directory (e.g. "sysfig track /etc/pacman.d/"). Empty for individually
 	// tracked files. Sync uses this to group directory files into one commit.
 	Group       string     `json:"group,omitempty"`
+	// Branch is the git branch dedicated to this file/group.
+	// Format: "track/<repoPath>" for files, "track/<dirPath>" for dir-tracked groups.
+	// Empty on old records — sync creates the branch on first commit.
+	Branch      string     `json:"branch,omitempty"`
 	// Meta holds the file's owner, group, and permission bits captured
 	// at the last track or sync. Nil means metadata was never recorded
 	// (e.g. records created before this feature was added).

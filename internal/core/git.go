@@ -10,6 +10,21 @@ import (
 	"time"
 )
 
+// SanitizeBranchName converts a repo-relative path into a valid git ref
+// component. Git refuses any ref path component that starts with "." (e.g.
+// ".zshrc"), so we replace a leading dot with "dot-".
+//
+// Example: "home/aye7/.zshrc" → "home/aye7/dot-zshrc"
+func SanitizeBranchName(path string) string {
+	parts := strings.Split(path, "/")
+	for i, p := range parts {
+		if strings.HasPrefix(p, ".") {
+			parts[i] = "dot-" + p[1:]
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
 // gitBareRun runs a git command against a bare repo at repoDir.
 //
 // extraEnv is a list of "KEY=VALUE" strings merged on top of the current
@@ -69,10 +84,15 @@ func gitBareOutput(repoDir string, timeout time.Duration, extraEnv []string, arg
 // relPath must NOT have a leading slash (e.g. "etc/nginx/nginx.conf").
 // Returns an error when the file does not exist in HEAD (e.g. not yet committed).
 func gitShowBytes(repoDir, relPath string) ([]byte, error) {
-	ref := "HEAD:" + relPath
-	data, err := gitBareOutput(repoDir, 15*time.Second, nil, "show", ref)
+	return gitShowBytesAt(repoDir, "HEAD", relPath)
+}
+
+// gitShowBytesAt reads a file from a specific ref (branch, commit, or HEAD).
+func gitShowBytesAt(repoDir, ref, relPath string) ([]byte, error) {
+	r := ref + ":" + relPath
+	data, err := gitBareOutput(repoDir, 15*time.Second, nil, "show", r)
 	if err != nil {
-		return nil, fmt.Errorf("core: git show %q: %w", ref, err)
+		return nil, fmt.Errorf("core: git show %q: %w", r, err)
 	}
 	return data, nil
 }
@@ -155,6 +175,83 @@ func gitUpdateIndex(repoDir, mode, blobHash, relPath string, timeout time.Durati
 		"update-index", "--add", "--cacheinfo",
 		fmt.Sprintf("%s,%s,%s", mode, blobHash, relPath),
 	)
+}
+
+// BlobEntry describes one file to include in a gitCommitToBranch call.
+type BlobEntry struct {
+	BlobHash string // 40-char SHA from git hash-object
+	RelPath  string // repo-relative path, e.g. "etc/nginx/nginx.conf"
+	Mode     string // git file mode, typically "100644"
+}
+
+// gitCommitToBranch creates an isolated commit on the given branch containing
+// only the provided blobs — no other files, no shared index state.
+//
+// It uses a temporary GIT_INDEX_FILE so the operation is fully isolated from
+// the default index and from concurrent group commits.
+//
+// Steps:
+//  1. Temp index file: GIT_INDEX_FILE=<tmp> git read-tree --empty
+//  2. For each blob: git update-index --add --cacheinfo <mode>,<sha>,<path>
+//  3. git write-tree  → tree SHA (contains ONLY these blobs)
+//  4. git commit-tree → commit SHA (parent = current branch tip, if any)
+//  5. git update-ref  → advance refs/heads/<branch>
+func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, timeout time.Duration) error {
+	// Temporary index file — isolated per branch, safe for concurrent groups.
+	tmpIdx, err := os.CreateTemp("", "sysfig-index-*")
+	if err != nil {
+		return fmt.Errorf("gitCommitToBranch: create temp index: %w", err)
+	}
+	tmpIdx.Close()
+	defer os.Remove(tmpIdx.Name())
+
+	idxEnv := []string{"GIT_INDEX_FILE=" + tmpIdx.Name()}
+
+	// 1. Start with an empty index.
+	if err := gitBareRun(repoDir, timeout, idxEnv, "read-tree", "--empty"); err != nil {
+		return fmt.Errorf("git read-tree --empty: %w", err)
+	}
+
+	// 2. Add each blob to the isolated index.
+	for _, b := range blobs {
+		mode := b.Mode
+		if mode == "" {
+			mode = "100644"
+		}
+		cacheinfo := fmt.Sprintf("%s,%s,%s", mode, b.BlobHash, b.RelPath)
+		if err := gitBareRun(repoDir, timeout, idxEnv,
+			"update-index", "--add", "--cacheinfo", cacheinfo); err != nil {
+			return fmt.Errorf("git update-index %s: %w", b.RelPath, err)
+		}
+	}
+
+	// 3. Write the tree — contains ONLY the blobs above.
+	treeOut, err := gitBareOutput(repoDir, timeout, idxEnv, "write-tree")
+	if err != nil {
+		return fmt.Errorf("git write-tree: %w", err)
+	}
+	treeHash := strings.TrimSpace(string(treeOut))
+
+	// 4. Resolve parent (tip of branch), if any.
+	ref := "refs/heads/" + branch
+	parentOut, _ := gitBareOutput(repoDir, 5*time.Second, nil, "rev-parse", "--verify", ref)
+	parent := strings.TrimSpace(string(parentOut))
+
+	commitArgs := []string{"commit-tree", treeHash, "-m", message}
+	if parent != "" {
+		commitArgs = append(commitArgs, "-p", parent)
+	}
+	commitOut, err := gitBareOutput(repoDir, timeout, nil, commitArgs...)
+	if err != nil {
+		return fmt.Errorf("git commit-tree: %w", err)
+	}
+	commitHash := strings.TrimSpace(string(commitOut))
+
+	// 5. Advance the branch ref.
+	if err := gitBareRun(repoDir, timeout, nil, "update-ref", ref, commitHash); err != nil {
+		return fmt.Errorf("git update-ref %s: %w", branch, err)
+	}
+	return nil
 }
 
 // isNoUpstreamError returns true when a git push failed because the branch
