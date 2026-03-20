@@ -38,6 +38,7 @@ var (
 	clrPending   = color.New(color.FgBlue)
 	clrMissing   = color.New(color.FgRed)
 	clrEncrypted = color.New(color.FgMagenta)
+	clrNew       = color.New(color.FgCyan)
 )
 
 func ok(format string, a ...interface{})   { fmt.Printf("  "+clrOK.Sprint("✓")+" "+format+"\n", a...) }
@@ -57,6 +58,8 @@ func statusColored(s core.FileStatusLabel, label string) string {
 		return clrMissing.Sprint(label)
 	case core.StatusEncrypted:
 		return clrEncrypted.Sprint(label)
+	case core.StatusNew:
+		return clrNew.Sprint(label)
 	default:
 		return label
 	}
@@ -165,6 +168,119 @@ func resolveBaseDir(baseDir string) string {
 // then "" (meaning real system root — no prefix stripping).
 // This allows labs and CI to export SYSFIG_SYS_ROOT=/sysroot once instead of
 // passing --sys-root on every command.
+// resolveSyncTarget resolves a sync target (path, hash, or CWD) to a list of
+// file IDs. Returns nil (= all files) if target is empty and CWD doesn't match.
+// autoTrackNewInTarget stages any untracked files found in group directories
+// that fall under the given target path. Called before sync so new files are
+// included in the commit without requiring a separate `sysfig track`.
+func autoTrackNewInTarget(baseDir, target string) {
+	statePath := filepath.Join(baseDir, "state.json")
+	sm := state.NewManager(statePath)
+	s, err := sm.Load()
+	if err != nil {
+		return
+	}
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	absTarget := target
+	if abs, err := filepath.Abs(target); err == nil {
+		absTarget = abs
+	}
+
+	tracked := make(map[string]bool, len(s.Files))
+	for _, rec := range s.Files {
+		tracked[rec.SystemPath] = true
+	}
+	excluded := make(map[string]bool, len(s.Excludes))
+	for _, ex := range s.Excludes {
+		excluded[ex] = true
+	}
+
+	for _, rec := range s.Files {
+		if rec.Group == "" {
+			continue
+		}
+		// Only scan group dirs under the target.
+		if !strings.HasPrefix(rec.Group, absTarget) && rec.Group != absTarget {
+			continue
+		}
+		filepath.WalkDir(rec.Group, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if excluded[path] {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if tracked[path] {
+				return nil
+			}
+			core.Track(core.TrackOptions{ //nolint:errcheck
+				SystemPath: path,
+				StateDir:   baseDir,
+				RepoDir:    repoDir,
+				Group:      rec.Group,
+			})
+			tracked[path] = true
+			return nil
+		})
+	}
+}
+
+func resolveSyncTarget(baseDir, target string) []string {
+	statePath := filepath.Join(baseDir, "state.json")
+	sm := state.NewManager(statePath)
+	s, err := sm.Load()
+	if err != nil {
+		return nil
+	}
+
+	absTarget := target
+	if target != "" {
+		if abs, err := filepath.Abs(target); err == nil {
+			absTarget = abs
+		}
+	}
+
+	var ids []string
+	for id, rec := range s.Files {
+		match := false
+		switch {
+		case target == "":
+			// CWD mode: match files whose path starts with absTarget (CWD).
+			match = strings.HasPrefix(rec.SystemPath, absTarget+"/") ||
+				rec.SystemPath == absTarget ||
+				rec.Group == absTarget ||
+				strings.HasPrefix(rec.Group, absTarget+"/")
+		case id == target || id[:min8(len(id))] == target:
+			// Hash/ID match (full or short 8-char prefix).
+			match = true
+		case rec.SystemPath == absTarget ||
+			strings.HasPrefix(rec.SystemPath, absTarget+"/") ||
+			rec.Group == absTarget ||
+			strings.HasPrefix(rec.Group, absTarget+"/"):
+			// Path match.
+			match = true
+		}
+		if match {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func min8(n int) int {
+	if n < 8 {
+		return n
+	}
+	return 8
+}
+
 func resolveSysRoot(sysRoot string) string {
 	if sysRoot != "" {
 		return sysRoot
@@ -784,6 +900,20 @@ func newInitCmd() *cobra.Command {
 
 // ── track ─────────────────────────────────────────────────────────────────────
 
+// autoSyncTracked commits only the given file IDs to their track branches.
+// Called automatically after `sysfig track` so newly tracked files appear in
+// `sysfig log` immediately without requiring a separate `sysfig sync`.
+func autoSyncTracked(baseDir string, ids []string) {
+	_, err := core.Sync(core.SyncOptions{
+		BaseDir: baseDir,
+		Message: "sysfig: track",
+		FileIDs: ids,
+	})
+	if err != nil {
+		fmt.Printf("  %s auto-sync: %v\n", clrWarn.Sprint("warn:"), err)
+	}
+}
+
 func newTrackCmd() *cobra.Command {
 	var (
 		baseDir   string
@@ -838,13 +968,14 @@ func newTrackCmd() *cobra.Command {
 				clrBold.Printf("Tracking (recursive): %s\n", targetPath)
 				divider()
 
+				var trackedIDs []string
 				for _, e := range summary.Entries {
 					switch {
 					case e.Err != nil:
 						fail("%s  %s", clrErr.Sprint("ERROR  "), e.Path)
 						fmt.Printf("             %s\n", clrErr.Sprint(e.Err.Error()))
 					case e.Skipped:
-						fmt.Printf("  %s %s  %s\n", clrDim.Sprint("―"), clrDim.Sprint("SKIPPED"), clrDim.Sprint(e.Path))
+						fmt.Printf("  %s %s  %s\n", clrDim.Sprint("â"), clrDim.Sprint("SKIPPED"), clrDim.Sprint(e.Path))
 						fmt.Printf("             %s\n", clrDim.Sprint(e.Reason))
 					default:
 						ok("%s  %s", clrOK.Sprint("TRACKED"), e.Path)
@@ -853,6 +984,7 @@ func newTrackCmd() *cobra.Command {
 						if encrypt {
 							fmt.Printf("             %s\n", clrEncrypted.Sprint("encrypted: yes"))
 						}
+						trackedIDs = append(trackedIDs, e.ID)
 					}
 				}
 
@@ -865,10 +997,15 @@ func newTrackCmd() *cobra.Command {
 				} else {
 					errStr = clrDim.Sprintf("Errors: %d", summary.Errors)
 				}
-				fmt.Printf("  %s  ·  %s  ·  %s\n", tracked, skipped, errStr)
+				fmt.Printf("  %s  Â·  %s  Â·  %s\n", tracked, skipped, errStr)
 
 				if summary.Errors > 0 {
 					os.Exit(1)
+				}
+
+				// Auto-sync only the newly tracked files.
+				if len(trackedIDs) > 0 {
+					autoSyncTracked(baseDir, trackedIDs)
 				}
 				return nil
 			}
@@ -896,6 +1033,9 @@ func newTrackCmd() *cobra.Command {
 			if encrypt {
 				ok("%s", clrEncrypted.Sprint("Encrypted: yes (age + HKDF-SHA256 per-file key)"))
 			}
+
+			// Auto-sync only this newly tracked file.
+			autoSyncTracked(baseDir, []string{result.ID})
 			return nil
 		},
 	}
@@ -1175,7 +1315,7 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 	for _, r := range results {
 		totals[string(r.Status)]++
 		switch r.Status {
-		case core.StatusDirty, core.StatusPending, core.StatusMissing:
+		case core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew:
 			hasDiff = true
 		}
 	}
@@ -1249,13 +1389,17 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 			if n := dCounts[string(core.StatusMissing)]; n > 0 {
 				parts = append(parts, clrMissing.Sprintf("%d missing", n))
 			}
+			if n := dCounts[string(core.StatusNew)]; n > 0 {
+				parts = append(parts, clrNew.Sprintf("%d new", n))
+			}
 			summary = strings.Join(parts, clrDim.Sprint("  ·  "))
 		}
 
 		// Determine if this dir has any non-clean files.
 		dirDirty := dCounts[string(core.StatusDirty)]+
 			dCounts[string(core.StatusPending)]+
-			dCounts[string(core.StatusMissing)] > 0
+			dCounts[string(core.StatusMissing)]+
+			dCounts[string(core.StatusNew)] > 0
 
 		// Single file in this dir: show the full path instead of the folder.
 		rowLabel := dirDisplay
@@ -1291,7 +1435,7 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 			nameW := 0
 			for _, r := range files {
 				switch r.Status {
-				case core.StatusDirty, core.StatusPending, core.StatusMissing:
+				case core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew:
 					name := filepath.Base(r.SystemPath)
 					if len(name) > nameW {
 						nameW = len(name)
@@ -1302,8 +1446,17 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 
 			for _, r := range files {
 				switch r.Status {
-				case core.StatusDirty, core.StatusPending, core.StatusMissing:
+				case core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew:
 				default:
+					continue
+				}
+				if r.Status == core.StatusNew {
+					name := filepath.Base(r.SystemPath)
+					fmt.Printf("  %s %s  %s  %s\n",
+						clrDim.Sprint("└"),
+						clrNew.Sprint(pad(name, nameW)),
+						clrNew.Sprint("NEW"),
+						clrDim.Sprint("→ sysfig track "+filepath.Dir(r.SystemPath)))
 					continue
 				}
 				name := filepath.Base(r.SystemPath)
@@ -1359,6 +1512,9 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 	}
 	if n := totals[string(core.StatusEncrypted)]; n > 0 {
 		summaryParts = append(summaryParts, clrEncrypted.Sprintf("%d encrypted", n))
+	}
+	if n := totals[string(core.StatusNew)]; n > 0 {
+		summaryParts = append(summaryParts, clrNew.Sprintf("%d new", n))
 	}
 	fmt.Printf("  %s\n", strings.Join(summaryParts, clrDim.Sprint("  ·  ")))
 	return hasDiff
@@ -2084,6 +2240,7 @@ func newSyncCmd() *cobra.Command {
 		baseDir string
 		message string
 		auto    bool
+		all     bool
 		push    bool
 		pull    bool
 		force   bool
@@ -2091,23 +2248,55 @@ func newSyncCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "sync",
+		Use:   "sync [target]",
 		Short: "Commit local changes, optionally pull first and/or push after",
 		Long: `Stages all modified tracked files and creates a local git commit (offline-safe).
 
 A message is required: use -m for a custom message or --auto for the default.
 
+Optional [target] limits the sync to a specific file or directory:
+  sysfig sync /etc/pacman.conf -m "updated mirrors"   # by path
+  sysfig sync 63d01e28 -m "updated mirrors"           # by hash/ID
+  sysfig sync -m "updated mirrors"                    # CWD-aware: auto-detect
+
 Use --pull to fetch remote changes first (full round-trip with --push):
   sysfig sync --pull --push`,
-		Example: `  sysfig sync -m "tuned nginx"        # custom message
-  sysfig sync --auto                  # auto-generated message
-  sysfig sync --auto --push           # commit + push
-  sysfig sync --auto --pull --push    # full round-trip`,
+		Example: `  sysfig sync -m "tuned nginx"              # all changed files
+  sysfig sync /etc/nginx -m "tuned nginx"   # only files under /etc/nginx
+  sysfig sync --auto                        # auto-generated message
+  sysfig sync --auto --push                 # commit + push`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if message == "" && !auto {
 				return fmt.Errorf("message required: use -m \"your message\" or --auto for the default message")
 			}
 			baseDir = resolveBaseDir(baseDir)
+
+			// Determine the target scope (path, hash, or CWD).
+			target := ""
+			if len(args) > 0 {
+				target = args[0]
+			}
+			// CWD-aware: if no target given and not --all, scope to CWD.
+			if target == "" && !all {
+				if cwd, err := os.Getwd(); err == nil {
+					target = cwd
+				}
+			}
+
+			// Auto-track new files in group dirs under the target before resolving IDs.
+			autoTrackNewInTarget(baseDir, target)
+
+			// Resolve target → FileIDs filter (nil = all files).
+			var fileIDs []string
+			if target != "" {
+				fileIDs = resolveSyncTarget(baseDir, target)
+			}
+			// If target was given explicitly and nothing matched, error out.
+			if len(args) > 0 && len(fileIDs) == 0 {
+				return fmt.Errorf("sync: no tracked files match %q", args[0])
+			}
+
 			result, err := core.Sync(core.SyncOptions{
 				BaseDir: baseDir,
 				Message: message,
@@ -2115,6 +2304,7 @@ Use --pull to fetch remote changes first (full round-trip with --push):
 				Push:    push,
 				Force:   force,
 				SysRoot: resolveSysRoot(sysRoot),
+				FileIDs: fileIDs,
 			})
 			if err != nil {
 				return err
@@ -2154,6 +2344,7 @@ Use --pull to fetch remote changes first (full round-trip with --push):
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVarP(&message, "message", "m", "", "commit message")
 	f.BoolVar(&auto, "auto", false, "use auto-generated commit message (sysfig: update <path>)")
+	f.BoolVar(&all, "all", false, "sync all tracked files, ignoring CWD scope")
 	f.BoolVar(&pull, "pull", false, "pull from remote before committing (requires network)")
 	f.BoolVar(&push, "push", false, "push to remote after committing (requires network)")
 	f.BoolVar(&force, "force", false, "force push (use for first push to a non-empty remote)")
@@ -2218,11 +2409,12 @@ func newPullCmd() *cobra.Command {
 
 func newLogCmd() *cobra.Command {
 	var (
-		baseDir      string
-		filePath     string
-		id           string
-		n            int
-		noRollbacks  bool
+		baseDir     string
+		filePath    string
+		id          string
+		n           int
+		noRollbacks bool
+		graphMode   bool
 	)
 
 	cmd := &cobra.Command{
@@ -2274,6 +2466,7 @@ Filter to a specific path or ID:
 				"log", "--pretty=format:%h\t%ad\t%s\t%D",
 				"--date=format:%Y-%m-%d %H:%M",
 			}
+			// Note: we build our own lane graph — do NOT pass --graph to git.
 			if filterPath != "" {
 				// Find branch(es) for this path from state.
 				var trackBranches []string
@@ -2319,31 +2512,79 @@ Filter to a specific path or ID:
 				dim     = "\033[2m"
 			)
 
+			// Lane colors cycle through distinct ANSI colors.
+			laneColors := []string{
+				"\033[32m", "\033[33m", "\033[36m", "\033[35m",
+				"\033[34m", "\033[31m", "\033[37m",
+			}
+
+			// Pre-build hash→branch map by walking every track/* and manifest branch.
+			// This lets us assign a lane to every commit, not just branch tips.
+			hashToBranch := map[string]string{}
+			if graphMode {
+				branchListOut, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+					"for-each-ref", "--format=%(refname:short)", "refs/heads/").Output()
+				for _, b := range strings.Split(strings.TrimSpace(string(branchListOut)), "\n") {
+					b = strings.TrimSpace(b)
+					if !strings.HasPrefix(b, "track/") && b != "manifest" {
+						continue
+					}
+					commitListOut, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+						"log", b, "--format=%H").Output()
+					for _, h := range strings.Split(strings.TrimSpace(string(commitListOut)), "\n") {
+						h = strings.TrimSpace(h)
+						if h != "" {
+							if hashToBranch[h] == "" { hashToBranch[h] = b }
+							if len(h) >= 7 && hashToBranch[h[:7]] == "" { hashToBranch[h[:7]] = b }
+						}
+					}
+				}
+			}
+
+			type logRow struct {
+				hash       string
+				date       string
+				pathLabel  string
+				subject    string
+				statLabel  string
+				decoration string
+				branchName string // for lane graph
+				connector  string // non-commit graph line (e.g. "|", "|/")
+			}
+
 			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+			rows := make([]logRow, 0, len(lines))
+			maxPathLen := 0
+
 			for _, line := range lines {
 				if line == "" {
 					continue
 				}
 				parts := strings.SplitN(line, "\t", 4)
+				// Graph-only connector lines (e.g. "|", "|/", "|\") have no tabs.
 				if len(parts) < 3 {
+					if graphMode {
+						rows = append(rows, logRow{connector: line})
+					}
 					continue
 				}
-				hash, date, subject := parts[0], parts[1], parts[2]
+
+				hash := strings.TrimSpace(parts[0])
+
+				date, subject := parts[1], parts[2]
 				if noRollbacks && strings.HasPrefix(subject, "sysfig: rollback ") {
 					continue
 				}
 				decoration := ""
 				if len(parts) == 4 && parts[3] != "" {
-					decoration = " " + green + "(" + parts[3] + ")" + reset
+					decoration = parts[3]
 				}
 
-				// Step 2: get files changed in this commit.
+				// Get files changed in this commit.
 				dtOut, _ := exec.Command("git",
 					"--no-pager", "--git-dir="+repoDir,
 					"diff-tree", "--no-commit-id", "-r", "--name-only", hash,
 				).Output()
-				// Orphan commits (first commit on a track branch) have no parent,
-				// so diff-tree returns nothing. Fall back to ls-tree.
 				if len(strings.TrimSpace(string(dtOut))) == 0 {
 					dtOut, _ = exec.Command("git",
 						"--no-pager", "--git-dir="+repoDir,
@@ -2351,7 +2592,6 @@ Filter to a specific path or ID:
 					).Output()
 				}
 
-				// Collect changed files, skip sysfig.yaml.
 				var paths []string
 				for _, f := range strings.Split(strings.TrimSpace(string(dtOut)), "\n") {
 					if f == "" || f == "sysfig.yaml" {
@@ -2364,22 +2604,17 @@ Filter to a specific path or ID:
 					paths = append(paths, f)
 				}
 
-				if len(paths) == 0 {
-					fmt.Printf("* %s%s%s %s%s%s  %s%s\n",
-						yellow, hash, reset,
-						cyan, date, reset,
-						subject, decoration)
-					continue
-				}
-
-				// Single file → one clean line.
-				// Multiple files → first path + "+N more" collapsed on one line.
-				pathLabel := paths[0]
-				if len(paths) > 1 {
+				pathLabel := ""
+				if len(paths) == 1 {
+					pathLabel = paths[0]
+				} else if len(paths) > 1 {
 					pathLabel = fmt.Sprintf("%s +%d", paths[0], len(paths)-1)
 				}
+				if len(pathLabel) > maxPathLen {
+					maxPathLen = len(pathLabel)
+				}
 
-				// Diff stat: lines added/deleted in this commit.
+				// Diff stat.
 				statLabel := ""
 				nsOut, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
 					"diff-tree", "--numstat", "--no-commit-id", hash).Output()
@@ -2390,16 +2625,113 @@ Filter to a specific path or ID:
 				for _, sl := range strings.Split(strings.TrimSpace(string(nsOut)), "\n") {
 					fields := strings.Fields(sl)
 					if len(fields) >= 2 && (fields[0] != "0" || fields[1] != "0") {
-						statLabel = dim + " [+" + fields[0] + "/-" + fields[1] + "]" + reset
+						statLabel = dim + "[+" + fields[0] + "/-" + fields[1] + "]" + reset
 						break
 					}
 				}
 
-				fmt.Printf("* %s%s%s %s%s%s %s%s%s  %s%s%s\n",
-					yellow, hash, reset,
-					cyan, date, reset,
-					magenta, pathLabel, reset,
-					subject, statLabel, decoration)
+				rows = append(rows, logRow{
+					hash:       hash,
+					date:       date,
+					pathLabel:  pathLabel,
+					subject:    subject,
+					statLabel:  statLabel,
+					decoration: decoration,
+					branchName: hashToBranch[hash],
+				})
+			}
+
+			// Second pass: render with aligned path column + optional lane graph.
+			// Lane graph state: lanes[i] holds the branch name active in column i.
+			lanes := []string{}
+			laneColor := map[string]string{}
+			laneIdx := map[string]int{}
+			// Pre-compute last occurrence index per branch for lane closing.
+			lastOcc := map[string]int{}
+			for i, r := range rows {
+				if r.branchName != "" {
+					lastOcc[r.branchName] = i
+				}
+			}
+			getLane := func(branch string) int {
+				if idx, ok := laneIdx[branch]; ok {
+					return idx
+				}
+				for i, l := range lanes {
+					if l == "" {
+						lanes[i] = branch
+						laneIdx[branch] = i
+						return i
+					}
+				}
+				i := len(lanes)
+				lanes = append(lanes, branch)
+				laneIdx[branch] = i
+				laneColor[branch] = laneColors[i%len(laneColors)]
+				return i
+			}
+			closeLane := func(branch string) {
+				if idx, ok := laneIdx[branch]; ok {
+					lanes[idx] = ""
+					delete(laneIdx, branch)
+				}
+			}
+			graphPfx := func(active int) string {
+				// find rightmost active column
+				width := active + 1
+				for i := len(lanes) - 1; i > active; i-- {
+					if lanes[i] != "" {
+						width = i + 1
+						break
+					}
+				}
+				var sb strings.Builder
+				for i := 0; i < width; i++ {
+					if i == active {
+						sb.WriteString(laneColor[lanes[i]] + "* " + reset)
+					} else if lanes[i] != "" {
+						sb.WriteString(laneColor[lanes[i]] + "| " + reset)
+					} else {
+						sb.WriteString("  ")
+					}
+				}
+				return sb.String()
+			}
+			for i, r := range rows {
+				if r.connector != "" {
+					fmt.Println(r.connector)
+					continue
+				}
+				paddedPath := r.pathLabel
+				if maxPathLen > 0 {
+					paddedPath = r.pathLabel + strings.Repeat(" ", maxPathLen-len(r.pathLabel))
+				}
+				decStr := ""
+				if r.decoration != "" {
+					decStr = "  " + green + "(" + r.decoration + ")" + reset
+				}
+				prefix := "* "
+				if graphMode && r.branchName != "" {
+					activeLane := getLane(r.branchName)
+					prefix = graphPfx(activeLane)
+					if lastOcc[r.branchName] == i {
+						closeLane(r.branchName)
+					}
+				}
+				if r.pathLabel == "" {
+					fmt.Printf("%s%s%s%s %s%s%s  %s %s%s\n",
+						prefix,
+						yellow, r.hash, reset,
+						cyan, r.date, reset,
+						r.subject, r.statLabel, decStr)
+				} else {
+					fmt.Printf("%s%s%s%s %s%s%s  %s%s%s  %s %s%s\n",
+						prefix,
+						yellow, r.hash, reset,
+						cyan, r.date, reset,
+						magenta, paddedPath, reset,
+						r.subject, r.statLabel, decStr)
+				}
 			}
 			return nil
 		},
@@ -2411,6 +2743,7 @@ Filter to a specific path or ID:
 	f.StringVar(&id, "id", "", "filter by tracking ID")
 	f.IntVarP(&n, "number", "n", 0, "limit to last N commits (0 = unlimited)")
 	f.BoolVar(&noRollbacks, "no-rollbacks", false, "hide rollback commits from output")
+	f.BoolVarP(&graphMode, "graph", "g", false, "show branch/merge graph (like git log --graph)")
 	return cmd
 }
 

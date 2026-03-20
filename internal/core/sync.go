@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -309,6 +310,59 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		fileIDSet[fid] = true
 	}
 
+	// Auto-track new files in group directories (only when no FileIDs filter).
+	// If a directory was tracked as a group, any new files added since the
+	// last sync should be picked up automatically — no need to re-run track.
+	if len(fileIDSet) == 0 {
+		trackedPaths := make(map[string]bool, len(currentState.Files))
+		groupDirsSet := make(map[string]bool)
+		for _, rec := range currentState.Files {
+			trackedPaths[rec.SystemPath] = true
+			if rec.Group != "" {
+				groupDirsSet[rec.Group] = true
+			}
+		}
+		excludeSet := make(map[string]bool, len(currentState.Excludes))
+		for _, ex := range currentState.Excludes {
+			excludeSet[ex] = true
+		}
+		newFound := false
+		for dir := range groupDirsSet {
+			filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return nil
+				}
+				if excludeSet[path] {
+					if d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if d.IsDir() {
+					return nil
+				}
+				if trackedPaths[path] {
+					return nil
+				}
+				Track(TrackOptions{ //nolint:errcheck
+					SystemPath: path,
+					StateDir:   opts.BaseDir,
+					RepoDir:    repoDir,
+					Group:      dir,
+				})
+				newFound = true
+				return nil
+			})
+		}
+		if newFound {
+			// Reload state to include newly auto-tracked files.
+			currentState, err = sm.Load()
+			if err != nil {
+				return nil, fmt.Errorf("core: sync: reload state: %w", err)
+			}
+		}
+	}
+
 	for id, rec := range currentState.Files {
 		if len(fileIDSet) > 0 && !fileIDSet[id] {
 			continue
@@ -400,10 +454,11 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			for i, e := range entries {
 				paths[i] = e.relPath
 			}
+			relGroupKey := strings.TrimPrefix(groupKey, "/")
 			if len(paths) == 1 {
 				groupMsg = "sysfig: update " + paths[0]
 			} else {
-				groupMsg = "sysfig: update " + groupKey + " (" + strings.Join(paths, ", ") + ")"
+				groupMsg = "sysfig: update " + relGroupKey + " (" + strings.Join(paths, ", ") + ")"
 			}
 		}
 

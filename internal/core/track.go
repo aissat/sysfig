@@ -277,7 +277,7 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		if opts.Group != "" {
 			branchBase = strings.TrimPrefix(opts.Group, "/")
 		}
-		branch := "track/" + SanitizeBranchName(branchBase)
+		branch := resolveTrackBranch(opts.RepoDir, "track/"+SanitizeBranchName(branchBase))
 
 		s.Files[id] = &types.FileRecord{
 			ID:          id,
@@ -340,6 +340,26 @@ func Untrack(opts UntrackOptions) ([]string, error) {
 			}
 		}
 		if len(removed) == 0 {
+			// Not a tracked file — check if it's a NEW path inside a group dir.
+			// If so, add it to the excludes list so it won't show as NEW again.
+			for _, rec := range s.Files {
+				if rec.Group == "" {
+					continue
+				}
+				if arg == rec.Group ||
+					strings.HasPrefix(arg, rec.Group+"/") ||
+					strings.HasPrefix(rec.Group, arg+"/") {
+					// Add to excludes if not already there.
+					for _, ex := range s.Excludes {
+						if ex == arg {
+							return fmt.Errorf("already excluded: %q", opts.Arg)
+						}
+					}
+					s.Excludes = append(s.Excludes, arg)
+					removed = append(removed, arg)
+					return nil
+				}
+			}
 			return fmt.Errorf("not tracked: %q", opts.Arg)
 		}
 		return nil

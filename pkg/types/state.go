@@ -75,8 +75,9 @@ type Node struct {
 
 // State is the top-level structure of state.json.
 type State struct {
-	Version int                       `json:"version"`
-	Files   map[string]*FileRecord    `json:"files"`
-	Backups map[string][]BackupRecord `json:"backups"`
-	Nodes   map[string]*Node          `json:"nodes,omitempty"`
+	Version  int                       `json:"version"`
+	Files    map[string]*FileRecord    `json:"files"`
+	Backups  map[string][]BackupRecord `json:"backups"`
+	Nodes    map[string]*Node          `json:"nodes,omitempty"`
+	Excludes []string                  `json:"excludes,omitempty"`
 }

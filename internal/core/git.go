@@ -10,6 +10,38 @@ import (
 	"time"
 )
 
+// resolveTrackBranch returns a branch name that won't conflict with existing
+// refs in the bare repo. Git refs use "/" as a hierarchy separator, so
+// "track/a/b" and "track/a/b/c" cannot coexist — one would be a "directory"
+// blocking the other. If a conflict is detected the function appends "--file"
+// (or "--dir") to make the name unique.
+func resolveTrackBranch(repoDir, branch string) string {
+	out, err := gitBareOutput(repoDir, 5*time.Second, nil,
+		"for-each-ref", "--format=%(refname:short)", "refs/heads/")
+	if err != nil {
+		return branch // can't check — use as-is
+	}
+	existing := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	for _, ref := range existing {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		// Case 1: existing ref is a prefix of our branch (e.g. "track/a/b"
+		// exists and we want "track/a/b/c").
+		if strings.HasPrefix(branch, ref+"/") {
+			branch = strings.ReplaceAll(branch, ref+"/", ref+"--/")
+		}
+		// Case 2: our branch is a prefix of an existing ref (e.g. "track/a/b/c"
+		// exists and we want "track/a/b").
+		if strings.HasPrefix(ref, branch+"/") {
+			branch = branch + "--dir"
+		}
+	}
+	return branch
+}
+
 // SanitizeBranchName converts a repo-relative path into a valid git ref
 // component. Git refuses any ref path component that starts with "." (e.g.
 // ".zshrc"), so we replace a leading dot with "dot-".

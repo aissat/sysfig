@@ -22,6 +22,7 @@ const (
 	StatusMissing   FileStatusLabel = "MISSING"
 	StatusEncrypted FileStatusLabel = "ENCRYPTED"
 	StatusPending   FileStatusLabel = "PENDING"  // repo ahead of system; apply needed
+	StatusNew       FileStatusLabel = "NEW"       // file exists on disk but not yet tracked
 )
 
 // FileStatusResult holds the computed status for one tracked file.
@@ -174,6 +175,53 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 		}
 
 		results = append(results, r)
+	}
+
+	// Scan group directories for untracked files.
+	// Build a set of all tracked system paths for fast lookup.
+	trackedPaths := make(map[string]bool, len(s.Files))
+	groupDirs := make(map[string]bool)
+	for _, rec := range s.Files {
+		trackedPaths[rec.SystemPath] = true
+		if rec.Group != "" {
+			groupDirs[rec.Group] = true
+		}
+	}
+	excludeSet := make(map[string]bool, len(s.Excludes))
+	for _, ex := range s.Excludes {
+		excludeSet[ex] = true
+	}
+
+	for dir := range groupDirs {
+		filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			// Skip excluded paths (files or whole directories).
+			if excludeSet[path] {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if trackedPaths[path] {
+				return nil
+			}
+			sysPath := path
+			if sysRoot != "" {
+				sysPath = filepath.Join(sysRoot, path)
+			}
+			results = append(results, FileStatusResult{
+				ID:         deriveID(path),
+				Slug:       deriveSlug(path),
+				SystemPath: sysPath,
+				Status:     StatusNew,
+			})
+			return nil
+		})
 	}
 
 	// Return results sorted by ID for deterministic output.
