@@ -70,11 +70,12 @@ PATH / STATUS
 /etc/nginx/
 └ nginx.conf                             DIRTY/MODIFIED
    ⚠ mode:   0644 → 0600
+└ nginx-new.conf                         NEW  → sysfig track /etc/nginx
 /etc/ssh/                                1 synced
 /etc/ssl/private/server.key              ENCRYPTED
 /home/you/.bashrc                        PENDING/APPLY
 ────────────────────────────────────────────────────────────────────────────
-  4 files  ·  1 synced  ·  1 dirty  ·  1 pending  ·  1 encrypted
+  4 files  ·  1 synced  ·  1 dirty  ·  1 pending  ·  1 encrypted  ·  1 new
 ```
 
 **Commit history — one line per file, meaningful messages:**
@@ -248,6 +249,7 @@ Each commit uses an isolated git index (`GIT_INDEX_FILE`) so the branch tree con
 
 ```bash
 # Track dotfiles (no sudo) — ~/.sysfig is created automatically on first track
+# Each file is auto-committed to its own track branch immediately
 sysfig track ~/.bashrc
 sysfig track ~/.vimrc
 
@@ -260,12 +262,9 @@ sysfig keys generate
 sysfig track --encrypt ~/.config/tokens.env
 sudo sysfig track --encrypt /etc/app/secret.env
 
-# Commit everything to the local repo
-sysfig sync -m "initial commit"
-
 # Set remote and push (--force for first push to a non-empty remote)
 sysfig remote set git@github.com:you/myconfigs.git
-sysfig sync --push --force
+sysfig sync --all --push --force
 ```
 
 ### New machine — deploy (one command)
@@ -517,13 +516,11 @@ Start tracking a config file (or an entire directory).
 sysfig track <path> [options]
 ```
 
-Copies the file into the bare git repo's index (staged, not yet committed), records its BLAKE3 hash and `uid`/`gid`/`mode` metadata in `state.json`, and updates `sysfig.yaml`.
+Copies the file into the bare git repo's index, records its BLAKE3 hash and `uid`/`gid`/`mode` metadata in `state.json`, and updates `sysfig.yaml`. **A commit is created automatically** on the new file's `track/<path>` branch — no separate `sysfig sync` needed.
 
 **`~/.sysfig` is created automatically** on the first `track` — no explicit `sysfig init` needed.
 
 **`sudo sysfig track /etc/...`** — runs as root to read privileged files, but the repo and state live in the **invoking user's** `~/.sysfig` (resolved via `SUDO_USER`). No second repo, no flags needed. After every sudo write, sysfig re-chowns `~/.sysfig` back to the invoking user, so subsequent non-sudo commands (`sysfig node add`, `sysfig status`, etc.) work without permission errors.
-
-**Run `sysfig sync` after tracking to create a commit.**
 
 **Options:**
 
@@ -548,7 +545,7 @@ If `--id` is omitted, the ID is derived from the absolute path: strip the leadin
 **Examples:**
 
 ```bash
-# Single file
+# Single file — auto-committed immediately to its track branch
 sysfig track /etc/nginx/nginx.conf
 
 # With explicit ID and tags
@@ -558,6 +555,8 @@ sysfig track /etc/nginx/nginx.conf --id nginx_main --tag web --tag nginx
 sysfig track /etc/myapp/secrets.env --encrypt
 
 # Track an entire directory — auto-detected, no --recursive flag needed
+# New files added to the directory later are detected by `sysfig status` (shown as NEW)
+# and committed automatically by the next `sysfig sync`
 sysfig track /etc/nginx/
 
 # Track /etc but skip secrets
@@ -568,9 +567,6 @@ sysfig track /etc/nginx --exclude "*.bak"
 
 # Track a template file — placeholders substituted at apply time
 sysfig track ~/.gitconfig --template
-
-# After tracking, commit
-sysfig sync
 ```
 
 **Template variables:**
@@ -623,6 +619,14 @@ Accepts:
 - A bare tracking ID: `sysfig untrack etc_nginx_nginx_conf`
 - A directory path: removes all files tracked under that directory
 
+**Excluding NEW files in tracked directories:**
+If a path is not yet tracked but sits inside a directory that was tracked as a group (e.g. `sysfig track /etc/pacman.d/`), `untrack` adds it to the excludes list so it no longer appears as `NEW` in `sysfig status`:
+
+```bash
+# /etc/pacman.d/ is a tracked group — /etc/pacman.d/gnupg/ shows as NEW
+sysfig untrack /etc/pacman.d/gnupg   # adds to excludes, hides from status
+```
+
 **Run `sysfig sync` after untracking to commit the manifest change.**
 
 **Options:**
@@ -643,8 +647,12 @@ sysfig untrack etc_nginx_nginx_conf
 # Remove all files tracked under /etc/nginx/
 sysfig untrack /etc/nginx/
 
+# Exclude a NEW subdirectory from a tracked group dir
+# (adds to excludes so it no longer appears as NEW in status)
+sysfig untrack /etc/pacman.d/gnupg
+
 # After untracking, commit the manifest change
-sysfig sync -m "stop tracking nginx"
+sysfig sync --all -m "stop tracking nginx"
 ```
 
 **Example output:**
@@ -740,22 +748,24 @@ PATH / STATUS
 /etc/pacman.d/        10 synced
 /etc/nginx/
 └ nginx.conf          DIRTY/MODIFIED
+└ nginx-new.conf      NEW  → sysfig track /etc/nginx
 /home/you/.zshrc      SYNCED
 ────────────────────────────────────────────────────────────────────────────
-  12 files  ·  11 synced  ·  1 dirty
+  12 files  ·  11 synced  ·  1 dirty  ·  1 new
 ```
 
 Use `--files` (or `-f`) to bypass grouping and see every tracked file individually on its own line.
 
 **Status labels:**
 
-| Label           | Meaning                                                             | Action                  |
-| --------------- | ------------------------------------------------------------------- | ----------------------- |
-| `SYNCED`        | System file matches repo                                            | Nothing to do           |
-| `DIRTY`         | System file has been modified since last sync                       | Run `sysfig sync`       |
-| `PENDING/APPLY` | Repo has a newer version than the system file                       | Run `sysfig apply`      |
-| `MISSING`       | File is tracked but does not exist on the system                    | Run `sysfig apply`      |
-| `ENCRYPTED`     | Encrypted file — content comparison skipped (no master key present) | Copy key, then re-check |
+| Label           | Meaning                                                             | Action                       |
+| --------------- | ------------------------------------------------------------------- | ---------------------------- |
+| `SYNCED`        | System file matches repo                                            | Nothing to do                |
+| `DIRTY`         | System file has been modified since last sync                       | Run `sysfig sync`            |
+| `PENDING/APPLY` | Repo has a newer version than the system file                       | Run `sysfig apply`           |
+| `MISSING`       | File is tracked but does not exist on the system                    | Run `sysfig apply`           |
+| `ENCRYPTED`     | Encrypted file — content comparison skipped (no master key present) | Copy key, then re-check      |
+| `NEW`           | File exists on disk inside a tracked group dir but is not yet tracked | Run `sysfig sync` to auto-track, or `sysfig untrack <path>` to exclude |
 
 **Exit codes:** `0` = all SYNCED, `1` = any DIRTY/PENDING/MISSING, `2` = error.
 
@@ -832,12 +842,37 @@ sysfig diff --id sshd_config || echo "sshd_config has drifted"
 Capture the current state of tracked files and commit locally (offline-safe).
 
 ```
-sysfig sync [options]
+sysfig sync [target] [options]
 ```
 
 Stages any modified tracked files, creates a git commit in the local bare repo, and updates `state.json` hashes and timestamps. No network access required. Use `--push` to also push in one step; use `--pull` to fetch remote changes before committing.
 
 **A commit message is required.** Pass `-m "..."` for a custom message or `--auto` to let sysfig generate one (`sysfig: update <path>`). Running `sysfig sync` with neither flag exits with an error and a helpful hint.
+
+**CWD-aware scoping:**
+
+When you run `sysfig sync` without a target, it automatically scopes to files under your current working directory. To sync everything regardless of CWD, use `--all`.
+
+```bash
+cd /etc/nginx
+sysfig sync --auto          # only syncs files under /etc/nginx/
+sysfig sync --all --auto    # syncs ALL tracked files
+```
+
+**Target argument:**
+
+The optional `[target]` narrows which files are staged and committed. It can be:
+- A directory path — only files under that path are synced
+- A system file path — only that specific file
+- A short tracking ID or hash prefix — only that file
+
+```bash
+sysfig sync /etc/nginx --auto              # sync only nginx files
+sysfig sync /home/you/.zshrc -m "update"  # sync one file
+sysfig sync a3f2b1c --auto                # sync by ID prefix
+```
+
+**NEW files in tracked directories:** `sysfig sync` also auto-tracks any files discovered inside a tracked group directory that haven't been tracked yet (shown as `NEW` in `sysfig status`). They are committed in the same run.
 
 **Commit strategy:**
 
@@ -848,21 +883,24 @@ Stages any modified tracked files, creates a git commit in the local bare repo, 
 
 **Options:**
 
-| Flag            | Default     | Description                                                      |
-| --------------- | ----------- | ---------------------------------------------------------------- |
+| Flag              | Default     | Description                                                    |
+| ----------------- | ----------- | -------------------------------------------------------------- |
 | `-m`, `--message` | _(required)_ | Custom commit message (mutually exclusive with `--auto`)      |
-| `--auto`        | `false`     | Auto-generate message: `sysfig: update <path>`                   |
-| `--push`        | `false`     | Also push to remote after committing                             |
-| `--pull`        | `false`     | Fetch remote changes before committing (non-fatal)               |
-| `--base-dir`    | `~/.sysfig` | Directory where sysfig stores data                               |
+| `--auto`          | `false`     | Auto-generate message: `sysfig: update <path>`                 |
+| `--all`           | `false`     | Bypass CWD scoping — sync all tracked files                    |
+| `--push`          | `false`     | Also push to remote after committing                           |
+| `--pull`          | `false`     | Fetch remote changes before committing (non-fatal)             |
+| `--base-dir`      | `~/.sysfig` | Directory where sysfig stores data                             |
 
 **Examples:**
 
 ```bash
-sysfig sync -m "tuned worker_processes"   # custom message
-sysfig sync --auto                        # auto-generated message
-sysfig sync --auto --push                 # commit + push in one step
-sysfig sync --auto --pull --push          # full round-trip: pull → commit → push
+sysfig sync -m "tuned worker_processes"    # custom message, CWD-scoped
+sysfig sync --auto                         # auto-generated message, CWD-scoped
+sysfig sync --all --auto                   # sync everything regardless of CWD
+sysfig sync --auto --push                  # commit + push in one step
+sysfig sync --auto --pull --push           # full round-trip: pull → commit → push
+sysfig sync /etc/nginx --auto              # explicit path target
 ```
 
 **Example output:**
