@@ -27,6 +27,7 @@ const (
 // FileStatusResult holds the computed status for one tracked file.
 type FileStatusResult struct {
 	ID           string
+	Slug         string // human-readable path slug, e.g. "home_aye7_zshrc"
 	SystemPath   string
 	RepoPath     string
 	RecordedHash string          // hash stored in state.json
@@ -81,8 +82,10 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 
 	var results []FileStatusResult
 
-	for id, rec := range s.Files {
-		if len(ids) > 0 && !wantIDs[id] {
+	for _, rec := range s.Files {
+		computedID := deriveID(rec.SystemPath)
+		dirID := deriveID(filepath.Dir(rec.SystemPath))
+		if len(ids) > 0 && !wantIDs[computedID] && !wantIDs[dirID] {
 			continue
 		}
 
@@ -93,7 +96,8 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 		}
 
 		r := FileStatusResult{
-			ID:           rec.ID,
+			ID:           deriveID(rec.SystemPath),
+			Slug:         deriveSlug(rec.SystemPath),
 			SystemPath:   sysPath,
 			RepoPath:     rec.RepoPath,
 			RecordedHash: rec.CurrentHash,

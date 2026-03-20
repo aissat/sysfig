@@ -236,6 +236,34 @@ ownership and permissions, and stay fully offline-capable.`,
 		newNodeCmd(),
 	)
 
+	// Force cobra to register the built-in completion subcommands now so we
+	// can attach our own subcommands to it.
+	root.InitDefaultCompletionCmd()
+	if compCmd, _, err := root.Find([]string{"completion"}); err == nil && compCmd != nil {
+		compCmd.AddCommand(newCompletionInstallCmd(root))
+
+		// Replace cobra's zsh subcommand with one that moves `compdef` to
+		// the end of the script. This makes `. <(sysfig completion zsh)` work
+		// reliably even with process substitution.
+		if zshCmd, _, err := compCmd.Find([]string{"zsh"}); err == nil && zshCmd != nil {
+			zshCmd.RunE = func(cmd *cobra.Command, args []string) error {
+				var buf bytes.Buffer
+				if err := root.GenZshCompletion(&buf); err != nil {
+					return err
+				}
+				script := buf.String()
+				// Move the early `compdef _sysfig sysfig` line to the end so
+				// it runs after the _sysfig function is fully defined —
+				// required when sourced via process substitution.
+				const earlyCompdef = "compdef _sysfig sysfig\n"
+				script = strings.Replace(script, earlyCompdef, "", 1)
+				script += "\ncompdef _sysfig sysfig\n"
+				fmt.Print(script)
+				return nil
+			}
+		}
+	}
+
 	// Hidden alias kept for backward-compat.
 	cloneAlias := *newSetupCmd()
 	cloneAlias.Use = "clone"
@@ -243,6 +271,109 @@ ownership and permissions, and stay fully offline-capable.`,
 	root.AddCommand(&cloneAlias)
 
 	return root
+}
+
+// newCompletionInstallCmd returns a `completion install` subcommand that
+// detects the current shell and writes the completion script to the right place.
+func newCompletionInstallCmd(root *cobra.Command) *cobra.Command {
+	return &cobra.Command{
+		Use:       "install [bash|zsh|fish]",
+		Short:     "Install shell completion (auto-detects shell, or pass one explicitly)",
+		Args:      cobra.MaximumNArgs(1),
+		ValidArgs: []string{"bash", "zsh", "fish"},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Explicit shell arg takes priority over $SHELL.
+			var shell string
+			if len(args) == 1 {
+				shell = args[0]
+			} else {
+				shell = os.Getenv("SHELL")
+			}
+			switch {
+			case shell == "zsh" || strings.Contains(shell, "zsh"):
+				return installZshCompletion(root)
+			case shell == "bash" || strings.Contains(shell, "bash"):
+				return installBashCompletion(root)
+			case shell == "fish" || strings.Contains(shell, "fish"):
+				return installFishCompletion(root)
+			default:
+				return fmt.Errorf("unknown shell %q — pass one explicitly: sysfig completion install [bash|zsh|fish]", shell)
+			}
+		},
+	}
+}
+
+func installZshCompletion(root *cobra.Command) error {
+	// Prefer the first writable dir in $fpath, fall back to ~/.zfunc.
+	dir := filepath.Join(os.Getenv("HOME"), ".zfunc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	dest := filepath.Join(dir, "_sysfig")
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := root.GenZshCompletion(f); err != nil {
+		return err
+	}
+	ok("Written %s", dest)
+	info("Add this to ~/.zshrc if not already present:")
+	fmt.Println(`    fpath=(~/.zfunc $fpath)`)
+	fmt.Println(`    autoload -Uz compinit && compinit`)
+	info("Then restart your shell or run: exec zsh")
+	return nil
+}
+
+func installBashCompletion(root *cobra.Command) error {
+	// Try /etc/bash_completion.d first (system-wide), fall back to ~/.bash_completion.d.
+	dirs := []string{"/etc/bash_completion.d", filepath.Join(os.Getenv("HOME"), ".bash_completion.d")}
+	var dir string
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o755); err == nil {
+			dir = d
+			break
+		}
+	}
+	if dir == "" {
+		return fmt.Errorf("could not find a writable bash completion directory")
+	}
+	dest := filepath.Join(dir, "sysfig")
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := root.GenBashCompletion(f); err != nil {
+		return err
+	}
+	ok("Written %s", dest)
+	if dir == filepath.Join(os.Getenv("HOME"), ".bash_completion.d") {
+		info("Add this to ~/.bashrc if not already present:")
+		fmt.Println(`    for f in ~/.bash_completion.d/*; do source "$f"; done`)
+	}
+	info("Then restart your shell or run: source %s", dest)
+	return nil
+}
+
+func installFishCompletion(root *cobra.Command) error {
+	dir := filepath.Join(os.Getenv("HOME"), ".config", "fish", "completions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	dest := filepath.Join(dir, "sysfig.fish")
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := root.GenFishCompletion(f, true); err != nil {
+		return err
+	}
+	ok("Written %s", dest)
+	info("Fish picks it up automatically — restart your shell or run: exec fish")
+	return nil
 }
 
 func main() {
@@ -1011,7 +1142,7 @@ func statusLabel(s core.FileStatusLabel) string {
 // Folders where all files are clean show one summary line.
 // Folders with any changed files expand to list those files.
 // Returns true if any file needs attention.
-func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
+func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bool) {
 	type dirGroup struct {
 		dir     string
 		results []core.FileStatusResult
@@ -1055,7 +1186,24 @@ func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
 	}
 	dirW += 2
 
-	fmt.Printf("%s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint("STATUS"))
+	// Hash column is always 8 chars (fixed). Slug column only with showIDs.
+	const hashW = 10 // "HASH" + 2 padding
+	idW := 0
+	if showIDs {
+		idW = len("SLUG")
+		for _, r := range results {
+			if len(r.Slug) > idW {
+				idW = len(r.Slug)
+			}
+		}
+		idW += 2
+	}
+
+	if showIDs {
+		fmt.Printf("%s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", idW)), clrBold.Sprint("STATUS"))
+	} else {
+		fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint("STATUS"))
+	}
 	divider()
 
 	for _, dir := range dirOrder {
@@ -1104,10 +1252,26 @@ func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
 			rowLabel = files[0].SystemPath
 		}
 
+		rowHash := core.DeriveID(dir)
+		rowSlug := ""
+		if len(files) == 1 {
+			rowHash = files[0].ID
+			rowSlug = files[0].Slug
+		}
+		pathCol := pad(rowLabel, dirW)
+		hashCol := clrDim.Sprint(pad(rowHash, hashW))
 		if dirDirty {
-			fmt.Printf("%s  %s\n", clrDirty.Sprint(pad(rowLabel, dirW)), summary)
+			if showIDs {
+				fmt.Printf("%s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary)
+			} else {
+				fmt.Printf("%s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, summary)
+			}
 		} else {
-			fmt.Printf("%s  %s\n", clrBold.Sprint(pad(rowLabel, dirW)), summary)
+			if showIDs {
+				fmt.Printf("%s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary)
+			} else {
+				fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, summary)
+			}
 		}
 
 		// Expand changed files under the dir (skip if single-file row — it's already shown inline).
@@ -1190,9 +1354,19 @@ func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
 }
 
 // printStatusFlat renders every tracked file as its own row.
-func printStatusFlat(results []core.FileStatusResult) (hasDiff bool) {
+func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff bool) {
 	pathW := len("PATH")
 	stW := len("STATUS")
+	slugW := 0
+	if showIDs {
+		slugW = len("SLUG")
+		for _, r := range results {
+			if len(r.Slug) > slugW {
+				slugW = len(r.Slug)
+			}
+		}
+		slugW += 2
+	}
 	for _, r := range results {
 		if len(r.SystemPath) > pathW {
 			pathW = len(r.SystemPath)
@@ -1204,7 +1378,12 @@ func printStatusFlat(results []core.FileStatusResult) (hasDiff bool) {
 	pathW += 2
 	stW += 2
 
-	fmt.Printf("%s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint("STATUS"))
+	const hashW = 10 // "HASH" + 2 padding
+	if showIDs {
+		fmt.Printf("%s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", slugW)), clrBold.Sprint("STATUS"))
+	} else {
+		fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint("STATUS"))
+	}
 	divider()
 
 	totals := map[string]int{}
@@ -1215,7 +1394,11 @@ func printStatusFlat(results []core.FileStatusResult) (hasDiff bool) {
 			hasDiff = true
 		}
 		totals[string(r.Status)]++
-		fmt.Printf("%s  %s\n", pad(r.SystemPath, pathW), statusColored(r.Status, pad(label, stW)))
+		if showIDs {
+			fmt.Printf("%s  %s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), clrDim.Sprint(pad(r.Slug, slugW)), statusColored(r.Status, pad(label, stW)))
+		} else {
+			fmt.Printf("%s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), statusColored(r.Status, pad(label, stW)))
+		}
 
 		if r.MetaDrift && r.RecordedMeta != nil && r.CurrentMeta != nil {
 			rec, cur := r.RecordedMeta, r.CurrentMeta
@@ -1262,6 +1445,7 @@ func newStatusCmd() *cobra.Command {
 		watchMode bool
 		interval  time.Duration
 		flatFiles bool
+		showIDs   bool
 	)
 
 	cmd := &cobra.Command{
@@ -1283,9 +1467,9 @@ func newStatusCmd() *cobra.Command {
 			}
 			var dirty bool
 			if flatFiles {
-				dirty = printStatusFlat(results)
+				dirty = printStatusFlat(results, showIDs)
 			} else {
-				dirty = printStatusTable(results)
+				dirty = printStatusTable(results, showIDs)
 			}
 			if dirty {
 				os.Exit(1)
@@ -1300,6 +1484,7 @@ func newStatusCmd() *cobra.Command {
 	f.StringArrayVar(&ids, "id", nil, "check only this ID (repeatable)")
 	f.BoolVarP(&watchMode, "watch", "w", false, "continuously refresh status (Ctrl-C to stop)")
 	f.BoolVarP(&flatFiles, "files", "f", false, "show every tracked file individually instead of grouping by directory")
+	f.BoolVarP(&showIDs, "show-ids", "i", false, "show tracking ID column")
 	f.DurationVar(&interval, "interval", 3*time.Second, "refresh interval when --watch is set")
 	return cmd
 }
@@ -1345,7 +1530,7 @@ func runStatusWatch(baseDir, sysRoot string, ids []string, interval time.Duratio
 		} else if len(results) == 0 {
 			info("No tracked files.")
 		} else {
-			printStatusTable(results)
+			printStatusTable(results, false)
 		}
 
 		// Print a blank footer so old content below is visually separated.

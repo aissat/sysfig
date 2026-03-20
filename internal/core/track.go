@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -332,11 +333,22 @@ func Untrack(opts UntrackOptions) ([]string, error) {
 	return removed, err
 }
 
-// deriveID converts an absolute path into a stable, lowercase tracking ID.
+// DeriveID returns a stable 8-character hex ID for absPath derived from SHA-256.
+func DeriveID(absPath string) string {
+	return deriveID(absPath)
+}
+
+// deriveID returns a stable 8-character hex ID for absPath derived from SHA-256.
+func deriveID(absPath string) string {
+	sum := sha256.Sum256([]byte(absPath))
+	return fmt.Sprintf("%x", sum[:4])
+}
+
+// deriveSlug converts an absolute path into a human-readable tracking slug.
 //
 //	/etc/nginx/nginx.conf  → "etc_nginx_nginx_conf"
 //	/home/aye7/.zshrc      → "home_aye7_zshrc"
-func deriveID(absPath string) string {
+func deriveSlug(absPath string) string {
 	parts := strings.Split(strings.TrimPrefix(absPath, "/"), "/")
 	for i, p := range parts {
 		parts[i] = strings.TrimLeft(p, ".")
