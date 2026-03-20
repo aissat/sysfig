@@ -61,22 +61,26 @@ func initBareRepoDiff(t *testing.T, repoDir, relPath string, content []byte) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(destPath), 0o755))
 	require.NoError(t, os.WriteFile(destPath, content, 0o644))
 
+	trackBranch := "track/" + core.SanitizeBranchName(relPath)
+	runGitDiff(t, workClone, "checkout", "-b", trackBranch)
 	runGitDiff(t, workClone, "add", relPath)
 	runGitDiff(t, workClone, "commit", "-m", "test: add file")
-	runGitDiff(t, workClone, "push", "origin")
+	runGitDiff(t, workClone, "push", "origin", trackBranch)
 }
 
 // pushNewContentDiff updates the committed content in the bare repo at repoDir
-// by cloning it, rewriting relPath, committing, and pushing. This simulates a
-// `sysfig pull` that advances the repo ahead of the system file.
+// by cloning it, rewriting relPath, committing, and pushing to the track branch.
 func pushNewContentDiff(t *testing.T, repoDir, relPath string, content []byte) {
 	t.Helper()
 
+	trackBranch := "track/" + core.SanitizeBranchName(relPath)
 	workDir := t.TempDir()
 	runGitDiff(t, workDir, "clone", repoDir, "work")
 	workClone := filepath.Join(workDir, "work")
 	runGitDiff(t, workClone, "config", "user.email", "test@sysfig.local")
 	runGitDiff(t, workClone, "config", "user.name", "sysfig-test")
+	runGitDiff(t, workClone, "fetch", "origin")
+	runGitDiff(t, workClone, "checkout", "-b", trackBranch, "origin/"+trackBranch)
 
 	destPath := filepath.Join(workClone, relPath)
 	require.NoError(t, os.MkdirAll(filepath.Dir(destPath), 0o755))
@@ -84,16 +88,7 @@ func pushNewContentDiff(t *testing.T, repoDir, relPath string, content []byte) {
 
 	runGitDiff(t, workClone, "add", relPath)
 	runGitDiff(t, workClone, "commit", "-m", "test: update file")
-	runGitDiff(t, workClone, "push", "origin")
-
-	// Advance the bare repo HEAD to the new commit so git-show sees it.
-	fetchCmd := exec.Command("git", "fetch", "--all")
-	fetchCmd.Env = append(os.Environ(), "GIT_DIR="+repoDir)
-	fetchCmd.Run() //nolint:errcheck // best-effort
-
-	resetCmd := exec.Command("git", "reset", "--soft", "FETCH_HEAD")
-	resetCmd.Env = append(os.Environ(), "GIT_DIR="+repoDir)
-	resetCmd.Run() //nolint:errcheck // best-effort
+	runGitDiff(t, workClone, "push", "origin", trackBranch)
 }
 
 // buildDiffFixture creates a sysfig environment with a single tracked file.
@@ -130,7 +125,8 @@ func buildDiffFixture(t *testing.T, repoContent []byte) (baseDir, id, sysPath, r
 			id: {
 				ID:          id,
 				SystemPath:  sysPath,
-				RepoPath:    relPath, // git-relative, no leading slash
+				RepoPath:    relPath,
+				Branch:      "track/" + core.SanitizeBranchName(relPath),
 				CurrentHash: recordedHash,
 				LastSync:    &now,
 				Status:      types.StatusTracked,
@@ -420,20 +416,22 @@ func TestDiff_ResultsSortedByID(t *testing.T) {
 		ID:          firstID,
 		SystemPath:  sysPaths[0],
 		RepoPath:    firstRelPath,
+		Branch:      "track/" + core.SanitizeBranchName(firstRelPath),
 		CurrentHash: recordedHash,
 		LastSync:    &now,
 		Status:      types.StatusTracked,
 	}
 
-	// Push additional files into the same bare repo.
+	// Add additional files into the same bare repo (each on its own track branch).
 	for _, sysPath := range sysPaths[1:] {
 		relPath := sysPath[1:]
-		pushNewContentDiff(t, repoDir, relPath, content)
+		initBareRepoDiff(t, repoDir, relPath, content)
 		fileID := core.DeriveID(sysPath)
 		files[fileID] = &types.FileRecord{
 			ID:          fileID,
 			SystemPath:  sysPath,
 			RepoPath:    relPath,
+			Branch:      "track/" + core.SanitizeBranchName(relPath),
 			CurrentHash: recordedHash,
 			LastSync:    &now,
 			Status:      types.StatusTracked,

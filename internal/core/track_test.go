@@ -289,3 +289,148 @@ func TestTrack_IDDerivation(t *testing.T) {
 	assert.True(t, ok, "state.json must contain a record keyed by the derived ID")
 }
 
+
+// ---------------------------------------------------------------------------
+// Untrack
+// ---------------------------------------------------------------------------
+
+// buildUntrackFixture writes a state.json containing one tracked file.
+func buildUntrackFixture(t *testing.T, systemPath string) (string, string) {
+	t.Helper()
+	baseDir := t.TempDir()
+	id := core.DeriveID(systemPath)
+	s := map[string]interface{}{
+		"version": 1,
+		"files": map[string]interface{}{
+			id: map[string]interface{}{
+				"id":           id,
+				"system_path":  systemPath,
+				"repo_path":    "etc/myapp.conf",
+				"current_hash": "aabbccdd",
+				"status":       "tracked",
+			},
+		},
+		"backups": map[string]interface{}{},
+	}
+	data, err := json.MarshalIndent(s, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "state.json"), data, 0o600))
+	return baseDir, id
+}
+
+func TestUntrack_BySystemPath(t *testing.T) {
+	sysPath := "/etc/myapp.conf"
+	baseDir, id := buildUntrackFixture(t, sysPath)
+
+	removed, err := core.Untrack(core.UntrackOptions{BaseDir: baseDir, Arg: sysPath})
+	require.NoError(t, err)
+	require.Equal(t, []string{id}, removed)
+
+	s := readState(t, baseDir)
+	_, ok := s.Files[id]
+	assert.False(t, ok, "record must be removed from state.json")
+}
+
+func TestUntrack_ByID(t *testing.T) {
+	baseDir, id := buildUntrackFixture(t, "/etc/myapp.conf")
+
+	removed, err := core.Untrack(core.UntrackOptions{BaseDir: baseDir, Arg: id})
+	require.NoError(t, err)
+	assert.Equal(t, []string{id}, removed)
+}
+
+func TestUntrack_NotTracked(t *testing.T) {
+	baseDir, _ := buildUntrackFixture(t, "/etc/myapp.conf")
+
+	_, err := core.Untrack(core.UntrackOptions{BaseDir: baseDir, Arg: "/etc/nonexistent.conf"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not tracked")
+}
+
+func TestUntrack_NewPathInGroupDir(t *testing.T) {
+	baseDir := t.TempDir()
+	groupDir := "/etc/myapp"
+	id := core.DeriveID(groupDir + "/app.conf")
+	s := map[string]interface{}{
+		"version": 1,
+		"files": map[string]interface{}{
+			id: map[string]interface{}{
+				"id":          id,
+				"system_path": groupDir + "/app.conf",
+				"repo_path":   "etc/myapp/app.conf",
+				"current_hash": "aabbccdd",
+				"status":      "tracked",
+				"group":       groupDir,
+			},
+		},
+		"backups":  map[string]interface{}{},
+		"excludes": []string{},
+	}
+	data, _ := json.MarshalIndent(s, "", "  ")
+	_ = os.WriteFile(filepath.Join(baseDir, "state.json"), data, 0o600)
+
+	newPath := groupDir + "/new-file.conf"
+	removed, err := core.Untrack(core.UntrackOptions{BaseDir: baseDir, Arg: newPath})
+	require.NoError(t, err)
+	assert.Equal(t, []string{newPath}, removed)
+
+	st := readState(t, baseDir)
+	assert.Contains(t, st.Excludes, newPath, "new path must be in excludes")
+}
+
+func TestUntrack_AlreadyExcluded(t *testing.T) {
+	baseDir := t.TempDir()
+	groupDir := "/etc/myapp"
+	id := core.DeriveID(groupDir + "/app.conf")
+	newPath := groupDir + "/new-file.conf"
+	s := map[string]interface{}{
+		"version": 1,
+		"files": map[string]interface{}{
+			id: map[string]interface{}{
+				"id": id, "system_path": groupDir + "/app.conf",
+				"repo_path": "etc/myapp/app.conf", "current_hash": "aabbccdd", "status": "tracked",
+				"group": groupDir,
+			},
+		},
+		"backups":  map[string]interface{}{},
+		"excludes": []string{newPath},
+	}
+	data, _ := json.MarshalIndent(s, "", "  ")
+	_ = os.WriteFile(filepath.Join(baseDir, "state.json"), data, 0o600)
+
+	_, err := core.Untrack(core.UntrackOptions{BaseDir: baseDir, Arg: newPath})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already excluded")
+}
+
+func TestUntrack_GroupRemovesAll(t *testing.T) {
+	baseDir := t.TempDir()
+	groupDir := "/etc/myapp"
+	id1 := core.DeriveID(groupDir + "/a.conf")
+	id2 := core.DeriveID(groupDir + "/b.conf")
+	s := map[string]interface{}{
+		"version": 1,
+		"files": map[string]interface{}{
+			id1: map[string]interface{}{
+				"id": id1, "system_path": groupDir + "/a.conf",
+				"repo_path": "etc/myapp/a.conf", "current_hash": "aabb", "status": "tracked",
+				"group": groupDir,
+			},
+			id2: map[string]interface{}{
+				"id": id2, "system_path": groupDir + "/b.conf",
+				"repo_path": "etc/myapp/b.conf", "current_hash": "ccdd", "status": "tracked",
+				"group": groupDir,
+			},
+		},
+		"backups": map[string]interface{}{},
+	}
+	data, _ := json.MarshalIndent(s, "", "  ")
+	_ = os.WriteFile(filepath.Join(baseDir, "state.json"), data, 0o600)
+
+	removed, err := core.Untrack(core.UntrackOptions{BaseDir: baseDir, Arg: groupDir})
+	require.NoError(t, err)
+	assert.Len(t, removed, 2)
+
+	st := readState(t, baseDir)
+	assert.Empty(t, st.Files)
+}

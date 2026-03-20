@@ -59,9 +59,11 @@ func initBareRepoStatus(t *testing.T, repoDir, relPath string, content []byte) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(destPath), 0o755))
 	require.NoError(t, os.WriteFile(destPath, content, 0o644))
 
+	trackBranch := "track/" + core.SanitizeBranchName(relPath)
+	runGitStatus(t, workClone, "checkout", "-b", trackBranch)
 	runGitStatus(t, workClone, "add", relPath)
 	runGitStatus(t, workClone, "commit", "-m", "test: add file")
-	runGitStatus(t, workClone, "push", "origin")
+	runGitStatus(t, workClone, "push", "origin", trackBranch)
 }
 
 // buildStatusFixture sets up a sysfig environment with a single tracked file
@@ -96,6 +98,7 @@ func buildStatusFixture(t *testing.T, content []byte) (baseDir, id, sysPath stri
 				ID:          id,
 				SystemPath:  sysPath,
 				RepoPath:    relPath, // git-relative, no leading slash
+				Branch:      "track/" + core.SanitizeBranchName(relPath),
 				CurrentHash: recordedHash,
 				LastSync:    &now,
 				Status:      types.StatusTracked,
@@ -306,23 +309,15 @@ func TestStatus_Pending(t *testing.T) {
 	runGitStatus(t, workClone, "config", "user.email", "test@sysfig.local")
 	runGitStatus(t, workClone, "config", "user.name", "sysfig-test")
 
+	trackBranch := "track/" + core.SanitizeBranchName("etc/myapp.conf")
+	runGitStatus(t, workClone, "fetch", "origin")
+	runGitStatus(t, workClone, "checkout", "-b", trackBranch, "origin/"+trackBranch)
+
 	destPath := filepath.Join(workClone, "etc/myapp.conf")
 	require.NoError(t, os.WriteFile(destPath, updatedContent, 0o644))
 	runGitStatus(t, workClone, "add", "etc/myapp.conf")
 	runGitStatus(t, workClone, "commit", "-m", "test: update file")
-	runGitStatus(t, workClone, "push", "origin")
-
-	// Advance the bare repo HEAD to the new commit.
-	// `git fetch` in the bare repo updates remote tracking refs; we then
-	// reset HEAD to the fetched commit so git-show sees the new content.
-	fetchCmd := exec.Command("git", "fetch", "--all")
-	fetchCmd.Env = append(os.Environ(), "GIT_DIR="+repoDir)
-	fetchCmd.Run() // best-effort
-
-	// Fast-forward the local branch to match origin.
-	resetCmd := exec.Command("git", "reset", "--soft", "FETCH_HEAD")
-	resetCmd.Env = append(os.Environ(), "GIT_DIR="+repoDir)
-	resetCmd.Run() // best-effort
+	runGitStatus(t, workClone, "push", "origin", trackBranch)
 
 	// state.json still records the original hash — the repo moved ahead.
 	// Status should detect that repoHash != recordedHash → PENDING.

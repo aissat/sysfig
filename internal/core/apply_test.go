@@ -64,10 +64,12 @@ func initBareRepoApply(t *testing.T, repoDir, relPath string, content []byte) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(destPath), 0o755))
 	require.NoError(t, os.WriteFile(destPath, content, 0o644))
 
-	// Stage, commit, and push back to the bare repo.
+	// Create the track branch and commit the file to it.
+	trackBranch := "track/" + core.SanitizeBranchName(relPath)
+	runGitApply(t, workClone, "checkout", "-b", trackBranch)
 	runGitApply(t, workClone, "add", relPath)
 	runGitApply(t, workClone, "commit", "-m", "test: add file")
-	runGitApply(t, workClone, "push", "origin")
+	runGitApply(t, workClone, "push", "origin", trackBranch)
 }
 
 // buildApplyFixture creates a minimal sysfig environment with a single
@@ -103,6 +105,7 @@ func buildApplyFixture(t *testing.T) (baseDir, relPath, id string, content []byt
 				ID:          id,
 				SystemPath:  "/etc/myapp.conf",
 				RepoPath:    relPath,
+				Branch:      "track/" + core.SanitizeBranchName(relPath),
 				CurrentHash: "deadbeef",
 				LastSync:    &now,
 				Status:      types.StatusTracked,

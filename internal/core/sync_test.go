@@ -595,3 +595,81 @@ func writeMinimalState(t *testing.T, baseDir, id, systemPath, relPath, recordedH
 func jsonMarshalIndent(v interface{}) ([]byte, error) {
 	return json.MarshalIndent(v, "", "  ")
 }
+
+// TestSync_FileIDsFilter verifies that when FileIDs is set, only matching
+// files are staged and committed.
+func TestSync_FileIDsFilter(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	sysRoot := t.TempDir()
+
+	// Two system files — only the first will be in FileIDs.
+	f1 := filepath.Join(sysRoot, "a.conf")
+	f2 := filepath.Join(sysRoot, "b.conf")
+	_ = os.WriteFile(f1, []byte("a-content\n"), 0o644)
+	_ = os.WriteFile(f2, []byte("b-content\n"), 0o644)
+
+	id1 := core.DeriveID("/a.conf")
+	id2 := core.DeriveID("/b.conf")
+
+	// Write state with both files.
+	type fileRec struct {
+		ID          string `json:"id"`
+		SystemPath  string `json:"system_path"`
+		RepoPath    string `json:"repo_path"`
+		CurrentHash string `json:"current_hash"`
+		Status      string `json:"status"`
+	}
+	type stateDoc struct {
+		Version int                     `json:"version"`
+		Files   map[string]*fileRec     `json:"files"`
+		Backups map[string][]interface{} `json:"backups"`
+	}
+	s := &stateDoc{
+		Version: 1,
+		Files: map[string]*fileRec{
+			id1: {ID: id1, SystemPath: "/a.conf", RepoPath: "a.conf", Status: "tracked"},
+			id2: {ID: id2, SystemPath: "/b.conf", RepoPath: "b.conf", Status: "tracked"},
+		},
+		Backups: map[string][]interface{}{},
+	}
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "state.json"), data, 0o600); err != nil {
+		t.Fatalf("write state.json: %v", err)
+	}
+
+	// Sync only id1.
+	result, err := core.Sync(core.SyncOptions{
+		BaseDir: baseDir,
+		SysRoot: sysRoot,
+		Message: "test: only a.conf",
+		FileIDs: []string{id1},
+	})
+	if err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+	if !result.Committed {
+		t.Error("expected Committed=true for filtered sync")
+	}
+
+	// a.conf must be in the repo; b.conf must NOT be committed yet.
+	showA := exec.Command("git", "--git-dir="+repoDir, "show", "track/a.conf:a.conf")
+	showA.Env = os.Environ()
+	outA, err := showA.CombinedOutput()
+	if err != nil {
+		t.Errorf("a.conf must be committed after filtered sync: %v\n%s", err, outA)
+	} else if string(outA) != "a-content\n" {
+		t.Errorf("unexpected content in a.conf: %q", string(outA))
+	}
+
+	showB := exec.Command("git", "--git-dir="+repoDir, "show", "track/b.conf:b.conf")
+	showB.Env = os.Environ()
+	if _, errB := showB.CombinedOutput(); errB == nil {
+		t.Error("b.conf must not be committed when filtered out")
+	}
+}

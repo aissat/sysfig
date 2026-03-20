@@ -132,7 +132,11 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 				// rec.RepoPath is the git-relative path (e.g. "etc/nginx/nginx.conf").
 				// Fall back to rec.CurrentHash if the file is not yet committed.
 				repoHash := rec.CurrentHash
-				if repoContent, err := gitShowBytes(repoDir, rec.RepoPath); err == nil {
+				trackBranch := rec.Branch
+				if trackBranch == "" {
+					trackBranch = "track/" + SanitizeBranchName(rec.RepoPath)
+				}
+				if repoContent, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath); err == nil {
 					repoHash = hash.Bytes(repoContent)
 				}
 
