@@ -241,19 +241,24 @@ func Doctor(opts DoctorOptions) *DoctorResult {
 			}
 		}
 
-		// sysfig.yaml committed in HEAD?
-		if _, err := gitShowBytes(repoDir, "sysfig.yaml"); err != nil {
+		// sysfig.yaml committed in manifest branch?
+		_, manifestErr := gitShowBytesAt(repoDir, "manifest", "sysfig.yaml")
+		if manifestErr != nil {
+			// fallback: check HEAD for pre-branch-per-track repos
+			_, manifestErr = gitShowBytes(repoDir, "sysfig.yaml")
+		}
+		if manifestErr != nil {
 			add(DoctorFinding{
 				Category: "git repo",
-				Label:    "sysfig.yaml in HEAD",
+				Label:    "sysfig.yaml manifest",
 				Severity: SeverityWarn,
 				Detail:   "manifest not committed yet",
-				Hint:     "Run: sysfig sync",
+				Hint:     "Run: sysfig sync --auto",
 			})
 		} else {
 			add(DoctorFinding{
 				Category: "git repo",
-				Label:    "sysfig.yaml in HEAD",
+				Label:    "sysfig.yaml manifest",
 				Severity: SeverityOK,
 			})
 		}
@@ -279,8 +284,12 @@ func Doctor(opts DoctorOptions) *DoctorResult {
 		})
 
 		if repoOK && len(st.Files) > 0 {
-			// Cross-check state IDs vs manifest.
-			if manifestData, err := gitShowBytes(repoDir, "sysfig.yaml"); err == nil {
+			// Cross-check state IDs vs manifest (manifest branch first, HEAD fallback).
+			manifestData, err := gitShowBytesAt(repoDir, "manifest", "sysfig.yaml")
+			if err != nil {
+				manifestData, err = gitShowBytes(repoDir, "sysfig.yaml")
+			}
+			if err == nil {
 				doctorCheckManifestSync(add, st, manifestData)
 			}
 			// Check each file's health (blob exists, system file exists).
@@ -456,7 +465,11 @@ func doctorCheckFileHealth(add func(DoctorFinding), st *types.State, repoDir str
 			missingSystem++
 		}
 		if rec.RepoPath != "" {
-			if _, err := gitShowBytes(repoDir, rec.RepoPath); err != nil {
+			branch := rec.Branch
+			if branch == "" {
+				branch = "track/" + SanitizeBranchName(rec.RepoPath)
+			}
+			if _, err := gitShowBytesAt(repoDir, branch, rec.RepoPath); err != nil {
 				missingBlob++
 			}
 		}
@@ -484,7 +497,7 @@ func doctorCheckFileHealth(add func(DoctorFinding), st *types.State, repoDir str
 	if missingBlob > 0 {
 		add(DoctorFinding{
 			Category: "file health",
-			Label:    "repo blobs in HEAD",
+			Label:    "repo blobs in track branches",
 			Severity: SeverityWarn,
 			Detail:   fmt.Sprintf("%d of %d tracked file(s) have no blob in repo HEAD", missingBlob, total),
 			Hint:     "Run: sysfig sync  to commit staged changes",
@@ -492,7 +505,7 @@ func doctorCheckFileHealth(add func(DoctorFinding), st *types.State, repoDir str
 	} else {
 		add(DoctorFinding{
 			Category: "file health",
-			Label:    "repo blobs in HEAD",
+			Label:    "repo blobs in track branches",
 			Severity: SeverityOK,
 			Detail:   fmt.Sprintf("all %d file(s) have blobs in HEAD", total),
 		})

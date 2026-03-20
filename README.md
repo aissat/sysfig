@@ -443,7 +443,7 @@ sysfig setup [<remote-url>] [options]
 This is the primary onboarding command. It:
 1. Detects if this machine is already set up (no-op if so — shows hints instead)
 2. Clones your remote config repo as a bare git repository to `~/.sysfig/repo.git/`
-3. Seeds `state.json` from the `sysfig.yaml` manifest
+3. Seeds `state.json` from the `sysfig.yaml` manifest (read from the `manifest` branch; falls back to `HEAD` for repos created before the branch-per-track migration)
 4. Writes `hooks.yaml` from `hooks.yaml.example` if present in the repo
 
 **Options:**
@@ -664,7 +664,7 @@ sysfig apply [options]
 ```
 
 For each tracked file:
-1. Reads the content from `HEAD` in the bare repo
+1. Reads the content from the file's dedicated `track/<path>` branch in the bare repo (falls back to `SanitizeBranchName` resolution for records that predate the branch-per-track migration)
 2. Decrypts if the file is encrypted (requires master key)
 3. Creates a timestamped backup of the current system file in `~/.sysfig/backups/`
 4. Writes the repo version to disk with the recorded permissions and ownership
