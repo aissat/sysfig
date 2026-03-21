@@ -218,6 +218,7 @@ sysfig creates a bare repo locally, pulls all branches from the bundle, seeds `s
 - **[Run hooks after apply](hooks.md):** Automatically reload systemd services or validate files (e.g. `nginx -t`) after a deploy.
 - **[Share secrets with remote machines](secrets.md):** Securely share encrypted configs with multiple nodes without sharing your master key.
 - **[Bundle remotes RFC](rfcs/bundle-remotes.md):** Deep dive into the bundle transport design — atomic writes, verification, publication model, and future phases.
+- **[Config Sources](config-sources.md):** Render shared config templates (proxy, DNS, NTP) across many machines from a single bundle — from creating a profile to deploying on a new machine.
 
 ---
 
