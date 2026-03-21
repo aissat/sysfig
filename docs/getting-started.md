@@ -199,6 +199,18 @@ sysfig setup git@github.com:you/conf.git   # clone repo
 sysfig apply                                # write configs to disk
 ```
 
+**Air-gapped / no git server?** `deploy` accepts bundle remotes too — works exactly the same way:
+
+```sh
+# First-time bootstrap from an NFS share (no internet, no GitHub)
+sysfig deploy bundle+local:///mnt/corp-nfs/sysfig/ops.bundle
+
+# First-time bootstrap from a remote SSH file server
+sysfig deploy bundle+ssh://backup@fileserver/srv/sysfig/ops.bundle
+```
+
+sysfig creates a bare repo locally, pulls all branches from the bundle, seeds `state.json` from the manifest, and applies all tracked files — identical result to a git remote deploy.
+
 ---
 
 ## What's next?

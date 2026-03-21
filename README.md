@@ -190,6 +190,7 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
 - **No symlinks.** Files are physical copies. `ls -la` on your system never reveals your repo structure.
 - **Bare git repo.** The shadow repo lives at `~/.sysfig/repo.git/` — no working tree, no accidental edits.
 - **Offline-first.** `track`, `apply`, `status`, `sync`, `diff` work 100% without network. Only `sync --push` and `sync --pull` touch the wire.
+- **No git server required.** `bundle+local://` and `bundle+ssh://` remotes let you push/pull over NFS, SMB, USB, or any SSH file server — no GitHub, GitLab, or bare repo daemon needed.
 - **Per-file encryption.** Secrets are encrypted with [age](https://age-encryption.org/) + HKDF-SHA256 per-file keys derived from a single master key.
 - **Metadata tracking.** Records `uid`, `gid`, and `mode` for every file. `status` warns when permissions drift.
 - **Atomic backups.** Every `apply` creates a timestamped backup before overwriting anything on disk.
@@ -283,11 +284,14 @@ sysfig deploy [<remote-url>] [options]
 
 The recommended entry point for both first-time machines and routine updates. Idempotent: safe to re-run as many times as needed.
 
+The `<remote-url>` can be any URL supported by `sysfig remote set`: a git remote (`git@github.com:…`) **or a bundle remote** (`bundle+local://…`, `bundle+ssh://…`). sysfig detects the transport from the URL scheme automatically.
+
 **Behaviour:**
 
 | Situation | What happens |
 | --------- | ------------ |
-| First-time machine (no local repo) | Clone remote → seed `state.json` → apply all files |
+| First-time, git remote | `git clone --bare` → seed `state.json` → apply all files |
+| First-time, bundle remote | `git init --bare` + bundle pull → seed `state.json` → apply all files |
 | Already set up, network available | Pull latest → apply all files |
 | Already set up, `--no-pull` | Skip pull → apply from local repo (fully offline) |
 | Pull fails (network error) | Fall back to local repo → apply (non-fatal) |
@@ -317,7 +321,7 @@ The recommended entry point for both first-time machines and routine updates. Id
 **Local deploy examples:**
 
 ```bash
-# First-time machine
+# First-time machine (git remote)
 sysfig deploy git@github.com:you/myconfigs.git
 
 # Already set up — pull + apply
@@ -334,6 +338,22 @@ sysfig deploy git@github.com:you/myconfigs.git --yes --skip-encrypted
 
 # Apply only specific files
 sysfig deploy --id nginx_main --id sshd_config
+```
+
+**Bundle remote deploy examples (air-gapped / no git server):**
+
+```bash
+# Pull from an NFS share and apply in one step
+sysfig deploy bundle+local:///mnt/corp-nfs/sysfig/ops-machine.bundle
+
+# Pull from a remote SSH file server and apply
+sysfig deploy bundle+ssh://backup@fileserver/srv/sysfig/ops-machine.bundle
+
+# Already configured — just pull + apply (remote URL already set)
+sysfig deploy
+
+# Preview without writing to disk
+sysfig deploy bundle+local:///mnt/share/ops.bundle --dry-run
 ```
 
 **Remote deploy examples:**
@@ -361,6 +381,9 @@ sysfig deploy --host user@server --ssh-port 2222
 #!/bin/bash
 # Ensure the machine matches the config repo — run on boot or in cron
 sysfig deploy git@github.com:ops/server-configs.git --yes --skip-encrypted
+
+# Air-gapped: first-time bootstrap from an NFS share
+sysfig deploy bundle+local:///mnt/corp-nfs/sysfig/ops.bundle --yes
 
 # Or push from a central ops machine to all servers (no sysfig needed on targets)
 for host in web1 web2 web3; do
