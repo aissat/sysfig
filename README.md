@@ -38,7 +38,8 @@ While sysfig has many advanced features, you only need three commands to get sta
 **One command to deploy everything (new or existing machine):**
 
 ```
-$ sysfig deploy git@github.com:you/configs.git
+$ sysfig deploy git@github.com:you/configs.git   # git remote
+$ sysfig deploy bundle+local:///mnt/share/configs.bundle  # NFS / air-gapped — same command
 
   sysfig deploy — syncing your environment
   ─────────────────────────────────────────────
@@ -177,13 +178,13 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
 
 ## Why sysfig?
 
-| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | Local snapshots | Single binary |
-| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | --------------- | ------------- |
-| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗               | ✓             |
-| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗               | ✓             |
-| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗               | ✓             |
-| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗               | ✗             |
-| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓ snap**      | **✓**         |
+| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | No-git-server sync | Local snapshots | Single binary |
+| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | ------------------ | --------------- | ------------- |
+| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✓             |
+| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✓             |
+| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✓             |
+| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗                  | ✗               | ✗             |
+| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓ NFS/SSH/USB**  | **✓ snap**      | **✓**         |
 
 **Key design decisions:**
 
