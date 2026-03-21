@@ -1,8 +1,35 @@
 # sysfig
 
-> **Config management that thinks like a sysadmin, not a git wrapper.**
+> **The Linux config manager that unifies dotfiles and `/etc` system configs.**
 
-`sysfig` is a security-first configuration management tool for Linux. It version-controls your config files — both dotfiles and `/etc/` system configs — in a bare git repository, deploys them across machines with a single command, encrypts secrets with [age](https://age-encryption.org/), tracks file ownership and permissions, and stays fully offline-capable.
+`sysfig` is an offline-first configuration manager that lets you version-control both your personal dotfiles and root-owned system configs in a single bare git repository. 
+
+It features built-in [age](https://age-encryption.org/) encryption, safe atomic deployments without symlinks, and a mental model that gets out of your way.
+
+If you need more power than a simple git wrapper, but want to avoid the massive cognitive load of Ansible or Chef, `sysfig` is for you.
+
+---
+
+## 3 Ways to Use sysfig
+
+**1. The "Dotfiles Only" User**
+Track `~/.bashrc` and `~/.config` across your personal laptops. sysfig manages everything locally without creating a mess of symlinks.
+
+**2. The Solo Sysadmin**
+Manage `/etc/nginx`, `/etc/ssh`, and systemd unit files across a handful of VPS servers. sysfig preserves file ownership (root), tracks permissions, and automatically backs up existing files before replacing them.
+
+**3. The Small Team**
+Securely share encrypted environment variables and deploy configs directly to remote servers via SSH (`sysfig deploy --host`). No agents to install on remote machines, no playbooks to write.
+
+---
+
+## The Mental Model
+
+While sysfig has many advanced features, you only need three commands to get started:
+
+1. `sysfig track <file>` — Track a file (adds it to your local configuration vault).
+2. `sysfig sync` — Commit all your tracked changes and (optionally) push them.
+3. `sysfig deploy <url>` — Replicate your exact setup on a brand new machine in 10 seconds.
 
 ---
 
@@ -106,14 +133,15 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
 
 ## Table of Contents
 
+- [3 Ways to Use sysfig](#3-ways-to-use-sysfig)
+- [The Mental Model](#the-mental-model)
+- [What it looks like](#what-it-looks-like)
+- [Getting Started](docs/getting-started.md)
 - [Why sysfig?](#why-sysfig)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Architecture](#architecture)
-- [Quick Start](#quick-start)
-  - [First machine — track and push](#first-machine--track-and-push)
-  - [New machine — setup and apply](#new-machine--setup-and-apply)
-  - [Daily workflow](#daily-workflow)
+- [Quick Start](docs/getting-started.md)
 - [Command Reference](#command-reference)
   - [deploy](#deploy)
   - [setup](#setup)
@@ -201,18 +229,18 @@ sysfig
 
 ## Architecture
 
-```
-  Your system files          sysfig               Remote git repo
-  ─────────────────          ──────               ───────────────
+```text
+       Your Files                  sysfig                    Git Repo
+  ────────────────────         ──────────────            ──────────────────
 
-  /etc/nginx/nginx.conf ──track──▶ ~/.sysfig/ ──push──▶ github.com/you/configs
-  /etc/ssh/sshd_config            repo.git/  ◀──pull──
-  ~/.bashrc             ◀──apply──
-                                  state.json   (local cache only)
-                                  sysfig.yaml  (committed to git, shared)
-                                  keys/        (local only, never pushed)
-                                  backups/     (local only)
-                                  hooks.yaml   (local only, never pushed)
+  /etc/nginx/nginx.conf ─track─▶ ~/.sysfig/ ─sync(push)─▶ github.com/you/conf
+  /etc/ssh/sshd_config            repo.git/   ◀─sync(pull)─
+  ~/.bashrc             ◀─apply─
+                                 state.json   (local cache)
+                                 sysfig.yaml  (committed & shared)
+                                 keys/        (local secret, never pushed)
+                                 backups/     (local only)
+                                 hooks.yaml   (local only)
 ```
 
 **Two files you need to understand:**
@@ -240,85 +268,6 @@ Each commit uses an isolated git index (`GIT_INDEX_FILE`) so the branch tree con
 - `sysfig log /path` reads a single clean branch — no filtering needed
 - `sysfig undo` resets one branch without touching others
 - `git push origin 'refs/heads/track/*:refs/heads/track/*'` syncs everything in one refspec
-
----
-
-## Quick Start
-
-### First machine — track and push
-
-```bash
-# Track dotfiles (no sudo) — ~/.sysfig is created automatically on first track
-# Each file is auto-committed to its own track branch immediately
-sysfig track ~/.bashrc
-sysfig track ~/.vimrc
-
-# Track system configs (sudo reads the file, repo stays in your ~/.sysfig)
-sudo sysfig track /etc/nginx/nginx.conf
-sudo sysfig track /etc/ssh/sshd_config
-
-# Track secrets (encrypted with age)
-sysfig keys generate
-sysfig track --encrypt ~/.config/tokens.env
-sudo sysfig track --encrypt /etc/app/secret.env
-
-# Set remote and push (--force for first push to a non-empty remote)
-sysfig remote set git@github.com:you/myconfigs.git
-sysfig sync --all --push --force
-```
-
-### New machine — deploy (one command)
-
-```bash
-# Everything in one shot: clone + seed state + apply
-sysfig deploy git@github.com:you/myconfigs.git
-
-# If you have encrypted files, copy your master key first:
-# scp oldhost:~/.sysfig/keys/master.age-identity ~/.sysfig/keys/
-# chmod 0600 ~/.sysfig/keys/master.age-identity
-# Then re-run — sysfig deploy is idempotent.
-```
-
-Or step-by-step if you prefer explicit control:
-
-```bash
-sysfig setup git@github.com:you/myconfigs.git
-sysfig apply
-sysfig status
-```
-
-### Daily workflow
-
-You edited `/etc/nginx/nginx.conf` on your server. Here is what to do:
-
-```bash
-# See what changed
-sysfig status
-# → sshd_config    DIRTY/MODIFIED    /etc/nginx/nginx.conf
-
-# Review the exact diff
-sysfig diff --id nginx_main
-
-# Commit the change locally (no network needed)
-sysfig sync -m "tuned worker_processes"
-
-# Push when you're back online
-sysfig push
-```
-
-Someone pushed a change to your config repo from another machine:
-
-```bash
-# Fetch remote changes
-sysfig pull
-
-# See what came in
-sysfig status
-# → nginx_main    PENDING/APPLY    /etc/nginx/nginx.conf
-
-# Deploy it
-sysfig apply --id nginx_main
-```
 
 ---
 
@@ -888,7 +837,7 @@ sysfig sync a3f2b1c --auto                # sync by ID prefix
 | `-m`, `--message` | _(required)_ | Custom commit message (mutually exclusive with `--auto`)      |
 | `--auto`          | `false`     | Auto-generate message: `sysfig: update <path>`                 |
 | `--all`           | `false`     | Bypass CWD scoping — sync all tracked files                    |
-| `--push`          | `false`     | Also push to remote after committing                           |
+| `--push`          | `false`     | Also push all track/* and manifest branches to remote after committing (runs even when nothing to commit) |
 | `--pull`          | `false`     | Fetch remote changes before committing (non-fatal)             |
 | `--base-dir`      | `~/.sysfig` | Directory where sysfig stores data                             |
 
@@ -937,9 +886,38 @@ sysfig remote set git@github.com:you/conf.git
 # Show current remote
 sysfig remote show
 
-# First push to a non-empty remote (e.g. GitHub repo with a README)
+# First push to a non-empty remote (e.g. GitHub repo with a README) — use --force to overwrite
 sysfig sync --push --force
+
+# Push even when nothing changed locally (sync local branches to remote)
+sysfig sync --push --auto
 ```
+
+#### Bundle remotes (air-gapped / no git server)
+
+When no git server is available, sysfig can use a single bundle file as the transport. The URL scheme selects the transport automatically — `sysfig sync --push` and `sync --pull` work exactly the same way.
+
+| URL scheme | Transport |
+|------------|-----------|
+| `bundle+local:///path/to/file.bundle` | Local filesystem, NFS mount, USB key, SMB share |
+| `bundle+ssh://user@host/path/file.bundle` | SSH file server via `scp` |
+
+```bash
+# NFS / local disk
+sysfig remote set bundle+local:///mnt/corp-nfs/sysfig/workstation.bundle
+sysfig sync --push --auto     # exports entire repo as a bundle file
+
+# SSH file server
+sysfig remote set bundle+ssh://backup@fileserver/srv/sysfig/web1.bundle
+sysfig sync --push --auto
+
+# Another machine pulls the bundle
+sysfig remote set bundle+local:///mnt/corp-nfs/sysfig/workstation.bundle
+sysfig sync --pull --auto     # imports all track/* branches from the bundle
+sysfig apply                  # deploy pulled configs to disk
+```
+
+**How it works:** `sync --push` runs `git bundle create --all`, writes the file atomically (`.tmp` → rename), and copies it to the destination. `sync --pull` downloads the bundle, runs `git bundle verify` to reject corrupt files, then imports each branch. The branch-per-track layout and all other sysfig commands are completely unchanged.
 
 ---
 
