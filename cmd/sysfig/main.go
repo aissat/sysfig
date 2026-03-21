@@ -2325,6 +2325,12 @@ Use --pull to fetch remote changes first (full round-trip with --push):
 
 			if !result.Committed {
 				info("Nothing to commit — shadow repo is clean.")
+				if push {
+					if err := core.Push(core.PushOptions{BaseDir: baseDir, Force: force}); err != nil {
+						return err
+					}
+					ok("Pushed to remote.")
+				}
 				return nil
 			}
 			for _, f := range result.CommittedFiles {

@@ -534,19 +534,8 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 
 	// Push only when explicitly requested — never automatic.
 	if opts.Push {
-		// Push all track/* branches and the manifest branch in one operation.
-		// refs/heads/track/*:refs/heads/track/* pushes every track branch.
-		refspecs := []string{
-			"refs/heads/track/*:refs/heads/track/*",
-			"refs/heads/manifest:refs/heads/manifest",
-		}
-		pushArgs := []string{"push", "origin"}
-		if opts.Force {
-			pushArgs = append(pushArgs, "--force")
-		}
-		pushArgs = append(pushArgs, refspecs...)
-		if pushErr := syncGitBareRun(repoDir, 60*time.Second, nil, pushArgs...); pushErr != nil {
-			return nil, fmt.Errorf("core: sync: push: %w", pushErr)
+		if err := Push(PushOptions{BaseDir: opts.BaseDir, Force: opts.Force}); err != nil {
+			return nil, fmt.Errorf("core: sync: push: %w", err)
 		}
 		result.Pushed = true
 	}
@@ -557,26 +546,59 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 // PushOptions configures a `sysfig push` operation.
 type PushOptions struct {
 	BaseDir string
+	Force   bool
+	SSHKey  string // optional SSH identity file for bundle+ssh transport
 }
 
 // Push pushes the local bare repo commits to the configured remote.
-// This is the only place sysfig initiates outbound network traffic for git.
-// It will fail gracefully when offline — the local commits are preserved.
+// If the remote URL uses a bundle+* scheme, the bundle transport is used
+// instead of a standard git push.
 func Push(opts PushOptions) error {
 	if opts.BaseDir == "" {
 		return fmt.Errorf("core: push: BaseDir must not be empty")
 	}
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
-	// GIT_DIR is enough for push — no worktree needed.
-	if err := syncGitBareRun(repoDir, 60*time.Second, nil, "push"); err != nil {
+
+	remoteURL, _ := readRemoteURL(repoDir)
+	if ParseRemoteKind(remoteURL) != RemoteGit {
+		return BundlePush(BundlePushOptions{
+			RepoDir:   repoDir,
+			RemoteURL: remoteURL,
+			SSHKey:    opts.SSHKey,
+		})
+	}
+
+	// Standard git push — push all local branches to the remote using a
+	// wildcard refspec so only branches that actually exist are pushed.
+	// Listing explicit refs (e.g. "refs/heads/manifest") would fail when the
+	// branch has not been created yet (empty or new repos).
+	args := []string{"push", "origin"}
+	if opts.Force {
+		args = append(args, "--force")
+	}
+	args = append(args, "refs/heads/*:refs/heads/*")
+	if err := syncGitBareRun(repoDir, 60*time.Second, nil, args...); err != nil {
 		return fmt.Errorf("core: push: %w", err)
 	}
 	return nil
 }
 
+// readRemoteURL reads the origin remote URL from the git config of a bare repo.
+// Returns ("", nil) when no remote is configured — callers should treat an
+// empty URL as "standard git remote not configured" (not an error).
+func readRemoteURL(repoDir string) (string, error) {
+	out, err := gitBareOutput(repoDir, 5*time.Second, nil,
+		"config", "--get", "remote.origin.url")
+	if err != nil {
+		return "", nil // no remote configured — not an error
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // PullOptions configures a `sysfig pull` operation.
 type PullOptions struct {
 	BaseDir string
+	SSHKey  string // optional SSH identity file for bundle+ssh transport
 }
 
 // PullResult reports what happened during a pull.
@@ -601,6 +623,22 @@ func Pull(opts PullOptions) (*PullResult, error) {
 
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
 	result := &PullResult{RepoDir: repoDir}
+
+	remoteURL, _ := readRemoteURL(repoDir)
+	if ParseRemoteKind(remoteURL) != RemoteGit {
+		br, err := BundlePull(BundlePullOptions{
+			RepoDir:   repoDir,
+			RemoteURL: remoteURL,
+			SSHKey:    opts.SSHKey,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("core: pull: %w", err)
+		}
+		result.AlreadyUpToDate = br.AlreadyUpToDate
+		return result, nil
+	}
+
+	// Standard git fetch path.
 
 	// Record the HEAD SHA before fetching so we can detect whether anything
 	// actually changed (more reliable than parsing git's output).
