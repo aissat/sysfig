@@ -185,8 +185,15 @@ func Clone(opts CloneOptions) (*CloneResult, error) {
 		if opts.RemoteURL == "" {
 			return nil, fmt.Errorf("core: clone: no remote URL provided and no local repo found at %q", repoDir)
 		}
-		if err := gitClone(opts.RemoteURL, repoDir); err != nil {
-			return nil, fmt.Errorf("core: clone: %w", err)
+		if ParseRemoteKind(opts.RemoteURL) != RemoteGit {
+			// Bundle remote: init a bare repo, record the remote URL, then pull.
+			if err := bundleBootstrap(opts.RemoteURL, repoDir); err != nil {
+				return nil, fmt.Errorf("core: clone: bundle bootstrap: %w", err)
+			}
+		} else {
+			if err := gitClone(opts.RemoteURL, repoDir); err != nil {
+				return nil, fmt.Errorf("core: clone: %w", err)
+			}
 		}
 	}
 	// else: bare repo already exists locally → nothing to do here.

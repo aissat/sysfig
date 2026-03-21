@@ -267,6 +267,43 @@ func BundlePull(opts BundlePullOptions) (*BundlePullResult, error) {
 	}, nil
 }
 
+// bundleBootstrap initialises a bare repo from a bundle remote on a first-time
+// machine (no existing repo.git). It:
+//  1. git init --bare repoDir
+//  2. Records the remote URL in git config (remote.origin.url)
+//  3. Pulls all refs from the bundle into the newly created repo
+func bundleBootstrap(remoteURL, repoDir string) error {
+	// 1. Create an empty bare repo.
+	if err := bundleGitInitBare(repoDir); err != nil {
+		return err
+	}
+	// 2. Persist the remote URL so Pull/Push work afterwards.
+	if err := bundleGitRun(repoDir, 5*time.Second,
+		"config", "remote.origin.url", remoteURL); err != nil {
+		return fmt.Errorf("set remote url: %w", err)
+	}
+	// 3. Import all refs from the bundle.
+	if _, err := BundlePull(BundlePullOptions{
+		RepoDir:   repoDir,
+		RemoteURL: remoteURL,
+	}); err != nil {
+		return fmt.Errorf("initial pull: %w", err)
+	}
+	return nil
+}
+
+// bundleGitInitBare runs `git init --bare <repoDir>`.
+func bundleGitInitBare(repoDir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "init", "--bare", repoDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 // bundleGitRun runs a git subcommand inside repoDir (GIT_DIR set).
