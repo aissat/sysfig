@@ -75,6 +75,10 @@ type TrackOptions struct {
 	// Group, when non-empty, marks this file as part of a directory track.
 	// Sync uses this to commit all files in the same group together.
 	Group string
+	// Force, when true, allows tracking a file that is currently owned by a
+	// Config Source profile. Without Force, Track returns an error if the path
+	// is source-managed, to protect the ownership model.
+	Force bool
 }
 
 // TrackResult is returned by Track on success.
@@ -266,8 +270,15 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 	sm := state.NewManager(statePath)
 
 	if err := sm.WithLock(func(s *types.State) error {
-		if _, exists := s.Files[id]; exists {
-			return fmt.Errorf("core: id %q is already tracked", id)
+		if existing, exists := s.Files[id]; exists {
+			// If the file is source-managed, refuse unless --force is given.
+			if existing.SourceProfile != "" && !opts.Force {
+				return fmt.Errorf("core: %q is managed by source profile %q — use --force to take manual ownership", logicalPath, existing.SourceProfile)
+			}
+			if existing.SourceProfile == "" {
+				return fmt.Errorf("core: id %q is already tracked", id)
+			}
+			// --force on a source-managed file: clear ownership, fall through.
 		}
 
 		now := time.Now()

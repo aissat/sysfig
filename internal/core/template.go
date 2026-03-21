@@ -114,5 +114,11 @@ func resolveVar(key string, vars TemplateVars) (string, error) {
 		return os.Getenv(envKey), nil
 	}
 
+	// Check Extra map for arbitrary custom variables (e.g. source profile
+	// variables like {{proxy_url}} or {{bypass_list}}).
+	if v, ok := vars.Extra[key]; ok {
+		return v, nil
+	}
+
 	return "", fmt.Errorf("core: template: unknown variable %q", key)
 }

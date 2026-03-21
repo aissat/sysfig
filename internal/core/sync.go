@@ -184,15 +184,16 @@ type SyncOptions struct {
 
 // SyncResult reports what happened during a sync.
 type SyncResult struct {
-	RepoDir         string
-	Pulled          bool     // true if pull ran and succeeded
-	PullErr         error    // non-nil if pull was attempted but failed (non-fatal)
-	Committed       bool     // true if at least one commit was created
-	Pushed          bool     // true if push was attempted and succeeded
-	Message         string   // message of the last commit
-	CommittedFiles  []string // repo-relative paths committed in this sync
-	UpdatedFiles    []string // IDs of files whose state hash was refreshed
-	NodeWarnings    []string // non-fatal warnings from invalid node public keys
+	RepoDir            string
+	Pulled             bool     // true if pull ran and succeeded
+	PullErr            error    // non-nil if pull was attempted but failed (non-fatal)
+	Committed          bool     // true if at least one commit was created
+	Pushed             bool     // true if push was attempted and succeeded
+	Message            string   // message of the last commit
+	CommittedFiles     []string // repo-relative paths committed in this sync
+	UpdatedFiles       []string // IDs of files whose state hash was refreshed
+	NodeWarnings       []string // non-fatal warnings from invalid node public keys
+	SkippedSourceFiles []string // system paths skipped because they are source-managed
 }
 
 // buildSyncMessage inspects the git index to produce a meaningful commit
@@ -365,6 +366,13 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 
 	for id, rec := range currentState.Files {
 		if len(fileIDSet) > 0 && !fileIDSet[id] {
+			continue
+		}
+		// Source-managed files are owned by `sysfig source render`, not sync.
+		// Syncing a source-managed file would commit a local drift edit back
+		// to the repo, breaking the ownership model.
+		if rec.SourceProfile != "" {
+			result.SkippedSourceFiles = append(result.SkippedSourceFiles, rec.SystemPath)
 			continue
 		}
 		relPath := rec.RepoPath

@@ -53,6 +53,12 @@ type FileRecord struct {
 	// at the last track or sync. Nil means metadata was never recorded
 	// (e.g. records created before this feature was added).
 	Meta *FileMeta `json:"meta,omitempty"`
+	// SourceProfile, when non-empty, marks this file as owned by a Config
+	// Source profile render. Format: "<sourceName>/<profileName>".
+	// Empty string means the file was manually tracked via `sysfig track`.
+	// Source-managed files are skipped by `sysfig sync` and cannot be
+	// re-tracked without --force.
+	SourceProfile string `json:"source_profile,omitempty"`
 }
 
 // BackupRecord represents a single backup entry in state.json.

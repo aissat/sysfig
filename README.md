@@ -163,6 +163,7 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
   - [doctor](#doctor)
   - [snap](#snap)
   - [node](#node)
+  - [source](#source)
 - [Configuration File: sysfig.yaml](#configuration-file-sysfigyaml)
 - [state.json vs sysfig.yaml](#statejson-vs-sysfigyaml)
 - [Encryption](#encryption)
@@ -178,13 +179,13 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
 
 ## Why sysfig?
 
-| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | No-git-server sync | Local snapshots | Single binary |
-| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | ------------------ | --------------- | ------------- |
-| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✓             |
-| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✓             |
-| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✓             |
-| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗                  | ✗               | ✗             |
-| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓ NFS/SSH/USB**  | **✓ snap**      | **✓**         |
+| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | No-git-server sync | Local snapshots | Shared templates | Single binary |
+| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | ------------------ | --------------- | ---------------- | ------------- |
+| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✓             |
+| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✓             |
+| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✓             |
+| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗                  | ✗               | ✓ roles          | ✗             |
+| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓ NFS/SSH/USB**  | **✓ snap**      | **✓ source**     | **✓**         |
 
 **Key design decisions:**
 
@@ -738,6 +739,7 @@ Use `--files` (or `-f`) to bypass grouping and see every tracked file individual
 | `PENDING/APPLY` | Repo has a newer version than the system file                       | Run `sysfig apply`           |
 | `MISSING`       | File is tracked but does not exist on the system                    | Run `sysfig apply`           |
 | `ENCRYPTED`     | Encrypted file — content comparison skipped (no master key present) | Copy key, then re-check      |
+| `SOURCE`        | Source-managed file; on-disk content matches committed render       | Nothing to do                |
 | `NEW`           | File exists on disk inside a tracked group dir but is not yet tracked | Run `sysfig sync` to auto-track, or `sysfig untrack <path>` to exclude |
 
 **Exit codes:** `0` = all SYNCED, `1` = any DIRTY/PENDING/MISSING, `2` = error.
@@ -1459,6 +1461,128 @@ sysfig apply
 
 ---
 
+### `source`
+
+Manage **Config Source** template catalogs — consume shared config templates (proxy settings, DNS, NTP, rsyslog forwarding, or any repeated config pattern) from a remote bundle or git repo, inject per-machine variable values, and commit the rendered output as ordinary tracked files.
+
+```
+sysfig source add    <name> <url>
+sysfig source list   <source>
+sysfig source use    <source/profile>
+sysfig source render [--force] [--dry-run] [--profile <source/profile>]
+sysfig source pull   <source>
+```
+
+**How it works (Render-to-Git):**
+
+1. A *source bundle* is a git repo or bundle file containing profile directories (`profiles/<name>/profile.yaml` + templates).
+2. `sysfig source add` registers the source URL in `~/.sysfig/sources.yaml` (local, never committed).
+3. `sysfig source use` prompts for per-machine variable values and saves them to `sources.yaml`.
+4. `sysfig source render` fetches the bundle, renders each template with your variables, and commits the output to `track/*` branches exactly like manually tracked files.
+5. `sysfig diff` / `sysfig apply` work unchanged — nothing new to learn.
+
+**Supported source URL types:**
+
+| URL | Transport |
+|---|---|
+| `bundle+local:///path/to/file.bundle` | NFS, USB, local disk |
+| `bundle+ssh://user@host/path/file.bundle` | SSH file server |
+| `git@host:org/repo.git` | GitHub, GitLab, Gitea, self-hosted git |
+| `https://host/org/repo.git` | Public git over HTTPS |
+
+**Typical workflow:**
+
+```bash
+# Register the source (git remote or bundle — same command)
+sysfig source add corp git@github.com:your-org/corp-configs.git
+# or bundle:
+# sysfig source add corp bundle+local:///mnt/nfs/corp-configs.bundle
+
+# See what profiles are available (also fetches the latest)
+sysfig source list corp
+#   ────────────────────────────────────────────────────────────────────────
+#     PROFILE             FILES  DESCRIPTION
+#   ────────────────────────────────────────────────────────────────────────
+#     dns-resolvers       2      DNS resolver config — systemd-resolved and resolv.conf
+#     ntp-pool            1      NTP time synchronisation — systemd-timesyncd
+#     syslog-forwarder    1      Remote syslog forwarding — rsyslog TCP/TLS
+#     system-proxy        4      HTTP/HTTPS proxy — /etc/environment, apt, Docker
+#   ────────────────────────────────────────────────────────────────────────
+
+# Activate a profile (prompts for each variable in alphabetical order)
+sysfig source use corp/system-proxy
+#   bypass_list [localhost,127.0.0.1,::1]: 10.0.0.0/8,localhost
+#   proxy_url (required): http://proxy.corp.com:3128
+#   ✓ Profile "corp/system-proxy" added to sources.yaml
+
+# Render — commits rendered output to track/* branches
+sysfig source render
+#   ✓ Rendered: /etc/environment
+#   ✓ Rendered: /etc/apt/apt.conf.d/95proxy
+#   ✓ Rendered: /etc/systemd/system/docker.service.d/http-proxy.conf
+#   ✓ Rendered: /etc/profile.d/proxy.sh
+
+# Review and apply (standard sysfig flow — nothing new)
+sysfig diff
+sysfig apply
+```
+
+**Scripted / unattended activation** (pipe values in alphabetical variable order):
+
+```bash
+# system-proxy: bypass_list first (a < p), then proxy_url
+printf "10.0.0.0/8,localhost\nhttp://proxy.corp.com:3128\n" \
+  | sysfig source use corp/system-proxy
+```
+
+**Updating when the upstream template changes:**
+
+```bash
+sysfig source pull corp      # fetch latest bundle or git commits
+sysfig source render         # re-render with your existing variables
+sysfig diff                  # review what changed
+sysfig apply
+```
+
+**Rendering a single profile:**
+
+```bash
+sysfig source render --profile corp/system-proxy
+```
+
+**Status labels for source-managed files:**
+
+| Status | Meaning |
+|---|---|
+| `SOURCE` | Content matches committed render — nothing to do |
+| `DIRTY` | Drifted from committed render (manually edited after apply) |
+| `MISSING` | Not yet on disk — run `sysfig apply` |
+| `PENDING` | A new render is committed but not yet applied |
+
+`sysfig sync` skips source-managed files — their content is owned by `source render`, not by `sync`.
+
+**Taking manual ownership** of a source-managed file:
+
+```bash
+sysfig track --force /etc/environment   # clears source_profile, enables sync
+```
+
+**Conflict handling:** If two profiles declare the same output file, `source render` refuses. Use `--force` to transfer ownership.
+
+**Subcommands:**
+
+| Subcommand | Description |
+| ---------- | ----------- |
+| `source add <name> <url>` | Register a source bundle URL in `~/.sysfig/sources.yaml` |
+| `source list <source>` | List available profiles (pulls latest first) |
+| `source use <source/profile>` | Activate a profile and set per-machine variable values |
+| `source render [--profile P] [--dry-run] [--force]` | Render all active profiles into `track/*` branches |
+| `source pull <source>` | Fetch the latest bundle / git commits without rendering |
+
+> See [docs/config-sources.md](docs/config-sources.md) for the complete guide — from writing templates to publishing and deploying on a new machine. For the design rationale see [docs/rfcs/config-sources.md](docs/rfcs/config-sources.md).
+
+---
+
 ## Configuration File: sysfig.yaml
 
 `sysfig.yaml` lives at the root of your config repo and is committed to git. It is the shared manifest that tells `sysfig setup` what to seed on a new machine.
@@ -1662,6 +1786,11 @@ Adding a new service requires only editing `hooks.yaml` — no code changes.
 │       └── files/
 │           └── etc/nginx/nginx.conf ← live file content at snapshot time
 │
+├── sources/                         ← config source cache (local only)
+│   └── corp/
+│       └── repo.git/                ← bare cache of the source bundle / git remote
+│
+├── sources.yaml                     ← source declarations + activated profiles (local only)
 ├── state.json                       ← local cache (local only)
 └── hooks.yaml                       ← local hooks (local only)
 ```
@@ -1692,10 +1821,13 @@ sysfig never touches the network automatically.
 | `sync` (local commit)            | Never             |
 | `diff`, `log`                    | Never             |
 | `snap take/list/restore/drop`    | Never             |
+| `source render` (cache hit)      | Never             |
 | `push`                           | Always            |
 | `pull`                           | Always            |
 | `setup` (initial bootstrap only) | Yes, one-time     |
 | `deploy --host` (remote push)    | SSH to target     |
+| `source add/list/pull/use`       | Yes (fetches bundle or git remote) |
+| `source render` (cache miss)     | Yes (auto-fetches bundle) |
 
 If `sysfig setup` detects the bare repo already exists locally, it shows hints and exits cleanly — no silent pull, no network call. The user must explicitly run `sysfig pull` to fetch changes. This prevents silent data loss on intermittent networks and keeps the local repo as the always-valid source of truth.
 

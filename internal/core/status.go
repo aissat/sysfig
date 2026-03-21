@@ -23,6 +23,7 @@ const (
 	StatusEncrypted FileStatusLabel = "ENCRYPTED"
 	StatusPending   FileStatusLabel = "PENDING"  // repo ahead of system; apply needed
 	StatusNew       FileStatusLabel = "NEW"       // file exists on disk but not yet tracked
+	StatusSource    FileStatusLabel = "SOURCE"    // file is managed by a Config Source profile
 )
 
 // FileStatusResult holds the computed status for one tracked file.
@@ -110,6 +111,41 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 			// Encrypted files cannot be compared — report as locked.
 			r.Status = StatusEncrypted
 			r.CurrentHash = "(locked)"
+
+		case rec.SourceProfile != "":
+			// Source-managed files: use SOURCE label when content matches
+			// the committed render; fall through to standard DIRTY/PENDING
+			// check when the on-disk copy has drifted.
+			if _, err := os.Stat(sysPath); os.IsNotExist(err) {
+				r.Status = StatusMissing
+				r.CurrentHash = ""
+				break
+			} else if err != nil {
+				r.Status = StatusMissing
+				r.CurrentHash = ""
+				break
+			}
+			sysHash, err := hash.File(sysPath)
+			if err != nil {
+				return nil, fmt.Errorf("core: status: hash system %q: %w", sysPath, err)
+			}
+			r.CurrentHash = sysHash
+			trackBranch := rec.Branch
+			if trackBranch == "" {
+				trackBranch = "track/" + SanitizeBranchName(rec.RepoPath)
+			}
+			repoHash := rec.CurrentHash
+			if repoContent, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath); err == nil {
+				repoHash = hash.Bytes(repoContent)
+			}
+			switch {
+			case sysHash == repoHash:
+				r.Status = StatusSource
+			case repoHash != rec.CurrentHash:
+				r.Status = StatusPending
+			default:
+				r.Status = StatusDirty
+			}
 
 		default:
 			// Check whether the system file exists.

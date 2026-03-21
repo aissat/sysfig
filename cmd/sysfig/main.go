@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -358,6 +359,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newWatchCmd(),
 		newProfileCmd(),
 		newNodeCmd(),
+		newSourceCmd(),
 	)
 
 	// Force cobra to register the built-in completion subcommands now so we
@@ -4249,6 +4251,259 @@ func newNodeRemoveCmd() *cobra.Command {
 			}
 			ok("Node %q removed", args[0])
 			info("Re-run 'sysfig sync' to re-encrypt tracked files without this node.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	return cmd
+}
+
+// ── source command ────────────────────────────────────────────────────────────
+
+func newSourceCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "source",
+		Short: "Manage Config Source template catalogs",
+		Long: `Config Sources let you consume shared config templates from a remote bundle,
+inject per-machine variables, and commit the rendered output as ordinary tracked files.
+
+Workflow:
+  sysfig source add corporate bundle+local:///mnt/nfs/corp-configs.bundle
+  sysfig source list corporate
+  sysfig source use corporate/system-proxy
+  sysfig source render
+  sysfig diff && sysfig apply`,
+	}
+	cmd.AddCommand(
+		newSourceAddCmd(),
+		newSourceListCmd(),
+		newSourceUseCmd(),
+		newSourceRenderCmd(),
+		newSourcePullCmd(),
+	)
+	return cmd
+}
+
+func newSourceAddCmd() *cobra.Command {
+	var baseDir string
+	cmd := &cobra.Command{
+		Use:   "add <name> <url>",
+		Short: "Register a new config source bundle",
+		Args:  cobra.ExactArgs(2),
+		Example: `  sysfig source add corporate bundle+local:///mnt/corp-nfs/corp-configs.bundle
+  sysfig source add community bundle+ssh://backup@fileserver/srv/sysfig/community.bundle`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			name, sourceURL := args[0], args[1]
+			if err := core.SourceAdd(baseDir, name, sourceURL); err != nil {
+				return err
+			}
+			ok("Source %q registered", name)
+			info("Run 'sysfig source list %s' to see available profiles.", name)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	return cmd
+}
+
+func newSourceListCmd() *cobra.Command {
+	var baseDir string
+	cmd := &cobra.Command{
+		Use:   "list <source>",
+		Short: "List profiles available in a source bundle",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			sourceName := args[0]
+			entries, err := core.SourceList(baseDir, sourceName)
+			if err != nil {
+				return err
+			}
+			if len(entries) == 0 {
+				info("No profiles found in source %q", sourceName)
+				return nil
+			}
+			divider()
+			fmt.Printf("  %-28s  %-5s  %s\n",
+				clrBold.Sprint("PROFILE"), clrBold.Sprint("FILES"), clrBold.Sprint("DESCRIPTION"))
+			divider()
+			for _, e := range entries {
+				fmt.Printf("  %-28s  %-5d  %s\n", e.Name, e.Files, e.Description)
+			}
+			divider()
+			fmt.Printf("\n  To activate a profile: sysfig source use %s/<profile>\n\n", sourceName)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	return cmd
+}
+
+func newSourceUseCmd() *cobra.Command {
+	var baseDir string
+	cmd := &cobra.Command{
+		Use:   "use <source/profile>",
+		Short: "Activate a profile with per-machine variables",
+		Long: `Activate a profile from a registered source. You will be prompted for each
+variable declared in the profile. Defaults are shown in brackets.
+
+After activation, run 'sysfig source render' to commit the rendered files.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			sourceProfile := args[0]
+
+			parts := strings.SplitN(sourceProfile, "/", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid source reference %q — expected <source>/<profile>", sourceProfile)
+			}
+			sourceName, profileName := parts[0], parts[1]
+
+			// Ensure source is pulled so we can read profile.yaml.
+			if err := core.SourcePull(baseDir, sourceName); err != nil {
+				return fmt.Errorf("pull source %q: %w", sourceName, err)
+			}
+
+			profile, err := core.ReadProfileYAML(baseDir, sourceName, profileName)
+			if err != nil {
+				return err
+			}
+
+			// Prompt for variables interactively (if TTY) or accept defaults.
+			variables := make(map[string]string, len(profile.Variables))
+			scanner := bufio.NewScanner(os.Stdin)
+			isTTY := term.IsTerminal(int(os.Stdin.Fd()))
+
+			// Sort variable names for deterministic prompt order.
+			varNames := make([]string, 0, len(profile.Variables))
+			for k := range profile.Variables {
+				varNames = append(varNames, k)
+			}
+			sort.Strings(varNames)
+
+			for _, varName := range varNames {
+				decl := profile.Variables[varName]
+				prompt := "  " + varName
+				if decl.Required {
+					prompt += " (required)"
+				}
+				if decl.Default != "" {
+					prompt += " [" + decl.Default + "]"
+				}
+				prompt += ": "
+
+				if isTTY {
+					fmt.Print(prompt)
+				}
+				if scanner.Scan() {
+					val := strings.TrimSpace(scanner.Text())
+					if val == "" && decl.Default != "" {
+						val = decl.Default
+					}
+					if val == "" && decl.Required {
+						return fmt.Errorf("variable %q is required", varName)
+					}
+					if val != "" {
+						variables[varName] = val
+					}
+				}
+			}
+
+			if err := core.SourceUse(core.SourceUseOptions{
+				BaseDir:       baseDir,
+				SourceProfile: sourceProfile,
+				Variables:     variables,
+			}); err != nil {
+				return err
+			}
+
+			ok("Profile %q added to sources.yaml", sourceProfile)
+			info("Run 'sysfig source render' to commit the rendered files.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	return cmd
+}
+
+func newSourceRenderCmd() *cobra.Command {
+	var baseDir string
+	var force, dryRun bool
+	var renderProfile string
+	cmd := &cobra.Command{
+		Use:   "render [--profile <source/profile>] [--force] [--dry-run]",
+		Short: "Render activated profiles into the local repo",
+		Long: `Render all activated profiles (or one specific profile) by:
+  1. Fetching each source bundle into the local cache
+  2. Reading profile.yaml and validating variables
+  3. Rendering each template and committing to track/* branches
+  4. Updating state.json with source ownership
+
+After rendering, run 'sysfig diff' and 'sysfig apply' to write files to disk.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			result, err := core.SourceRender(core.RenderOptions{
+				BaseDir: baseDir,
+				Profile: renderProfile,
+				Force:   force,
+				DryRun:  dryRun,
+			})
+
+			if result != nil {
+				for _, p := range result.Rendered {
+					if dryRun {
+						info("[dry-run] Would render: %s", p)
+					} else {
+						ok("Rendered: %s", p)
+					}
+				}
+				for _, p := range result.Skipped {
+					clrDim.Printf("  · Unchanged: %s\n", p)
+				}
+				for _, c := range result.Conflicts {
+					fail("Conflict: %s", c.SystemPath)
+					fmt.Printf("      currently owned by: %s\n", c.CurrentOwner)
+					fmt.Printf("      requested by:        %s\n", c.RequestedBy)
+				}
+				if len(result.Conflicts) > 0 {
+					fmt.Println()
+					warn("Re-run with --force to transfer ownership.")
+				}
+			}
+
+			if err != nil {
+				return err
+			}
+
+			if result != nil && len(result.Rendered) > 0 && !dryRun {
+				fmt.Println()
+				info("Run 'sysfig diff' to review, then 'sysfig apply' to write files to disk.")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	cmd.Flags().StringVar(&renderProfile, "profile", "", "limit render to one profile (e.g. corporate/system-proxy)")
+	cmd.Flags().BoolVar(&force, "force", false, "transfer ownership of conflicting files")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be rendered without writing")
+	return cmd
+}
+
+func newSourcePullCmd() *cobra.Command {
+	var baseDir string
+	cmd := &cobra.Command{
+		Use:   "pull <source>",
+		Short: "Fetch the latest source bundle into the local cache",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+			name := args[0]
+			if err := core.SourcePull(baseDir, name); err != nil {
+				return err
+			}
+			ok("Source %q updated", name)
+			info("Run 'sysfig source render' to re-render with the updated templates.")
 			return nil
 		},
 	}
