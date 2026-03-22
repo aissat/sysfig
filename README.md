@@ -84,7 +84,7 @@ Track `~/.bashrc`, `~/.config` across laptops. No symlinks, no mess.
 Manage `/etc/nginx`, `/etc/ssh`, systemd units across VPS servers. Preserves ownership, permissions, and auto-backs up before replacing.
 
 **3. Small team**
-Share encrypted secrets and deploy configs to remote servers via SSH (`sysfig deploy --host`). No agents on remote machines.
+Share encrypted secrets and deploy configs to remote servers via SSH. Tag files by OS/distro so each host only receives what it needs (`sysfig deploy --host user@vm --tag ubuntu --sudo`). No agents on remote machines — only a POSIX shell needed on the target.
 
 **4. Security-conscious admin**
 Track `/etc/sudoers` with `--hash-only` — hash recorded locally, nothing pushed. `sysfig audit` exits 1 on drift, safe to wire into a systemd timer.
@@ -124,12 +124,32 @@ Each tracked file gets its own git branch (`track/<path>`). No full-tree noise, 
 ```bash
 vim /etc/nginx/nginx.conf
 
-sysfig status                          # see what changed
+sysfig status                          # see what changed (TYPE + TAGS columns shown)
 sysfig diff                            # show the diff
 sysfig sync --push --message "tuned"   # commit + push
 
 # Or just run:
 sysfig watch --push                    # auto-commit + push on every save
+```
+
+### Auto-tagging and tag-based deploy
+
+```bash
+# Track without --tag: sysfig auto-tags with OS + distro family
+# On Arch Linux:
+sysfig track /etc/pacman.conf          # stored as: linux,arch
+# On Ubuntu:
+sysfig track /etc/apt/sources.list     # stored as: linux,debian
+
+# status and audit now show TYPE and TAGS columns:
+# PATH              HASH        STATUS    TYPE    TAGS
+# /home/aye7/       018e4a02    3 synced  file    linux,arch
+# /etc/pacman.d/    63d01e28    11 synced  group   linux,arch
+
+# Deploy only to matching hosts — --tag or --all is required:
+sysfig deploy --host user@arch-vm --tag arch --sudo
+sysfig deploy --host user@ubuntu-vm --tag ubuntu --sudo
+sysfig deploy --host user@server --all --sudo   # deploy everything
 ```
 
 ---
@@ -165,6 +185,7 @@ sysfig deploy    bundle+ssh://backup@server/srv/conf.bundle
 | `sysfig apply` | Write tracked configs to disk |
 | `sysfig bootstrap <url>` | New machine: clone + apply |
 | `sysfig deploy` | Existing machine: pull + apply |
+| `sysfig deploy --host user@server --tag linux --sudo` | Push files matching a tag to remote over SSH (`--tag` or `--all` required) |
 | `sysfig watch --push` | Auto-commit + push on every file change |
 | `sysfig audit` | Check integrity (exits 1 on drift) |
 | `sysfig undo <path>` | Restore file from last commit |

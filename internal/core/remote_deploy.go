@@ -35,6 +35,15 @@ type RemoteDeployOptions struct {
 	// IDs limits the deploy to specific tracked IDs. Empty = deploy all.
 	IDs []string
 
+	// Tags limits the deploy to files that carry at least one of these tags.
+	// Use this to target machine-specific file sets, e.g. --tag arch or --tag ubuntu.
+	Tags []string
+
+	// All deploys every tracked file regardless of tags or IDs.
+	// Required when neither IDs nor Tags are specified — prevents accidental
+	// full-fleet deploys.
+	All bool
+
 	// DryRun prints what would happen without writing anything to the remote.
 	DryRun bool
 
@@ -83,6 +92,9 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	if opts.Host == "" {
 		return nil, fmt.Errorf("core: remote deploy: host is required")
 	}
+	if !opts.All && len(opts.IDs) == 0 && len(opts.Tags) == 0 {
+		return nil, fmt.Errorf("core: remote deploy: specify --tag <tag>, --id <id>, or --all")
+	}
 
 	// ── Resolve base dir ────────────────────────────────────────────────
 	if opts.BaseDir == "" {
@@ -112,6 +124,11 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	idSet := make(map[string]bool, len(opts.IDs))
 	for _, id := range opts.IDs {
 		idSet[id] = true
+	}
+
+	tagSet := make(map[string]bool, len(opts.Tags))
+	for _, t := range opts.Tags {
+		tagSet[t] = true
 	}
 
 	result := &RemoteDeployResult{Host: opts.Host}
@@ -147,6 +164,10 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	// ── Deploy each file ─────────────────────────────────────────────────
 	for id, rec := range currentState.Files {
 		if len(idSet) > 0 && !idSet[id] {
+			continue
+		}
+
+		if len(tagSet) > 0 && !fileHasTag(rec.Tags, tagSet) {
 			continue
 		}
 
@@ -340,4 +361,14 @@ func parseSSHTarget(target string, port int) (user, addr string) {
 // shellQuote wraps s in single quotes, escaping any embedded single quotes.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// fileHasTag reports whether any tag in fileTags is present in the wanted set.
+func fileHasTag(fileTags []string, wanted map[string]bool) bool {
+	for _, t := range fileTags {
+		if wanted[t] {
+			return true
+		}
+	}
+	return false
 }

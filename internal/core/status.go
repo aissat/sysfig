@@ -47,6 +47,8 @@ type FileStatusResult struct {
 	// LocalOnly and HashOnly mirror the flags in the underlying FileRecord.
 	LocalOnly bool
 	HashOnly  bool
+	// Tags are the labels attached at track time (e.g. "arch", "ubuntu").
+	Tags []string
 }
 
 // Status loads state.json, then for each tracked FileRecord performs a
@@ -112,6 +114,7 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 			Group:        rec.Group,
 			LocalOnly:    rec.LocalOnly,
 			HashOnly:     rec.HashOnly,
+			Tags:         rec.Tags,
 		}
 
 		switch {

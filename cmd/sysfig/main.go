@@ -546,6 +546,8 @@ func newDeployCmd() *cobra.Command {
 		yes           bool
 		sysRoot       string
 		ids           []string
+		tags          []string
+		allFiles      bool
 		host          string
 		sshKey        string
 		sshPort       int
@@ -583,6 +585,8 @@ No sysfig installation is required on the remote host.`,
 					SSHPort:       sshPort,
 					BaseDir:       baseDir,
 					IDs:           ids,
+					Tags:          tags,
+					All:           allFiles,
 					DryRun:        dryRun,
 					SkipEncrypted: skipEncrypted,
 					Sudo:          sshSudo,
@@ -743,6 +747,8 @@ No sysfig installation is required on the remote host.`,
 	f := cmd.Flags()
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringArrayVar(&ids, "id", nil, "apply only this ID (repeatable)")
+	f.StringArrayVar(&tags, "tag", nil, "deploy only files with this tag (repeatable) — e.g. --tag arch")
+	f.BoolVar(&allFiles, "all", false, "deploy all tracked files (required when no --tag or --id is given)")
 	f.BoolVar(&dryRun, "dry-run", false, "print what would happen without writing anything")
 	f.BoolVar(&noBackup, "no-backup", false, "skip pre-apply backup")
 	f.BoolVar(&skipEncrypted, "skip-encrypted", false, "skip encrypted files when master key is absent")
@@ -1036,6 +1042,11 @@ func newTrackCmd() *cobra.Command {
 
 			if localOnly && hashOnly {
 				return fmt.Errorf("--local and --hash-only are mutually exclusive")
+			}
+
+			// Auto-tag with OS + distro when no tags were provided.
+			if len(tags) == 0 {
+				tags = core.DetectPlatformTags()
 			}
 
 			if recursive {
@@ -1486,11 +1497,13 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 	}
 
 	if showIDs {
-		fmt.Printf("%s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", idW)), clrBold.Sprint("STATUS"))
+		fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", idW)), clrBold.Sprint("STATUS"), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
 	} else {
-		fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint("STATUS"))
+		fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint("STATUS"), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
 	}
 	divider()
+
+	implicitTags := core.DetectPlatformTags()
 
 	for _, dir := range dirOrder {
 		files := groups[dir]
@@ -1548,34 +1561,49 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 			rowHash = files[0].ID
 			rowSlug = files[0].Slug
 		}
-		// grp = any file in this row was tracked via `sysfig track /dir/` (Group != "").
-		// local = tracked with --local (never pushed to remote).
-		// hash = tracked with --hash-only (integrity monitoring only).
-		// no tag = tracked individually via `sysfig track /path/to/file`.
+		// TYPE column: how the file was tracked.
 		isGroup := files[0].Group != ""
-		typeTag := ""
+		typeStr := "file"
 		switch {
 		case files[0].HashOnly:
-			typeTag = "  " + clrDim.Sprint("hash")
+			typeStr = "hash"
 		case files[0].LocalOnly:
-			typeTag = "  " + clrDim.Sprint("local")
+			typeStr = "local"
 		case isGroup:
-			typeTag = "  " + clrDim.Sprint("grp")
+			typeStr = "group"
 		}
+		typeCol := clrDim.Sprint(pad(typeStr, 6))
+
+		// TAGS column: user-defined labels only.
+		seen := make(map[string]bool)
+		var rowTags []string
+		for _, f := range files {
+			for _, t := range f.Tags {
+				if !seen[t] {
+					seen[t] = true
+					rowTags = append(rowTags, t)
+				}
+			}
+		}
+		displayTags := rowTags
+		if len(displayTags) == 0 {
+			displayTags = implicitTags
+		}
+		tagsCol := clrInfo.Sprint(strings.Join(displayTags, ","))
 
 		pathCol := pad(rowLabel, dirW)
 		hashCol := clrDim.Sprint(pad(rowHash, hashW))
 		if dirDirty {
 			if showIDs {
-				fmt.Printf("%s  %s  %s  %s%s\n", clrDirty.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary, typeTag)
+				fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary, typeCol, tagsCol)
 			} else {
-				fmt.Printf("%s  %s  %s%s\n", clrDirty.Sprint(pathCol), hashCol, summary, typeTag)
+				fmt.Printf("%s  %s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, summary, typeCol, tagsCol)
 			}
 		} else {
 			if showIDs {
-				fmt.Printf("%s  %s  %s  %s%s\n", clrBold.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary, typeTag)
+				fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary, typeCol, tagsCol)
 			} else {
-				fmt.Printf("%s  %s  %s%s\n", clrBold.Sprint(pathCol), hashCol, summary, typeTag)
+				fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, summary, typeCol, tagsCol)
 			}
 		}
 
@@ -4562,9 +4590,11 @@ Designed for use in systemd timers or cron jobs:
 
 			// Collect in-scope results.
 			type auditRow struct {
-				path   string
-				id     string
-				status core.FileStatusLabel
+				path     string
+				id       string
+				tags     []string
+				trackType string // "hash" or "local"
+				status   core.FileStatusLabel
 			}
 			var rows []auditRow
 			for _, r := range results {
@@ -4575,7 +4605,14 @@ Designed for use in systemd timers or cron jobs:
 				if !inScope {
 					continue
 				}
-				rows = append(rows, auditRow{r.SystemPath, r.ID, r.Status})
+				tt := "file"
+				switch {
+				case r.HashOnly:
+					tt = "hash"
+				case r.LocalOnly:
+					tt = "local"
+				}
+				rows = append(rows, auditRow{r.SystemPath, r.ID, r.Tags, tt, r.Status})
 			}
 
 			var drifted int
@@ -4590,17 +4627,25 @@ Designed for use in systemd timers or cron jobs:
 				pathW += 2
 				const hashW = 10
 
-				fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint("STATUS"))
+				const typeW = 6
+				implicitTags := core.DetectPlatformTags()
+				fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("STATUS", 12)), clrBold.Sprint(pad("TYPE", typeW)), clrBold.Sprint("TAGS"))
 				divider()
 				for _, r := range rows {
 					clean := r.status == core.StatusSynced
 					statusStr := strings.ToLower(string(r.status))
 					hashCol := clrDim.Sprint(pad(r.id, hashW))
+					typeCol := clrDim.Sprint(pad(r.trackType, typeW))
+					displayTags := r.tags
+					if len(displayTags) == 0 {
+						displayTags = implicitTags
+					}
+					tagsCol := clrInfo.Sprint(strings.Join(displayTags, ","))
 					if clean {
-						fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pad(r.path, pathW)), hashCol, clrSynced.Sprint("✓ "+statusStr))
+						fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad(r.path, pathW)), hashCol, clrSynced.Sprint(pad("✓ "+statusStr, 12)), typeCol, tagsCol)
 					} else {
 						drifted++
-						fmt.Printf("%s  %s  %s\n", clrDirty.Sprint(pad(r.path, pathW)), hashCol, clrErr.Sprint("✗ "+statusStr))
+						fmt.Printf("%s  %s  %s  %s  %s\n", clrDirty.Sprint(pad(r.path, pathW)), hashCol, clrErr.Sprint(pad("✗ "+statusStr, 12)), typeCol, tagsCol)
 					}
 				}
 				divider()

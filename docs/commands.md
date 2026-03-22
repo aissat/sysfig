@@ -41,8 +41,13 @@ The `<remote-url>` can be any URL supported by `sysfig remote set`: a git remote
 | `--host`       | —       | SSH target (`user@hostname`) — pushes files to the remote instead |
 | `--ssh-key`    | —       | Path to SSH identity file (default: use ssh-agent)                |
 | `--ssh-port`   | `22`    | SSH port on the remote host                                       |
+| `--sudo`       | off     | Wrap remote writes with `sudo` — required for `/etc/` and other root-owned paths |
 
-> When `--host` is set sysfig reads files from the **local** repo and writes them to the remote over SSH. **No sysfig installation is needed on the remote** — only `mkdir`, `cat`, and `chmod`.
+> When `--host` is set sysfig reads files from the **local** repo and writes them to the remote using Go's native SSH client (no `ssh` binary required on the local machine). **No sysfig installation is needed on the remote** — only `mkdir`, `cat`, and `chmod`.
+>
+> Files tracked with `--local` or `--hash-only` are silently skipped — they have no content in the repo.
+>
+> **Troubleshooting — 90-second hang per file:** If deploy is slow, the remote sshd is likely running `pam_systemd.so` without `systemd-logind` active (common in containers and minimal VMs). Fix: `sudo sed -i 's/^session.*optional.*pam_systemd.so/#&/' /etc/pam.d/common-session` on the target.
 
 **Local deploy examples:**
 
@@ -88,6 +93,9 @@ sysfig deploy bundle+local:///mnt/share/ops.bundle --dry-run
 # Deploy all tracked files to a remote server
 sysfig deploy --host user@192.168.1.10
 
+# Deploy /etc/ files (root-owned on remote) — requires sudo on target
+sysfig deploy --host user@server --sudo
+
 # Preview what would be pushed (no SSH writes)
 sysfig deploy --host user@server --dry-run
 
@@ -98,7 +106,7 @@ sysfig deploy --host user@server --id nginx_main --id sshd_config
 sysfig deploy --host deploy@server --ssh-key ~/.ssh/deploy_ed25519
 
 # Non-standard SSH port
-sysfig deploy --host user@server --ssh-port 2222
+sysfig deploy --host user@server --ssh-port 2222 --sudo
 ```
 
 **Use in CI / server provisioning:**
