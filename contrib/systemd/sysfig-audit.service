@@ -6,6 +6,7 @@ ConditionPathExists=%h/.sysfig/state.json
 
 [Service]
 Type=oneshot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # Audit local-only and hash-only files.
 # Exit code 1 = drift detected; systemd marks the unit as failed → OnFailure
 # or alerting tools (e.g. systemd-notify, email via OnFailure=) can react.
