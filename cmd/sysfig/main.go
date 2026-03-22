@@ -3346,6 +3346,7 @@ After=default.target
 
 [Service]
 Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=%s watch --base-dir %s --debounce %s
 Restart=on-failure
 RestartSec=5s
