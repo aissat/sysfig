@@ -228,9 +228,18 @@ sysfig creates a bare repo locally, pulls all branches from the bundle, seeds `s
 
 ---
 
-## sudoers (allow sudo sysfig without a password)
+## Tracking /etc files
 
-If you run `sudo sysfig` often, add a sudoers entry so it doesn't prompt:
+Files under `/etc/` are owned by root. You need `sudo` to apply them:
+
+```sh
+sudo sysfig track /etc/nginx/nginx.conf
+sudo sysfig apply
+```
+
+`sysfig track` and `sysfig sync` can run as your regular user — they only write to `~/.sysfig/`. Only `apply` (writing files to disk) needs `sudo` for root-owned paths.
+
+If you run `sudo sysfig apply` often, add a sudoers entry so it doesn't prompt:
 
 ```sh
 # /etc/sudoers.d/sysfig  (use visudo or sudoedit)
@@ -238,6 +247,8 @@ you ALL=(root) NOPASSWD: /usr/local/bin/sysfig
 ```
 
 Replace `you` with your username and the path with wherever sysfig is installed (`which sysfig`).
+
+> **Integrity audit of /etc files:** `sysfig audit` reads file content to compute hashes — run it with `sudo` if your tracked files include paths your user can't read.
 
 ---
 
