@@ -1292,7 +1292,23 @@ func newApplyCmd() *cobra.Command {
 			}
 
 			if err != nil {
-				return err
+				// Print each sub-error on its own line for readability.
+				errStr := err.Error()
+				for _, line := range strings.Split(errStr, "\n") {
+					if strings.TrimSpace(line) != "" {
+						fmt.Fprintf(os.Stderr, "  %s %s\n", clrErr.Sprint("error:"), line)
+					}
+				}
+				// If any error was permission denied, hint at sudo.
+				if strings.Contains(errStr, "permission denied") {
+					fmt.Println()
+					warn("Some files require elevated privileges.")
+					fmt.Printf("     %s\n", clrDim.Sprint("Re-run as root:  sudo sysfig apply"))
+					if len(ids) > 0 {
+						fmt.Printf("     %s\n", clrDim.Sprint("Or apply only the failed files: sudo sysfig apply --id <id>"))
+					}
+				}
+				os.Exit(1)
 			}
 			if len(results) == 0 {
 				info("Nothing to apply (no tracked files found).")
