@@ -1,6 +1,7 @@
 # sysfig
 
-> **The Linux config manager that unifies dotfiles and `/etc` system configs.**
+> **Config management for people who own their machines.**
+> Track, encrypt, and audit system configs — without thinking about git.
 
 `sysfig` is an offline-first configuration manager that lets you version-control both your personal dotfiles and root-owned system configs in a single bare git repository. 
 
@@ -181,13 +182,13 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
 
 ## Why sysfig?
 
-| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | No-git-server sync | Local snapshots | Shared templates | Single binary |
-| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | ------------------ | --------------- | ---------------- | ------------- |
-| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✓             |
-| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✓             |
-| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✓             |
-| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗                  | ✗               | ✓ roles          | ✗             |
-| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓ NFS/SSH/USB**  | **✓ snap**      | **✓ source**     | **✓**         |
+| Tool       | `/etc/` support | Encryption    | Offline-safe | Metadata tracking | Backup on apply | Health check | Remote deploy (no agent) | No-git-server sync | Local snapshots | Shared templates | Integrity audit | Single binary |
+| ---------- | --------------- | ------------- | ------------ | ----------------- | --------------- | ------------ | ------------------------ | ------------------ | --------------- | ---------------- | --------------- | ------------- |
+| GNU Stow   | ✗               | ✗             | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✗               | ✓             |
+| YADM       | ✗               | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✗               | ✓             |
+| Chezmoi    | partial         | partial       | ✓            | ✗                 | ✗               | ✗            | ✗                        | ✗                  | ✗               | ✗                | ✗               | ✓             |
+| Ansible    | ✓               | via vault     | ✗            | ✓                 | ✗               | ✗            | requires agent           | ✗                  | ✗               | ✓ roles          | ✗               | ✗             |
+| **sysfig** | **✓**           | **✓ (age)**   | **✓**        | **✓**             | **✓**           | **✓ doctor** | **✓ (SSH only)**         | **✓ NFS/SSH/USB**  | **✓ snap**      | **✓ source**     | **✓ audit**     | **✓**         |
 
 **Key design decisions:**
 
@@ -198,6 +199,7 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
 - **Per-file encryption.** Secrets are encrypted with [age](https://age-encryption.org/) + HKDF-SHA256 per-file keys derived from a single master key.
 - **Metadata tracking.** Records `uid`, `gid`, and `mode` for every file. `status` warns when permissions drift.
 - **Atomic backups.** Every `apply` creates a timestamped backup before overwriting anything on disk.
+- **Local integrity tracking.** Sensitive files can be tracked locally (`--local`) or hash-only (`--hash-only`) — never pushed to the remote. `sysfig audit` exits 1 on any drift, making it safe to wire into a systemd timer.
 
 ---
 
