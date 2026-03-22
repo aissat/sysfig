@@ -130,7 +130,16 @@ files:
 | `files[].group` | no | File group name |
 | `files[].encrypt` | no | If `true`, the rendered file is age-encrypted in the repo |
 
-> **Note:** The `hooks` section (`post_apply`) is parsed from `profile.yaml` but not yet executed — hook support is planned for a future release.
+**`hooks.post_apply`** runs automatically after `sysfig source render` commits new content for this profile. Each entry has either an `exec` command or a `systemd_reload` service:
+
+```yaml
+hooks:
+  post_apply:
+    - systemd_reload: rsyslog.service   # systemctl reload rsyslog.service
+    - exec: "nginx -t"                  # validate nginx config
+```
+
+Hook errors are non-fatal — the render succeeds and a warning is printed. Hooks are skipped when `--dry-run` is set or when no files changed (all skipped due to matching hash).
 
 ### 1.3 Writing templates
 

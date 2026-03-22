@@ -386,9 +386,10 @@ type RenderConflict struct {
 
 // RenderResult reports the outcome of a render operation.
 type RenderResult struct {
-	Rendered  []string         // system paths with new commits
-	Skipped   []string         // system paths with no change (hash matched)
-	Conflicts []RenderConflict // conflicts that blocked rendering (empty when Force used)
+	Rendered   []string         // system paths with new commits
+	Skipped    []string         // system paths with no change (hash matched)
+	Conflicts  []RenderConflict // conflicts that blocked rendering (empty when Force used)
+	HookErrors []error          // non-fatal post_apply hook failures
 }
 
 // SourceRender renders all (or one specific) activated profile(s) into the
@@ -439,6 +440,7 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 		if opts.Profile != "" && activation.Source != opts.Profile {
 			continue
 		}
+		renderedCount := 0 // tracks new commits for this activation
 
 		// Parse "sourceName/profileName".
 		parts := strings.SplitN(activation.Source, "/", 2)
@@ -566,11 +568,20 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 				return nil, fmt.Errorf("source render: commit %s: %w", dest, err)
 			}
 			result.Rendered = append(result.Rendered, dest)
+			renderedCount++
 
 			// Update state.json.
 			updateSourceRecord(sm, dest, relPath, trackBranch, activation.Source, rendered)
 			// Refresh pathToRecord so subsequent profiles see the updated ownership.
 			_ = sm.Load // force reload is done implicitly by WithLock; refresh local map
+		}
+
+		// Run post_apply hooks if any files were newly committed.
+		if !opts.DryRun && renderedCount > 0 {
+			for _, hookErr := range runProfileHooks(profile.Hooks.PostApply) {
+				// Non-fatal: collect but don't abort the render.
+				result.HookErrors = append(result.HookErrors, hookErr)
+			}
 		}
 	}
 
@@ -608,4 +619,32 @@ func updateSourceRecord(sm *state.Manager, systemPath, relPath, branch, sourcePr
 		s.Files[id] = rec
 		return nil
 	})
+}
+
+// runProfileHooks executes post_apply hooks declared in a profile.yaml.
+// Each entry has either an exec string ("cmd arg1 arg2") or a systemd_reload
+// service name — never both. Errors are returned but do not abort the render.
+func runProfileHooks(hooks []ProfileHookDecl) []error {
+	var errs []error
+	for _, h := range hooks {
+		switch {
+		case h.Exec != "":
+			parts := strings.Fields(h.Exec)
+			if len(parts) == 0 {
+				continue
+			}
+			if _, err := runCmd(30*time.Second, parts[0], parts[1:]...); err != nil {
+				errs = append(errs, fmt.Errorf("source hook exec %q: %w", h.Exec, err))
+			}
+		case h.SystemdReload != "":
+			if err := validateService(h.SystemdReload); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if _, err := runCmd(30*time.Second, "systemctl", "reload", h.SystemdReload); err != nil {
+				errs = append(errs, fmt.Errorf("source hook systemd_reload %q: %w", h.SystemdReload, err))
+			}
+		}
+	}
+	return errs
 }

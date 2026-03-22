@@ -38,3 +38,27 @@ Supported hook types:
 | `systemd_restart` | `systemctl restart <service>` |
 
 > Adding a new service requires only editing `hooks.yaml` — no code changes.
+
+---
+
+## Profile hooks (`source render`)
+
+Config Source profiles can declare their own `post_apply` hooks in `profile.yaml`. These fire automatically when `sysfig source render` commits new content — no local `hooks.yaml` needed on each machine.
+
+```yaml
+# profile.yaml (inside the source bundle)
+hooks:
+  post_apply:
+    - systemd_reload: rsyslog.service
+    - exec: "nginx -t"
+```
+
+**Differences from `hooks.yaml`:**
+
+| | `hooks.yaml` | `profile.yaml` post_apply |
+|---|---|---|
+| Scope | fires after `sysfig apply` | fires after `sysfig source render` |
+| Location | `~/.sysfig/hooks.yaml` (local, never pushed) | inside the source bundle (shared) |
+| On failure | fatal — apply exits with code 1 | non-fatal — warning printed, render succeeds |
+| `exec` format | `cmd: [binary, arg1]` (list) | `exec: "binary arg1"` (string) |
+| Allowlist | required | not required |

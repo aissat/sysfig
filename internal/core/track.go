@@ -93,6 +93,7 @@ type TrackResult struct {
 	ID       string
 	RepoPath string // git-relative path where the file is stored (e.g. "etc/nginx/nginx.conf")
 	Hash     string // BLAKE3 hex hash of the file
+	Branch   string // git branch assigned to this file ("local/<path>" or "track/<path>"; empty for hash-only)
 }
 
 // stageFilePlain stages a real on-disk file (at its absolute system path)
@@ -179,13 +180,22 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 	opts.SystemPath = absPath
 	path := opts.SystemPath
 
-	// 1a. Denylist check.
+	// realPath is the actual on-disk path used for stat/read/hash.
+	// When SysRoot is set, the file lives at sysRoot+path rather than at
+	// the logical path directly. Guard against double-prepending when the
+	// caller has already passed the full disk path.
+	realPath := path
+	if opts.SysRoot != "" && !strings.HasPrefix(path, opts.SysRoot) {
+		realPath = filepath.Join(opts.SysRoot, path)
+	}
+
+	// 1a. Denylist check — always on the logical path.
 	if IsDenied(path) {
 		return nil, fmt.Errorf("core: path %q is in the system denylist", path)
 	}
 
 	// 1b. Stat the file — must exist and be a regular file.
-	info, err := os.Stat(path)
+	info, err := os.Stat(realPath)
 	if err != nil {
 		return nil, fmt.Errorf("core: %w", err)
 	}
@@ -194,7 +204,7 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 	}
 
 	// 1c. Verify the file is readable by opening it.
-	f, err := os.Open(path)
+	f, err := os.Open(realPath)
 	if err != nil {
 		return nil, fmt.Errorf("core: %w", err)
 	}
@@ -221,7 +231,7 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 	repoRel := strings.TrimPrefix(logicalPath, "/")
 
 	// 5. Read the file content for hashing (and encryption / sandbox staging).
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(realPath)
 	if err != nil {
 		return nil, fmt.Errorf("core: %w", err)
 	}
@@ -264,19 +274,34 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 	}
 
 	// 7. Compute the BLAKE3 hash of the real on-disk file.
-	fileHash, err := hash.File(path)
+	fileHash, err := hash.File(realPath)
 	if err != nil {
 		return nil, fmt.Errorf("core: %w", err)
 	}
 
 	// 8. Capture filesystem metadata (uid, gid, mode).
-	meta, err := sysfigfs.ReadMeta(path)
+	meta, err := sysfigfs.ReadMeta(realPath)
 	if err != nil {
 		// Non-fatal — record without metadata rather than aborting.
 		meta = nil
 	}
 
-	// 9. Update state.json under an exclusive lock.
+	// 9. Compute the branch name outside the lock so it can be returned.
+	// HashOnly files have no branch. LocalOnly → "local/", normal → "track/".
+	var branch string
+	if !opts.HashOnly {
+		branchBase := repoRel
+		if opts.Group != "" {
+			branchBase = strings.TrimPrefix(opts.Group, "/")
+		}
+		prefix := "track/"
+		if opts.LocalOnly {
+			prefix = "local/"
+		}
+		branch = resolveTrackBranch(opts.RepoDir, prefix+SanitizeBranchName(branchBase))
+	}
+
+	// 10. Update state.json under an exclusive lock.
 	statePath := filepath.Join(opts.StateDir, "state.json")
 	sm := state.NewManager(statePath)
 
@@ -293,24 +318,6 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		}
 
 		now := time.Now()
-		// Branch name: "track/<repoPath>" for individual files,
-		// "track/<group>" for directory-tracked groups.
-		// HashOnly files have no branch — nothing is staged.
-		// LocalOnly files use a "local/" prefix so push can exclude them.
-		// Normal files use the "track/" prefix.
-		var branch string
-		if !opts.HashOnly {
-			branchBase := repoRel
-			if opts.Group != "" {
-				branchBase = strings.TrimPrefix(opts.Group, "/")
-			}
-			prefix := "track/"
-			if opts.LocalOnly {
-				prefix = "local/"
-			}
-			branch = resolveTrackBranch(opts.RepoDir, prefix+SanitizeBranchName(branchBase))
-		}
-
 		s.Files[id] = &types.FileRecord{
 			ID:          id,
 			SystemPath:  logicalPath,
@@ -336,6 +343,7 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		ID:       id,
 		RepoPath: repoRel,
 		Hash:     fileHash,
+		Branch:   branch,
 	}, nil
 }
 

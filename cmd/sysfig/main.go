@@ -4700,6 +4700,9 @@ After rendering, run 'sysfig diff' and 'sysfig apply' to write files to disk.`,
 					fmt.Println()
 					warn("Re-run with --force to transfer ownership.")
 				}
+				for _, hookErr := range result.HookErrors {
+					warn("Hook error (non-fatal): %v", hookErr)
+				}
 			}
 
 			if err != nil {
