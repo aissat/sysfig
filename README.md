@@ -84,7 +84,7 @@ Track `~/.bashrc`, `~/.config` across laptops. No symlinks, no mess.
 Manage `/etc/nginx`, `/etc/ssh`, systemd units across VPS servers. Preserves ownership, permissions, and auto-backs up before replacing.
 
 **3. Small team**
-Share encrypted secrets and deploy configs to remote servers via SSH. Tag files by OS/distro so each host only receives what it needs (`sysfig deploy --host user@vm --tag ubuntu --sudo`). No agents on remote machines — only a POSIX shell needed on the target.
+Share encrypted secrets and deploy configs to remote servers via SSH. Tag files by OS/distro so each host only receives what it needs. Run `sysfig tag --auto` to label every tracked file with its OS + distro family, then `sysfig deploy --host user@vm --tag ubuntu --sudo` to push only the matching configs. No agents on remote machines — only a POSIX shell needed on the target.
 
 **4. Security-conscious admin**
 Track `/etc/sudoers` with `--hash-only` — hash recorded locally, nothing pushed. `sysfig audit` exits 1 on drift, safe to wire into a systemd timer.
@@ -186,6 +186,10 @@ sysfig deploy    bundle+ssh://backup@server/srv/conf.bundle
 | `sysfig bootstrap <url>` | New machine: clone + apply |
 | `sysfig deploy` | Existing machine: pull + apply |
 | `sysfig deploy --host user@server --tag linux --sudo` | Push files matching a tag to remote over SSH (`--tag` or `--all` required) |
+| `sysfig tag --list` | Show all tags with file counts |
+| `sysfig tag --auto` | Auto-tag untagged files with OS + distro family |
+| `sysfig tag --rename old --to new` | Rename a tag across all files |
+| `sysfig tag <path> [tag...]` | Set (or clear) tags on a specific file |
 | `sysfig watch --push` | Auto-commit + push on every file change |
 | `sysfig audit` | Check integrity (exits 1 on drift) |
 | `sysfig undo <path>` | Restore file from last commit |

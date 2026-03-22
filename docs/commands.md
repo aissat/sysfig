@@ -1402,6 +1402,85 @@ sysfig track --force /etc/environment   # clears source_profile, enables sync
 
 ---
 
+### `tag`
+
+Inspect and manage the tags stored on tracked files.
+
+```
+sysfig tag --list
+sysfig tag --auto [--overwrite]
+sysfig tag --rename <old> --to <new>
+sysfig tag <path-or-id> [tag...]
+```
+
+Tags are plain strings stored in `FileRecord.Tags` inside `state.json` and `sysfig.yaml`. They drive tag-filtered remote deploy (`deploy --host --tag <tag>`) and are displayed in the `TAGS` column of `sysfig status` and `sysfig audit`.
+
+**Modes:**
+
+| Mode | Command | Description |
+| ---- | ------- | ----------- |
+| List | `sysfig tag --list` | Print every distinct tag with a file count; shows untagged file count with a hint to run `sysfig tag --auto` |
+| Auto | `sysfig tag --auto` | Write OS + distro tags (`DetectPlatformTags()`) to all untagged files in `state.json` |
+| Auto overwrite | `sysfig tag --auto --overwrite` | Rewrite tags on ALL tracked files (replaces existing tags) |
+| Rename | `sysfig tag --rename <old> --to <new>` | Rename a tag across every file that carries it |
+| Set | `sysfig tag <path-or-id> [tag...]` | Set explicit tags on a specific file; passing no tags clears them |
+
+> **Deploy implicit tag fallback:** when `deploy --host --tag <tag>` is used and a file has no stored tags, the deploy falls back to `DetectPlatformTags()` for matching. This means `sysfig deploy --host user@server --tag linux` picks up untagged files on a Linux machine even before `sysfig tag --auto` has been run.
+
+**Options:**
+
+| Flag          | Description |
+| ------------- | ----------- |
+| `--list`      | Show all tags and per-tag file counts |
+| `--auto`      | Tag untagged files with OS + distro family |
+| `--overwrite` | Combined with `--auto`: rewrite tags on all tracked files |
+| `--rename`    | Old tag name to replace (requires `--to`) |
+| `--to`        | New tag name for `--rename` |
+| `--base-dir`  | `~/.sysfig` — directory where sysfig stores its data |
+
+**Examples:**
+
+```bash
+# See all tags currently in use
+sysfig tag --list
+#   arch      14 files
+#   linux     14 files
+#   debian     3 files
+#   (untagged: 2 files — run 'sysfig tag --auto' to tag them)
+
+# Tag all currently-untagged files with the local OS + distro
+sysfig tag --auto
+#   ✓ Tagged  /etc/pacman.conf        linux,arch
+#   ✓ Tagged  /home/aye7/.zshrc      linux,arch
+#   ✓ Skipped /etc/nginx/nginx.conf  (already tagged)
+
+# Rewrite tags on every tracked file (useful after distro migration)
+sysfig tag --auto --overwrite
+
+# Rename the "debian" tag to "ubuntu" across all files
+sysfig tag --rename debian --to ubuntu
+
+# Tag a specific file explicitly
+sysfig tag /etc/nginx/nginx.conf web nginx linux
+
+# Clear all tags from a file (no tags provided)
+sysfig tag /etc/nginx/nginx.conf
+```
+
+**Example output (tag --list):**
+
+```
+TAG        FILES
+────────────────────────────────────
+arch          14
+linux         14
+web            2
+
+  (untagged: 2 files — run 'sysfig tag --auto' to tag them)
+```
+
+---
+
 ## Configuration File: sysfig.yaml
 
 `sysfig.yaml` lives at the root of your config repo and is committed to git. It is the shared manifest that tells `sysfig bootstrap` what to seed on a new machine.
