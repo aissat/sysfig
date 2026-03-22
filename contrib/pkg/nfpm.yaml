@@ -1,0 +1,31 @@
+name: sysfig
+arch: amd64
+platform: linux
+version: ${VERSION}
+maintainer: aissat <aissat@github>
+description: |
+  Config management for people who own their machines.
+  Track, encrypt, and audit system configs — without thinking about git.
+homepage: https://github.com/aissat/sysfig
+license: MIT
+
+depends:
+  - git
+
+contents:
+  # Main binary
+  - src: dist/sysfig-linux-${GOARCH}
+    dst: /usr/bin/sysfig
+    file_info:
+      mode: 0755
+
+  # systemd user units
+  - src: contrib/systemd/sysfig-audit.service
+    dst: /usr/lib/systemd/user/sysfig-audit.service
+    file_info:
+      mode: 0644
+
+  - src: contrib/systemd/sysfig-audit.timer
+    dst: /usr/lib/systemd/user/sysfig-audit.timer
+    file_info:
+      mode: 0644

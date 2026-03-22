@@ -9,10 +9,29 @@
 
 ## Install
 
+**Debian / Ubuntu (.deb):**
+
+```bash
+curl -Lo sysfig.deb https://github.com/aissat/sysfig/releases/latest/download/sysfig_latest_amd64.deb
+sudo dpkg -i sysfig.deb
+```
+
+**RHEL / Fedora / Rocky (.rpm):**
+
+```bash
+sudo rpm -i https://github.com/aissat/sysfig/releases/latest/download/sysfig_latest_amd64.rpm
+```
+
+**Alpine (.apk):**
+
+```bash
+curl -Lo sysfig.apk https://github.com/aissat/sysfig/releases/latest/download/sysfig_latest_amd64.apk
+sudo apk add --allow-untrusted sysfig.apk
+```
+
 **Binary (Linux / macOS):**
 
 ```bash
-# Download the latest release for your platform
 curl -Lo sysfig https://github.com/aissat/sysfig/releases/latest/download/sysfig-linux-amd64
 chmod +x sysfig && sudo mv sysfig /usr/local/bin/
 ```
