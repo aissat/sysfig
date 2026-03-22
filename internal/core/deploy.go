@@ -19,6 +19,12 @@ type DeployOptions struct {
 	// IDs limits apply to specific tracked IDs. Empty = apply all.
 	IDs []string
 
+	// Tags limits apply to files carrying at least one of these tags. Empty = apply all.
+	Tags []string
+
+	// Paths limits apply to files whose SystemPath matches one of these. Empty = apply all.
+	Paths []string
+
 	// DryRun prints what would happen without writing anything.
 	DryRun bool
 
@@ -136,6 +142,8 @@ func Deploy(opts DeployOptions) (*DeployResult, error) {
 	applyResults, err := Apply(ApplyOptions{
 		BaseDir:  opts.BaseDir,
 		IDs:      opts.IDs,
+		Tags:     opts.Tags,
+		Paths:    opts.Paths,
 		DryRun:   opts.DryRun,
 		NoBackup: opts.NoBackup,
 		SysRoot:  opts.SysRoot,

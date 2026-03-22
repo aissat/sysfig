@@ -32,15 +32,18 @@ type RemoteDeployOptions struct {
 	// BaseDir is the local ~/.sysfig directory. Defaults to ~/.sysfig.
 	BaseDir string
 
-	// IDs limits the deploy to specific tracked IDs. Empty = deploy all.
+	// IDs limits the deploy to specific tracked IDs (full or 8-char prefix). Empty = deploy all.
 	IDs []string
 
 	// Tags limits the deploy to files that carry at least one of these tags.
 	// Use this to target machine-specific file sets, e.g. --tag arch or --tag ubuntu.
 	Tags []string
 
-	// All deploys every tracked file regardless of tags or IDs.
-	// Required when neither IDs nor Tags are specified — prevents accidental
+	// Paths limits the deploy to files whose SystemPath matches one of these.
+	Paths []string
+
+	// All deploys every tracked file regardless of tags, IDs, or paths.
+	// Required when none of IDs/Tags/Paths are specified — prevents accidental
 	// full-fleet deploys.
 	All bool
 
@@ -92,8 +95,8 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	if opts.Host == "" {
 		return nil, fmt.Errorf("core: remote deploy: host is required")
 	}
-	if !opts.All && len(opts.IDs) == 0 && len(opts.Tags) == 0 {
-		return nil, fmt.Errorf("core: remote deploy: specify --tag <tag>, --id <id>, or --all")
+	if !opts.All && len(opts.IDs) == 0 && len(opts.Tags) == 0 && len(opts.Paths) == 0 {
+		return nil, fmt.Errorf("core: remote deploy: specify --tag <tag>, --id <id>, --path <path>, or --all")
 	}
 
 	// ── Resolve base dir ────────────────────────────────────────────────
@@ -124,6 +127,10 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	idSet := make(map[string]bool, len(opts.IDs))
 	for _, id := range opts.IDs {
 		idSet[id] = true
+	}
+	pathSet := make(map[string]bool, len(opts.Paths))
+	for _, p := range opts.Paths {
+		pathSet[p] = true
 	}
 
 	tagSet := make(map[string]bool, len(opts.Tags))
@@ -163,7 +170,10 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 
 	// ── Deploy each file ─────────────────────────────────────────────────
 	for id, rec := range currentState.Files {
-		if len(idSet) > 0 && !idSet[id] {
+		if len(idSet) > 0 && !(idSet[id] || hasIDPrefixInSet(id, idSet)) {
+			continue
+		}
+		if len(pathSet) > 0 && !pathSet[rec.SystemPath] {
 			continue
 		}
 
@@ -367,6 +377,17 @@ func parseSSHTarget(target string, port int) (user, addr string) {
 // shellQuote wraps s in single quotes, escaping any embedded single quotes.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// hasIDPrefixInSet reports whether any key in set is a prefix (≥4 chars) of id,
+// or id itself starts with any set key that is a prefix.
+func hasIDPrefixInSet(id string, set map[string]bool) bool {
+	for k := range set {
+		if hasIDPrefix(id, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // fileHasTag reports whether any tag in fileTags is present in the wanted set.

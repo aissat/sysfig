@@ -548,6 +548,7 @@ func newDeployCmd() *cobra.Command {
 		sysRoot       string
 		ids           []string
 		tags          []string
+		paths         []string
 		allFiles      bool
 		host          string
 		sshKey        string
@@ -587,6 +588,7 @@ No sysfig installation is required on the remote host.`,
 					BaseDir:       baseDir,
 					IDs:           ids,
 					Tags:          tags,
+					Paths:         paths,
 					All:           allFiles,
 					DryRun:        dryRun,
 					SkipEncrypted: skipEncrypted,
@@ -665,6 +667,8 @@ No sysfig installation is required on the remote host.`,
 				RemoteURL:     remoteURL,
 				BaseDir:       baseDir,
 				IDs:           ids,
+				Tags:          tags,
+				Paths:         paths,
 				DryRun:        dryRun,
 				NoBackup:      noBackup,
 				SkipEncrypted: skipEncrypted,
@@ -747,9 +751,10 @@ No sysfig installation is required on the remote host.`,
 
 	f := cmd.Flags()
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
-	f.StringArrayVar(&ids, "id", nil, "apply only this ID (repeatable)")
+	f.StringArrayVar(&ids, "id", nil, "deploy only this ID or 8-char prefix (repeatable)")
 	f.StringArrayVar(&tags, "tag", nil, "deploy only files with this tag (repeatable) — e.g. --tag arch")
-	f.BoolVar(&allFiles, "all", false, "deploy all tracked files (required when no --tag or --id is given)")
+	f.StringArrayVar(&paths, "path", nil, "deploy only the file at this system path (repeatable)")
+	f.BoolVar(&allFiles, "all", false, "deploy all tracked files (required when no --tag, --id, or --path is given)")
 	f.BoolVar(&dryRun, "dry-run", false, "print what would happen without writing anything")
 	f.BoolVar(&noBackup, "no-backup", false, "skip pre-apply backup")
 	f.BoolVar(&skipEncrypted, "skip-encrypted", false, "skip encrypted files when master key is absent")
@@ -1409,6 +1414,64 @@ func pad(s string, width int) string {
 	return s + strings.Repeat(" ", width-len(s))
 }
 
+// visibleLen returns the number of printable characters in s, stripping ANSI
+// escape sequences (e.g. "\x1b[32m...\x1b[0m").
+func visibleLen(s string) int {
+	n := 0
+	inEsc := false
+	for i := 0; i < len(s); i++ {
+		if inEsc {
+			if s[i] == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if s[i] == '\x1b' {
+			inEsc = true
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// padVisible pads s to visible width w, ignoring ANSI escape sequences.
+func padVisible(s string, w int) string {
+	vl := visibleLen(s)
+	if vl >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-vl)
+}
+
+// filterByTags returns the subset of results that carry at least one of the
+// requested tags. Falls back to DetectPlatformTags() for untagged files.
+// Returns the full slice unchanged when tags is empty.
+func filterByTags(results []core.FileStatusResult, tags []string) []core.FileStatusResult {
+	if len(tags) == 0 {
+		return results
+	}
+	want := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		want[t] = true
+	}
+	implicit := core.DetectPlatformTags()
+	var out []core.FileStatusResult
+	for _, r := range results {
+		effective := r.Tags
+		if len(effective) == 0 {
+			effective = implicit
+		}
+		for _, t := range effective {
+			if want[t] {
+				out = append(out, r)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // statusLabel returns the display label for a status.
 func statusLabel(s core.FileStatusLabel) string {
 	switch s {
@@ -1497,10 +1560,36 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 		idW += 2
 	}
 
+	// Pre-compute STATUS column width so TYPE/TAGS stay aligned.
+	statusW := len("STATUS")
+	for _, d := range dirOrder {
+		files := groups[d]
+		dCounts := map[string]int{}
+		for _, r := range files {
+			dCounts[string(r.Status)]++
+		}
+		var rawSummary string
+		if len(files) == 1 {
+			rawSummary = statusLabel(files[0].Status)
+		} else {
+			var parts []string
+			for _, st := range []core.FileStatusLabel{core.StatusSynced, core.StatusEncrypted, core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew} {
+				if n := dCounts[string(st)]; n > 0 {
+					parts = append(parts, fmt.Sprintf("%d %s", n, strings.ToLower(string(st))))
+				}
+			}
+			rawSummary = strings.Join(parts, "  ·  ")
+		}
+		if l := len(rawSummary); l > statusW {
+			statusW = l
+		}
+	}
+	statusW += 2
+
 	if showIDs {
-		fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", idW)), clrBold.Sprint("STATUS"), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
+		fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", idW)), clrBold.Sprint(pad("STATUS", statusW)), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
 	} else {
-		fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint("STATUS"), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
+		fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("STATUS", statusW)), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
 	}
 	divider()
 
@@ -1596,15 +1685,15 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 		hashCol := clrDim.Sprint(pad(rowHash, hashW))
 		if dirDirty {
 			if showIDs {
-				fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary, typeCol, tagsCol)
+				fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), padVisible(summary, statusW), typeCol, tagsCol)
 			} else {
-				fmt.Printf("%s  %s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, summary, typeCol, tagsCol)
+				fmt.Printf("%s  %s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, padVisible(summary, statusW), typeCol, tagsCol)
 			}
 		} else {
 			if showIDs {
-				fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary, typeCol, tagsCol)
+				fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), padVisible(summary, statusW), typeCol, tagsCol)
 			} else {
-				fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, summary, typeCol, tagsCol)
+				fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, padVisible(summary, statusW), typeCol, tagsCol)
 			}
 		}
 
@@ -1776,6 +1865,7 @@ func newStatusCmd() *cobra.Command {
 		baseDir   string
 		sysRoot   string
 		ids       []string
+		tags      []string
 		watchMode bool
 		interval  time.Duration
 		flatFiles bool
@@ -1795,6 +1885,7 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			results = filterByTags(results, tags)
 			if len(results) == 0 {
 				info("No tracked files.")
 				return nil
@@ -1816,6 +1907,7 @@ func newStatusCmd() *cobra.Command {
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.StringArrayVar(&ids, "id", nil, "check only this ID (repeatable)")
+	f.StringArrayVar(&tags, "tag", nil, "show only files with this tag (repeatable)")
 	f.BoolVarP(&watchMode, "watch", "w", false, "continuously refresh status (Ctrl-C to stop)")
 	f.BoolVarP(&flatFiles, "files", "f", false, "show every tracked file individually instead of grouping by directory")
 	f.BoolVarP(&showIDs, "show-ids", "i", false, "show tracking ID column")
@@ -4565,6 +4657,7 @@ func newAuditCmd() *cobra.Command {
 		local    bool
 		all      bool
 		quiet    bool
+		tags     []string
 	)
 
 	cmd := &cobra.Command{
@@ -4597,8 +4690,9 @@ Designed for use in systemd timers or cron jobs:
 				trackType string // "hash" or "local"
 				status   core.FileStatusLabel
 			}
+			filteredResults := filterByTags(results, tags)
 			var rows []auditRow
-			for _, r := range results {
+			for _, r := range filteredResults {
 				inScope := all ||
 					(hashOnly && r.HashOnly) ||
 					(local && r.LocalOnly) ||
@@ -4681,6 +4775,7 @@ Designed for use in systemd timers or cron jobs:
 	f.BoolVar(&local, "local", false, "audit only local-only tracked files")
 	f.BoolVar(&all, "all", false, "audit all tracked files (not just local/hash-only)")
 	f.BoolVar(&quiet, "quiet", false, "suppress per-file output; exit code still reflects drift")
+	f.StringArrayVar(&tags, "tag", nil, "audit only files with this tag (repeatable)")
 	return cmd
 }
 

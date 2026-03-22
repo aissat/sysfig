@@ -18,7 +18,9 @@ import (
 // ApplyOptions configures a sysfig apply operation.
 type ApplyOptions struct {
 	BaseDir  string   // e.g. ~/.sysfig
-	IDs      []string // specific IDs to apply; empty = apply all
+	IDs      []string // specific IDs (or 8-char prefixes) to apply; empty = apply all
+	Tags     []string // if set, apply only files carrying at least one of these tags
+	Paths    []string // if set, apply only files whose SystemPath is in this list
 	DryRun   bool     // if true, print what would happen but don't write
 	NoBackup bool     // skip backup step (dangerous)
 	Force    bool     // overwrite DIRTY (locally-modified) files without prompting
@@ -63,17 +65,37 @@ func Apply(opts ApplyOptions) ([]ApplyResult, error) {
 		return nil, fmt.Errorf("core: apply: load state: %w", err)
 	}
 
-	// Build a set of requested IDs for quick lookup (nil set = all).
+	// Build lookup sets for IDs and paths.
 	wantIDs := make(map[string]bool, len(opts.IDs))
 	for _, id := range opts.IDs {
 		wantIDs[id] = true
+	}
+	wantPaths := make(map[string]bool, len(opts.Paths))
+	for _, p := range opts.Paths {
+		wantPaths[p] = true
+	}
+	wantTags := make(map[string]bool, len(opts.Tags))
+	for _, t := range opts.Tags {
+		wantTags[t] = true
 	}
 
 	// Collect the records to apply.
 	var records []*types.FileRecord
 	for id, rec := range currentState.Files {
-		if len(opts.IDs) > 0 && !wantIDs[id] {
+		if len(opts.IDs) > 0 && !(wantIDs[id] || hasIDPrefixInSet(id, wantIDs)) {
 			continue
+		}
+		if len(opts.Paths) > 0 && !wantPaths[rec.SystemPath] {
+			continue
+		}
+		if len(wantTags) > 0 {
+			effectiveTags := rec.Tags
+			if len(effectiveTags) == 0 {
+				effectiveTags = DetectPlatformTags()
+			}
+			if !fileHasTag(effectiveTags, wantTags) {
+				continue
+			}
 		}
 		records = append(records, rec)
 	}
