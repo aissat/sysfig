@@ -27,7 +27,10 @@ The `<remote-url>` can be any URL supported by `sysfig remote set`: a git remote
 | Flag               | Default     | Description                                              |
 | ------------------ | ----------- | -------------------------------------------------------- |
 | `--base-dir`       | `~/.sysfig` | Directory where sysfig stores its data                   |
-| `--id`             | all         | Apply only this ID (repeatable)                          |
+| `--id`             | —           | Apply only this tracking ID or 8-char prefix (repeatable) |
+| `--tag`            | —           | Apply only files with this tag (repeatable) — e.g. `--tag arch` |
+| `--path`           | —           | Apply only the file at this system path (repeatable)     |
+| `--all`            | `false`     | Apply all tracked files (required when no `--tag`, `--id`, or `--path`) |
 | `--dry-run`        | `false`     | Print what would happen without writing anything         |
 | `--no-backup`      | `false`     | Skip pre-apply backup                                    |
 | `--skip-encrypted` | `false`     | Skip encrypted files when master key is absent           |
@@ -91,22 +94,28 @@ sysfig deploy bundle+local:///mnt/share/ops.bundle --dry-run
 
 ```bash
 # Deploy all tracked files to a remote server
-sysfig deploy --host user@192.168.1.10
+sysfig deploy --host user@192.168.1.10 --all
 
 # Deploy /etc/ files (root-owned on remote) — requires sudo on target
-sysfig deploy --host user@server --sudo
+sysfig deploy --host user@server --tag linux --sudo
+
+# Deploy only arch-tagged files
+sysfig deploy --host user@arch-box --tag arch
+
+# Deploy by system path
+sysfig deploy --host user@server --path /etc/nginx/nginx.conf
+
+# Deploy a specific file by tracking ID
+sysfig deploy --host user@server --id nginx_main
 
 # Preview what would be pushed (no SSH writes)
-sysfig deploy --host user@server --dry-run
-
-# Deploy only specific files
-sysfig deploy --host user@server --id nginx_main --id sshd_config
+sysfig deploy --host user@server --tag arch --dry-run
 
 # Use a specific SSH key
-sysfig deploy --host deploy@server --ssh-key ~/.ssh/deploy_ed25519
+sysfig deploy --host deploy@server --tag linux --ssh-key ~/.ssh/deploy_ed25519
 
 # Non-standard SSH port
-sysfig deploy --host user@server --ssh-port 2222 --sudo
+sysfig deploy --host user@server --tag arch --ssh-port 2222 --sudo
 ```
 
 **Use in CI / server provisioning:**
@@ -132,7 +141,10 @@ done
 | `--host` set, `--dry-run`          | Lists files that would be pushed — no SSH writes |
 | `--host` set, file is encrypted    | Decrypted locally with master key, then pushed   |
 | `--host` set, no master key        | Fails unless `--skip-encrypted` is set           |
-| `--host` set, `--id` filter        | Only matching files are pushed                   |
+| `--host` set, `--id` filter        | Only files matching the ID/prefix are pushed     |
+| `--host` set, `--tag` filter       | Only files carrying that tag are pushed; untagged files fall back to `DetectPlatformTags()` |
+| `--host` set, `--path` filter      | Only the file at that exact system path is pushed |
+| No `--all`, `--tag`, `--id`, `--path` | Error — explicit scope required                |
 | Remote path's parent dir missing   | Created automatically (`mkdir -p`)               |
 
 ---
@@ -328,7 +340,7 @@ Check integrity of local-only and hash-only tracked files.
 sysfig audit [options]
 ```
 
-Checks all files tracked with `--local` or `--hash-only` and reports any that have drifted. Designed for use in scripts, cron jobs, and systemd timers.
+Checks all files tracked with `--local` or `--hash-only` and reports any that have drifted. Designed for use in scripts, cron jobs, and systemd timers. The output table includes a `TYPE` column (`file`/`hash`/`local`) and a `TAGS` column showing per-file tags (or the OS/distro family for untagged files).
 
 **Exit codes:**
 
@@ -345,6 +357,7 @@ Checks all files tracked with `--local` or `--hash-only` and reports any that ha
 | `--hash-only`  | `false` | Audit only hash-only tracked files |
 | `--local`      | `false` | Audit only local-only tracked files |
 | `--all`        | `false` | Audit all tracked files (not just local/hash-only) |
+| `--tag`        | —       | Show only files carrying this tag (repeatable) |
 | `--quiet`      | `false` | Suppress per-file output; exit code still reflects drift |
 | `--base-dir`   | `~/.sysfig` | sysfig data directory |
 
@@ -551,6 +564,7 @@ Use `--files` (or `-f`) to bypass grouping and see every tracked file individual
 | Flag         | Short | Default     | Description                                                    |
 | ------------ | ----- | ----------- | -------------------------------------------------------------- |
 | `--id`       | —     | all         | Check only this ID (repeatable)                                |
+| `--tag`      | —     | all         | Show only files carrying this tag (repeatable)                 |
 | `--files`    | `-f`  | `false`     | Flat list — show every tracked file individually (no grouping) |
 | `--watch`    | `-w`  | `false`     | Continuously refresh status (Ctrl-C to stop)                   |
 | `--interval` | —     | `3s`        | Refresh interval when `--watch` is set                         |
