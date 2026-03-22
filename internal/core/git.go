@@ -239,12 +239,23 @@ func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, timeo
 
 	idxEnv := []string{"GIT_INDEX_FILE=" + tmpIdx.Name()}
 
-	// 1. Start with an empty index.
-	if err := gitBareRun(repoDir, timeout, idxEnv, "read-tree", "--empty"); err != nil {
-		return fmt.Errorf("git read-tree --empty: %w", err)
+	// 1. Seed the index from the existing branch HEAD (if it exists) so that
+	//    files not included in this commit are preserved in the tree.
+	//    Falls back to an empty index for the very first commit on this branch.
+	ref := "refs/heads/" + branch
+	parentOut, _ := gitBareOutput(repoDir, 5*time.Second, nil, "rev-parse", "--verify", ref)
+	existingParent := strings.TrimSpace(string(parentOut))
+	if existingParent != "" {
+		if err := gitBareRun(repoDir, timeout, idxEnv, "read-tree", existingParent); err != nil {
+			return fmt.Errorf("git read-tree %s: %w", existingParent, err)
+		}
+	} else {
+		if err := gitBareRun(repoDir, timeout, idxEnv, "read-tree", "--empty"); err != nil {
+			return fmt.Errorf("git read-tree --empty: %w", err)
+		}
 	}
 
-	// 2. Add each blob to the isolated index.
+	// 2. Add each blob to the isolated index (overwrites existing entries for the same path).
 	for _, b := range blobs {
 		mode := b.Mode
 		if mode == "" {
@@ -264,10 +275,8 @@ func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, timeo
 	}
 	treeHash := strings.TrimSpace(string(treeOut))
 
-	// 4. Resolve parent (tip of branch), if any.
-	ref := "refs/heads/" + branch
-	parentOut, _ := gitBareOutput(repoDir, 5*time.Second, nil, "rev-parse", "--verify", ref)
-	parent := strings.TrimSpace(string(parentOut))
+	// 4. Use the parent already resolved in step 1.
+	parent := existingParent
 
 	commitArgs := []string{"commit-tree", treeHash, "-m", message}
 	if parent != "" {

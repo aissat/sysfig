@@ -319,3 +319,70 @@ func TestTrack_SysRoot_LogicalPath(t *testing.T) {
 	}
 	assert.True(t, found, "logical path /etc/nginx/nginx.conf must be in state")
 }
+
+// ---------------------------------------------------------------------------
+// Regression: group branch must preserve all files across partial syncs
+// ---------------------------------------------------------------------------
+
+// TestSync_GroupBranch_PreservesAllFilesAcrossPartialSyncs is a regression test
+// for the bug where gitCommitToBranch started with an empty index, causing a
+// partial sync (only one file dirty) to wipe all other group files from the tree.
+func TestSync_GroupBranch_PreservesAllFilesAcrossPartialSyncs(t *testing.T) {
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	// Use a real temp dir as the group (no SysRoot) so paths are unambiguous.
+	groupDir := t.TempDir()
+	writeFile(t, filepath.Join(groupDir, "a.conf"), "alpha\n")
+	writeFile(t, filepath.Join(groupDir, "b.conf"), "beta\n")
+	writeFile(t, filepath.Join(groupDir, "c.conf"), "gamma\n")
+
+	// Track all three files as a group.
+	_, err := core.TrackDir(core.TrackDirOptions{
+		DirPath:  groupDir,
+		RepoDir:  repoDir,
+		StateDir: baseDir,
+	})
+	require.NoError(t, err)
+
+	// Resolve the group branch from state — it's derived from the real path.
+	s := loadState(t, baseDir)
+	var branch, repoBase string
+	for _, r := range s.Files {
+		if r.Branch != "" {
+			branch = r.Branch
+			repoBase = filepath.Dir(r.RepoPath)
+			break
+		}
+	}
+	require.NotEmpty(t, branch, "branch must be set in state for group files")
+
+	// First sync — commits all three.
+	_, err = core.Sync(core.SyncOptions{BaseDir: baseDir, Message: "initial"})
+	require.NoError(t, err)
+
+	for _, name := range []string{"a.conf", "b.conf", "c.conf"} {
+		relPath := repoBase + "/" + name
+		_, ok := gitShowAt(repoDir, branch, relPath)
+		assert.True(t, ok, "after first sync: %s must be in branch", relPath)
+	}
+
+	// Modify only one file — simulates a partial sync.
+	require.NoError(t, os.WriteFile(filepath.Join(groupDir, "b.conf"), []byte("beta-updated\n"), 0o644))
+
+	// Second sync — only b.conf is dirty.
+	_, err = core.Sync(core.SyncOptions{BaseDir: baseDir, Message: "update b"})
+	require.NoError(t, err)
+
+	// All three files must still be present in the branch tree.
+	for _, name := range []string{"a.conf", "b.conf", "c.conf"} {
+		relPath := repoBase + "/" + name
+		_, ok := gitShowAt(repoDir, branch, relPath)
+		assert.True(t, ok, "after partial sync: %s must still be in branch", relPath)
+	}
+
+	// b.conf must have the updated content.
+	content, ok := gitShowAt(repoDir, branch, repoBase+"/b.conf")
+	assert.True(t, ok)
+	assert.Equal(t, "beta-updated\n", string(content))
+}

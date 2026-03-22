@@ -11,7 +11,7 @@ If you need more power than a simple git wrapper, but want to avoid the massive 
 
 ---
 
-## 3 Ways to Use sysfig
+## 4 Ways to Use sysfig
 
 **1. The "Dotfiles Only" User**
 Track `~/.bashrc` and `~/.config` across your personal laptops. sysfig manages everything locally without creating a mess of symlinks.
@@ -21,6 +21,9 @@ Manage `/etc/nginx`, `/etc/ssh`, and systemd unit files across a handful of VPS 
 
 **3. The Small Team**
 Securely share encrypted environment variables and deploy configs directly to remote servers via SSH (`sysfig deploy --host`). No agents to install on remote machines, no playbooks to write.
+
+**4. The Security-Conscious Admin**
+Track sensitive files like `/etc/ssh/sshd_config` and `/etc/sudoers` with `--hash-only` or `--local`. sysfig records a BLAKE3 hash at track time and alerts you the moment a file drifts — no content leaves the machine, no remote repo needed. Run `sysfig audit` on a cron schedule and get exit codes you can hook into alerting.
 
 ---
 
@@ -68,7 +71,7 @@ $ sysfig deploy bundle+local:///mnt/share/configs.bundle  # NFS / air-gapped —
 **Setting up a new machine (step-by-step alternative):**
 
 ```
-  sysfig setup — bootstrapping your environment
+  sysfig bootstrap — first-time setup
   ─────────────────────────────────────────────
 
   [1] Remote config repository
@@ -257,7 +260,7 @@ sysfig
 | `sysfig.yaml`  | Inside the git repo  | The manifest. Committed and shared across all machines. |
 | `state.json`   | `~/.sysfig/`         | Local cache of hashes, metadata, and sync timestamps. Never committed. |
 
-When you run `sysfig setup` on a new machine, sysfig reads `sysfig.yaml` from the cloned repo and builds `state.json` locally. They are separate by design: the manifest is the source of truth for *what* is tracked; state is the per-machine cache for *how in sync* each file is.
+When you run `sysfig bootstrap` on a new machine, sysfig reads `sysfig.yaml` from the cloned repo and builds `state.json` locally. They are separate by design: the manifest is the source of truth for *what* is tracked; state is the per-machine cache for *how in sync* each file is.
 
 **Branch-per-track storage:**
 
@@ -282,13 +285,13 @@ Each commit uses an isolated git index (`GIT_INDEX_FILE`) so the branch tree con
 
 ### `deploy`
 
-Pull from remote and apply configs — one command for everything.
+Pull latest configs from remote and apply them (ongoing use).
 
 ```
 sysfig deploy [<remote-url>] [options]
 ```
 
-The recommended entry point for both first-time machines and routine updates. Idempotent: safe to re-run as many times as needed.
+Use `deploy` for routine updates on machines already set up with `sysfig bootstrap`. Idempotent: safe to re-run as many times as needed.
 
 The `<remote-url>` can be any URL supported by `sysfig remote set`: a git remote (`git@github.com:…`) **or a bundle remote** (`bundle+local://…`, `bundle+ssh://…`). sysfig detects the transport from the URL scheme automatically.
 
@@ -409,12 +412,12 @@ done
 
 ---
 
-### `setup`
+### `bootstrap`
 
-Bootstrap sysfig on a new machine from an existing remote config repo.
+First-time setup: clone a remote config repo and apply configs on this machine.
 
 ```
-sysfig setup [<remote-url>] [options]
+sysfig bootstrap [<remote-url>] [options]
 ```
 
 This is the primary onboarding command. It:
@@ -436,19 +439,19 @@ This is the primary onboarding command. It:
 
 ```bash
 # Interactive (prompts for URL if stdin is a TTY)
-sysfig setup
+sysfig bootstrap
 
 # Non-interactive / scripted
-sysfig setup git@github.com:you/myconfigs.git
+sysfig bootstrap git@github.com:you/myconfigs.git
 
 # No master key available — skip secrets
-sysfig setup --skip-encrypted git@github.com:you/myconfigs.git
+sysfig bootstrap --skip-encrypted git@github.com:you/myconfigs.git
 
 # Custom data directory
-sysfig setup --base-dir /opt/sysfig git@github.com:you/myconfigs.git
+sysfig bootstrap --base-dir /opt/sysfig git@github.com:you/myconfigs.git
 ```
 
-> `sysfig clone` is a hidden alias for `setup` (backward compatibility).
+> 
 
 ---
 
@@ -1043,6 +1046,8 @@ sysfig watch [subcommand] [options]
 
 Starts a foreground process that monitors every tracked config file using OS-level filesystem events (`inotify` on Linux). When a change is detected, sysfig waits for the debounce window then runs `sysfig sync` automatically.
 
+**Editor compatibility:** sysfig watches both the file inode and its parent directory. This means atomic saves from `sed -i`, vim, nano, and any editor that writes via a temp file + rename are caught correctly — the new inode is re-registered automatically.
+
 **Flags:**
 
 | Flag         | Default     | Description                                         |
@@ -1198,8 +1203,6 @@ sysfig undo a3f2b1c --all --dry-run              # preview what would change
 > The tracking ID shown next to a dirty file in `sysfig status` (e.g. `7734be1e`) can be passed directly to `undo` — no need to type the full path.
 
 > `sysfig undo <path|id>` does **not** create a commit. If you want the reverted content recorded in history, run `sysfig sync --auto` after restoring.
-
-> `rollback` and `restore` still work as hidden aliases for backward compatibility.
 
 ---
 
@@ -1673,7 +1676,7 @@ sysfig track --force /etc/environment   # clears source_profile, enables sync
 
 ## Configuration File: sysfig.yaml
 
-`sysfig.yaml` lives at the root of your config repo and is committed to git. It is the shared manifest that tells `sysfig setup` what to seed on a new machine.
+`sysfig.yaml` lives at the root of your config repo and is committed to git. It is the shared manifest that tells `sysfig bootstrap` what to seed on a new machine.
 
 `sysfig track` maintains this file automatically — you rarely need to edit it by hand.
 
@@ -1723,9 +1726,9 @@ This is the most important conceptual distinction in sysfig:
 | **Where it lives** | Inside the git repo (committed) | `~/.sysfig/state.json` (never committed) |
 | **Shared across machines?** | Yes — this is how new machines know what to track | No — every machine has its own |
 | **Written by** | `sysfig track`, `sysfig init` | All commands that touch files |
-| **Read by** | `sysfig setup` (to bootstrap state on new machines) | `sysfig status`, `sysfig diff`, `sysfig apply` |
+| **Read by** | `sysfig bootstrap` (to bootstrap state on new machines) | `sysfig status`, `sysfig diff`, `sysfig apply` |
 
-When you run `sysfig setup` on a new machine, sysfig reads `sysfig.yaml` from the cloned repo and populates a fresh `state.json` with the file records. From that point on, `state.json` is maintained locally.
+When you run `sysfig bootstrap` on a new machine, sysfig reads `sysfig.yaml` from the cloned repo and populates a fresh `state.json` with the file records. From that point on, `state.json` is maintained locally.
 
 ---
 
@@ -1776,7 +1779,7 @@ sysfig apply
 
 ```bash
 # Setup will skip encrypted files silently
-sysfig setup --skip-encrypted git@github.com:you/myconfigs.git
+sysfig bootstrap --skip-encrypted git@github.com:you/myconfigs.git
 ```
 
 ---
@@ -1970,12 +1973,12 @@ sysfig never touches the network automatically.
 | `source render` (cache hit)      | Never             |
 | `push`                           | Always            |
 | `pull`                           | Always            |
-| `setup` (initial bootstrap only) | Yes, one-time     |
+| `bootstrap` (initial setup only) | Yes, one-time     |
 | `deploy --host` (remote push)    | SSH to target     |
 | `source add/list/pull/use`       | Yes (fetches bundle or git remote) |
 | `source render` (cache miss)     | Yes (auto-fetches bundle) |
 
-If `sysfig setup` detects the bare repo already exists locally, it shows hints and exits cleanly — no silent pull, no network call. The user must explicitly run `sysfig pull` to fetch changes. This prevents silent data loss on intermittent networks and keeps the local repo as the always-valid source of truth.
+If `sysfig bootstrap` detects the bare repo already exists locally, it shows hints and exits cleanly — no silent pull, no network call. The user must explicitly run `sysfig pull` to fetch changes. This prevents silent data loss on intermittent networks and keeps the local repo as the always-valid source of truth.
 
 ---
 
@@ -2017,7 +2020,7 @@ If you manually edited the bare repo or restored from a backup, state.json may b
 ```bash
 # Re-seed state from the manifest
 rm ~/.sysfig/state.json
-sysfig setup  # re-reads sysfig.yaml and rebuilds state.json
+sysfig bootstrap  # re-reads sysfig.yaml and rebuilds state.json
 ```
 
 **`apply` failed halfway — some files written, some not**

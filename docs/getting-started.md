@@ -1,12 +1,13 @@
 # Getting Started with sysfig
 
-> **The Linux config manager that unifies dotfiles and `/etc` system configs.**
+> **Config management for people who own their machines.**
+> Track, encrypt, and audit system configs — without thinking about git.
 
-Welcome! If you're new to `sysfig`, the most important thing to know is the **mental model**. While `sysfig` has many powerful features (encryption, hooks, remote deployments, safe atomic rollbacks), you only need to learn 3 commands to use it effectively:
+Welcome! If you're new to `sysfig`, the most important thing to know is the **mental model**. While `sysfig` has many powerful features (encryption, hooks, remote deployments, integrity audit), you only need to learn 3 commands to use it effectively:
 
 1. `sysfig track <file>` — Add a file to your local configuration vault.
 2. `sysfig sync` — Commit all your tracked changes and (optionally) push them.
-3. `sysfig deploy <url>` — Replicate your exact setup on a brand new machine in 10 seconds.
+3. `sysfig deploy <url>` — Replicate your exact setup on a brand new machine in one command.
 
 Both dotfiles and `/etc/` configs land in a single repo under `~/.sysfig`. No separate "root repo", no complex symlink trees, no `--flags`.
 
@@ -91,15 +92,17 @@ sysfig status
 ```
 
 ```
-ID                                  STATUS          SYSTEM PATH
+PATH                        HASH        STATUS
 ────────────────────────────────────────────────────────────────
-etc_nginx_nginx_conf                SYNCED          /etc/nginx/nginx.conf
-etc_ssh_sshd_config                 DIRTY/MODIFIED  /etc/ssh/sshd_config
-home_you__bashrc                    SYNCED          /home/you/.bashrc
-home_you__config_tokens_env         ENCRYPTED       /home/you/.config/tokens.env
+/etc/nginx/nginx.conf       ca0ed99c    SYNCED
+/etc/ssh/sshd_config        3b71fa2e    DIRTY
+/home/you/.bashrc           018e4a02    SYNCED
+/home/you/.config/tokens    7734be1e    SYNCED  enc
 ────────────────────────────────────────────────────────────────
-  4 files  ·  2 synced  ·  1 dirty  ·  1 encrypted
+  4 files  ·  3 synced  ·  1 dirty
 ```
+
+Status labels: `SYNCED` — in sync with repo. `DIRTY` — modified since last sync (run `sysfig sync`). `PENDING` — tracked but never synced yet. `MISSING` — file deleted from disk.
 
 ### 5. Commit changes
 
@@ -165,6 +168,8 @@ sysfig sync --push --message "nginx: increase worker connections"
 
 `sysfig watch` monitors your tracked files and commits automatically whenever they change — no manual `sysfig sync` needed.
 
+Works correctly with all editors: `sed -i`, vim, nano, and any tool that saves via a temp file + rename (atomic saves) are all detected by watching the parent directory for `CREATE` events.
+
 ```sh
 # Start watcher in the foreground (Ctrl-C to stop)
 sysfig watch
@@ -195,7 +200,7 @@ sysfig deploy git@github.com:you/conf.git
 Or step by step:
 
 ```sh
-sysfig setup git@github.com:you/conf.git   # clone repo
+sysfig bootstrap git@github.com:you/conf.git   # clone repo
 sysfig apply                                # write configs to disk
 ```
 
@@ -217,6 +222,7 @@ sysfig creates a bare repo locally, pulls all branches from the bundle, seeds `s
 
 - **[Run hooks after apply](hooks.md):** Automatically reload systemd services or validate files (e.g. `nginx -t`) after a deploy.
 - **[Share secrets with remote machines](secrets.md):** Securely share encrypted configs with multiple nodes without sharing your master key.
+- **[Local integrity tracking](integrity.md):** Track sensitive files with `--hash-only` or `--local` so drift is detected immediately without content leaving the machine.
 - **[Bundle remotes RFC](rfcs/bundle-remotes.md):** Deep dive into the bundle transport design — atomic writes, verification, publication model, and future phases.
 - **[Config Sources](config-sources.md):** Render shared config templates (proxy, DNS, NTP) across many machines from a single bundle — from creating a profile to deploying on a new machine.
 
@@ -249,10 +255,14 @@ Replace `you` with your username and the path with wherever sysfig is installed 
 | `sysfig remote set <url>` | Set the remote URL (git or `bundle+local://` / `bundle+ssh://`) |
 | `sysfig remote show` | Show the current remote |
 | `sysfig keys generate` | Generate a master encryption key |
+| `sysfig undo <path>` | Discard unsaved edits, restore from last sync |
+| `sysfig undo <commit> <path>` | Rewind a file's history to a specific commit |
+| `sysfig audit` | Check integrity of local-only and hash-only files |
 | `sysfig log` | Show commit history |
 | `sysfig watch` | Auto-commit when tracked files change |
 | `sysfig watch install` | Install watch as a systemd user service |
-| `sysfig deploy <url>` | Clone and apply configs on a new machine |
+| `sysfig bootstrap <url>` | First-time setup: clone config repo on a new machine |
+| `sysfig deploy <url>` | Pull latest configs from remote and apply (ongoing) |
 | `sysfig doctor` | Check environment health |
 | `sysfig node add <name> <pubkey>` | Register a remote machine for multi-recipient encryption |
 | `sysfig node list` | Show registered nodes |

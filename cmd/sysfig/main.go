@@ -319,9 +319,38 @@ func newRootCmd() *cobra.Command {
 
 Version-control your config files in a bare git repo, deploy them across
 machines with a single command, encrypt secrets with age, track file
-ownership and permissions, and stay fully offline-capable.`,
+ownership and permissions, and stay fully offline-capable.
+
+Quick start (local, no remote):
+  sysfig init                        initialise on this machine
+  sysfig track /etc/nginx/nginx.conf start tracking a file
+  sysfig sync                        commit all changes
+
+Coming from another machine?
+  sysfig bootstrap <remote-url>      clone your config repo and apply`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Commands that are valid before init — don't gate these.
+			skip := map[string]bool{
+				"init": true, "bootstrap": true, "version": true,
+				"help": true, "doctor": true, "completion": true,
+				"__complete": true, "__completeNoDesc": true,
+			}
+			if skip[cmd.Name()] {
+				return nil
+			}
+			baseDir := resolveBaseDir("")
+			if _, err := os.Stat(filepath.Join(baseDir, "repo.git")); os.IsNotExist(err) {
+				return fmt.Errorf(
+					"sysfig is not initialised in %s\n\n"+
+						"  To start fresh:              sysfig init\n"+
+						"  To restore from remote repo: sysfig bootstrap <url>",
+					baseDir,
+				)
+			}
+			return nil
+		},
 	}
 
 	// --profile is a persistent flag: it applies to every subcommand and
@@ -340,7 +369,7 @@ ownership and permissions, and stay fully offline-capable.`,
 			},
 		},
 		newDeployCmd(),
-		newSetupCmd(),
+		newBootstrapCmd(),
 		newInitCmd(),
 		newTrackCmd(),
 		newUntrackCmd(),
@@ -355,8 +384,6 @@ ownership and permissions, and stay fully offline-capable.`,
 		newLogCmd(),
 		newShowCmd(),
 		newUndoCmd(),
-		newRollbackCmd(),
-		newRestoreCmd(),
 		newDoctorCmd(),
 		newSnapCmd(),
 		newWatchCmd(),
@@ -393,12 +420,6 @@ ownership and permissions, and stay fully offline-capable.`,
 			}
 		}
 	}
-
-	// Hidden alias kept for backward-compat.
-	cloneAlias := *newSetupCmd()
-	cloneAlias.Use = "clone"
-	cloneAlias.Hidden = true
-	root.AddCommand(&cloneAlias)
 
 	return root
 }
@@ -532,9 +553,10 @@ func newDeployCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "deploy [remote-url]",
-		Short: "Pull from remote and apply configs — one command for everything",
-		Long: `deploy is the recommended entry point for both first-time machines and
-routine updates. Idempotent: safe to re-run as many times as needed.
+		Short: "Pull latest configs from remote and apply them (ongoing use)",
+		Long: `deploy pulls the latest configs from your remote repo and applies them.
+Use this for routine updates on machines already set up with sysfig bootstrap.
+Idempotent: safe to re-run as many times as needed.
 
 With --host it SSHes into the target and pushes tracked files directly.
 No sysfig installation is required on the remote host.`,
@@ -737,9 +759,9 @@ No sysfig installation is required on the remote host.`,
 	return cmd
 }
 
-// ── setup ─────────────────────────────────────────────────────────────────────
+// ── bootstrap ─────────────────────────────────────────────────────────────────
 
-func newSetupCmd() *cobra.Command {
+func newBootstrapCmd() *cobra.Command {
 	var (
 		baseDir       string
 		configsOnly   bool
@@ -748,8 +770,8 @@ func newSetupCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "setup [remote-url]",
-		Short: "Bootstrap sysfig on a new machine from a remote config repo",
+		Use:   "bootstrap [remote-url]",
+		Short: "First-time setup: clone a remote config repo and apply configs on this machine",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
@@ -759,7 +781,7 @@ func newSetupCmd() *cobra.Command {
 			}
 
 			fmt.Println()
-			clrBold.Println("  sysfig setup — bootstrapping your environment")
+			clrBold.Println("  sysfig bootstrap — first-time setup")
 			fmt.Println(clrDim.Sprint("  ─────────────────────────────────────────────"))
 			fmt.Println()
 
@@ -778,7 +800,7 @@ func newSetupCmd() *cobra.Command {
 			step(1, "Remote config repository")
 			if remoteURL == "" {
 				if yes || !isatty() {
-					return fmt.Errorf("remote URL is required (use: sysfig setup <url>)")
+					return fmt.Errorf("remote URL is required (use: sysfig bootstrap <url>)")
 				}
 				fmt.Printf("     %s ", clrBold.Sprint("Remote URL:"))
 				scanner := bufio.NewScanner(os.Stdin)
@@ -976,7 +998,7 @@ func newTrackCmd() *cobra.Command {
 					HashOnly:  hashOnly,
 				})
 				if err != nil {
-					return err
+					return friendlyErr(err)
 				}
 
 				clrBold.Printf("Tracking (recursive): %s\n", targetPath)
@@ -1038,7 +1060,7 @@ func newTrackCmd() *cobra.Command {
 				HashOnly:   hashOnly,
 			})
 			if err != nil {
-				return err
+				return friendlyErr(err)
 			}
 			fixSudoOwnership(baseDir)
 
@@ -2848,242 +2870,6 @@ func newShowCmd() *cobra.Command {
 	return cmd
 }
 
-// ── rollback ──────────────────────────────────────────────────────────────────
-
-func newRollbackCmd() *cobra.Command {
-	var (
-		baseDir string
-		id      string
-		all     bool
-		dryRun  bool
-		force   bool
-	)
-
-	cmd := &cobra.Command{
-		Use:    "rollback <commit> [path]",
-		Short:  "Reset repo history to a previous commit (destructive)",
-		Hidden: true, // use 'undo' instead
-		Long: `Move the repo HEAD back to <commit>, discarding all commits after it.
-On-disk files are restored to match that commit state.
-
-This rewrites history — commits after <commit> are lost.
-Provide a system path or --all to scope the operation.
-
-Examples:
-  sysfig rollback 2b8e60e /home/aye7/.zshrc   # rollback one file by path
-  sysfig rollback 9b43458 --all               # rollback ALL tracked files (prompts)
-  sysfig rollback 9b43458 --all --force       # skip confirmation`,
-		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return fmt.Errorf("missing argument — provide a commit hash\n\n%s", cmd.UsageString())
-			}
-			if len(args) > 2 {
-				return fmt.Errorf("too many arguments (expected 1 or 2, got %d)", len(args))
-			}
-			return nil
-		},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			commit := args[0]
-			var pathArg string
-			if len(args) == 2 {
-				pathArg = filepath.Clean(args[1])
-			}
-
-			if pathArg == "" && id == "" && !all {
-				return fmt.Errorf("provide a path, --id <tracking-id>, or --all\n\nexample: sysfig rollback %s /home/aye7/.zshrc", commit)
-			}
-
-			baseDir = resolveBaseDir(baseDir)
-			repoDir := filepath.Join(baseDir, "repo.git")
-
-			// Resolve full commit hash.
-			fullHash, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
-				"rev-parse", "--verify", commit).Output()
-			if err != nil {
-				return fmt.Errorf("commit %q not found in repo", commit)
-			}
-			fullCommit := strings.TrimSpace(string(fullHash))
-
-			sm := state.NewManager(filepath.Join(baseDir, "state.json"))
-			s, err := sm.Load()
-			if err != nil {
-				return fmt.Errorf("rollback: load state: %w", err)
-			}
-
-			type rollbackTarget struct {
-				repoPath   string
-				systemPath string
-				branch     string
-			}
-			var targets []rollbackTarget
-			for _, rec := range s.Files {
-				sp := filepath.Clean(rec.SystemPath)
-				if pathArg != "" {
-					if sp != pathArg && !strings.HasPrefix(sp, pathArg+string(filepath.Separator)) {
-						continue
-					}
-				} else if id != "" && core.DeriveID(rec.SystemPath) != id {
-					continue
-				}
-				targets = append(targets, rollbackTarget{rec.RepoPath, rec.SystemPath, rec.Branch})
-			}
-
-			if len(targets) == 0 {
-				if pathArg != "" {
-					return fmt.Errorf("no tracked files found matching %q", pathArg)
-				}
-				if id != "" {
-					return fmt.Errorf("no tracked file found for id %q", id)
-				}
-				info("Nothing to rollback (no tracked files).")
-				return nil
-			}
-
-				// --all: true git reset — moves entire repo HEAD, affects all files.
-			// per-file (path/--id): creates a new revert commit so other files are untouched.
-			isFullReset := all
-
-			if dryRun {
-				for _, t := range targets {
-					fmt.Printf("  %s  would restore %s → %s\n",
-						clrDim.Sprint("[dry-run]"), clrInfo.Sprint(commit[:7]), t.systemPath)
-				}
-				if isFullReset {
-					fmt.Printf("  %s  would reset HEAD to %s (all other files affected)\n",
-						clrDim.Sprint("[dry-run]"), clrInfo.Sprint(commit[:7]))
-				} else {
-					fmt.Printf("  %s  would create revert commit (other files untouched)\n",
-						clrDim.Sprint("[dry-run]"))
-				}
-				return nil
-			}
-
-			if isFullReset {
-				if !force {
-					clrWarn.Printf("  ⚠  This will reset ALL track branches to %s and discard later commits.\n", commit[:7])
-					fmt.Printf("     %d file(s) will be restored on disk.\n", len(targets))
-					fmt.Print("  Continue? [y/N] ")
-					var answer string
-					fmt.Scanln(&answer)
-					if strings.ToLower(strings.TrimSpace(answer)) != "y" {
-						info("Aborted.")
-						return nil
-					}
-				}
-
-				// Reset each file's own track branch.
-				seen := map[string]bool{}
-				for _, t := range targets {
-					branch := t.branch
-					if branch == "" {
-						branch = "track/" + core.SanitizeBranchName(t.repoPath)
-					}
-					if seen[branch] {
-						continue
-					}
-					seen[branch] = true
-					ref := "refs/heads/" + branch
-					if out, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
-						"update-ref", ref, fullCommit).CombinedOutput(); err != nil {
-						warn("update-ref %s: %s", branch, strings.TrimSpace(string(out)))
-					}
-				}
-
-				for _, t := range targets {
-					content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
-						"show", fullCommit+":"+t.repoPath).Output()
-					if err != nil {
-						continue
-					}
-					var perm os.FileMode = 0o644
-					if fi, err := os.Stat(t.systemPath); err == nil {
-						perm = fi.Mode().Perm()
-					}
-					if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
-						return err
-					}
-					if err := os.WriteFile(t.systemPath, content, perm); err != nil {
-						fail("write %s: %v", t.systemPath, err)
-						continue
-					}
-					if sysHash, err := hash.File(t.systemPath); err == nil {
-						_ = sm.WithLock(func(st *types.State) error {
-							if r, ok := st.Files[core.DeriveID(t.systemPath)]; ok {
-								r.CurrentHash = sysHash
-							}
-							return nil
-						})
-					}
-					ok("Restored: %s", clrBold.Sprint(t.systemPath))
-				}
-				info("HEAD reset to %s", clrInfo.Sprint(commit[:7]))
-			} else {
-				// Per-file: reset only the file's own track branch + restore on disk.
-				// Other files' branches are completely untouched.
-				if !force {
-					clrWarn.Printf("  ⚠  This will reset %d file(s) to %s and discard later commits on their branches.\n", len(targets), commit[:7])
-					fmt.Print("  Continue? [y/N] ")
-					var answer string
-					fmt.Scanln(&answer)
-					if strings.ToLower(strings.TrimSpace(answer)) != "y" {
-						info("Aborted.")
-						return nil
-					}
-				}
-				for _, t := range targets {
-					branch := t.branch
-					if branch == "" {
-						branch = "track/" + core.SanitizeBranchName(t.repoPath)
-					}
-					// Reset only this file's track branch.
-					ref := "refs/heads/" + branch
-					if out, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
-						"update-ref", ref, fullCommit).CombinedOutput(); err != nil {
-						fail("git update-ref %s: %s", branch, strings.TrimSpace(string(out)))
-						continue
-					}
-					// Restore file on disk from that commit.
-					content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
-						"show", fullCommit+":"+t.repoPath).Output()
-					if err != nil {
-						fail("commit %s does not contain %s — skipping", commit[:7], t.repoPath)
-						continue
-					}
-					var perm os.FileMode = 0o644
-					if fi, err := os.Stat(t.systemPath); err == nil {
-						perm = fi.Mode().Perm()
-					}
-					if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
-						return err
-					}
-					if err := os.WriteFile(t.systemPath, content, perm); err != nil {
-						fail("write %s: %v", t.systemPath, err)
-						continue
-					}
-					if sysHash, err := hash.File(t.systemPath); err == nil {
-						_ = sm.WithLock(func(st *types.State) error {
-							if r, ok := st.Files[core.DeriveID(t.systemPath)]; ok {
-								r.CurrentHash = sysHash
-							}
-							return nil
-						})
-					}
-					ok("Rolled back: %s", clrBold.Sprint(t.systemPath))
-					fmt.Printf("     %s %s\n", clrDim.Sprint("branch reset to:"), clrInfo.Sprint(commit[:7]))
-				}
-			}
-			return nil
-		},
-	}
-
-	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
-	f.StringVar(&id, "id", "", "rollback only the file with this tracking ID")
-	f.BoolVar(&all, "all", false, "full git reset — resets entire repo HEAD (affects all files)")
-	f.BoolVar(&dryRun, "dry-run", false, "show what would happen without making changes")
-	f.BoolVar(&force, "force", false, "skip confirmation prompt")
-	return cmd
-}
 
 // ── undo ──────────────────────────────────────────────────────────────────────
 
@@ -3310,103 +3096,6 @@ Examples:
 	f.BoolVar(&all, "all", false, "apply to all tracked files (use with a commit hash)")
 	f.BoolVar(&force, "force", false, "skip confirmation prompt")
 	f.BoolVar(&dryRun, "dry-run", false, "show what would happen without making changes")
-	return cmd
-}
-
-// ── restore ───────────────────────────────────────────────────────────────────
-
-func newRestoreCmd() *cobra.Command {
-	var (
-		baseDir string
-		dryRun  bool
-	)
-
-	cmd := &cobra.Command{
-		Use:    "restore <path>",
-		Hidden: true, // use 'undo' instead
-		Short:  "Discard unsaved changes — restore file from last sync (HEAD)",
-		Long: `Overwrite a tracked file on disk with the version from the last sync.
-
-Useful when you edited a tracked file and want to undo the changes without
-needing a commit hash.
-
-Examples:
-  sysfig restore /etc/pacman.conf      # restore one file from HEAD
-  sysfig restore /etc/pacman.d/        # restore all files under a directory`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			baseDir = resolveBaseDir(baseDir)
-			repoDir := filepath.Join(baseDir, "repo.git")
-
-			sm := state.NewManager(filepath.Join(baseDir, "state.json"))
-			s, err := sm.Load()
-			if err != nil {
-				return fmt.Errorf("restore: load state: %w", err)
-			}
-
-			arg := filepath.Clean(args[0])
-
-			var targets []struct{ repoPath, systemPath, branch string }
-			for _, rec := range s.Files {
-				sp := filepath.Clean(rec.SystemPath)
-				if sp != arg && !strings.HasPrefix(sp, arg+string(filepath.Separator)) {
-					continue
-				}
-				branch := rec.Branch
-				if branch == "" {
-					branch = "track/" + core.SanitizeBranchName(rec.RepoPath)
-				}
-				targets = append(targets, struct{ repoPath, systemPath, branch string }{rec.RepoPath, rec.SystemPath, branch})
-			}
-
-			if len(targets) == 0 {
-				return fmt.Errorf("no tracked files found matching %q", arg)
-			}
-
-			for _, t := range targets {
-				if dryRun {
-					fmt.Printf("  %s  %s\n", clrDim.Sprint("[dry-run]"), t.systemPath)
-					continue
-				}
-
-				content, err := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
-					"show", t.branch+":"+t.repoPath).Output()
-				if err != nil {
-					fail("%s does not contain %s — never synced?", t.branch, t.repoPath)
-					continue
-				}
-
-				var perm os.FileMode = 0o644
-				if fi, err := os.Stat(t.systemPath); err == nil {
-					perm = fi.Mode().Perm()
-				}
-
-				if err := os.MkdirAll(filepath.Dir(t.systemPath), 0o755); err != nil {
-					return err
-				}
-				if err := os.WriteFile(t.systemPath, content, perm); err != nil {
-					fail("write %s: %v", t.systemPath, err)
-					continue
-				}
-
-				// Refresh state hash so status shows SYNCED again.
-				if sysHash, err := hash.File(t.systemPath); err == nil {
-					_ = sm.WithLock(func(st *types.State) error {
-						if r, ok := st.Files[core.DeriveID(t.systemPath)]; ok {
-							r.CurrentHash = sysHash
-						}
-						return nil
-					})
-				}
-				ok("Restored: %s", clrBold.Sprint(t.systemPath))
-			}
-			return nil
-		},
-	}
-
-	f := cmd.Flags()
-	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
-	f.BoolVar(&dryRun, "dry-run", false, "show what would be restored without writing")
 	return cmd
 }
 
@@ -4834,4 +4523,35 @@ Designed for use in systemd timers or cron jobs:
 	f.BoolVar(&all, "all", false, "audit all tracked files (not just local/hash-only)")
 	f.BoolVar(&quiet, "quiet", false, "suppress per-file output; exit code still reflects drift")
 	return cmd
+}
+
+// ── friendly error messages ───────────────────────────────────────────────────
+
+// friendlyErr translates raw core errors into actionable user-facing messages.
+// It checks error strings for known patterns and returns a cleaner error; if no
+// pattern matches the original error is returned unchanged.
+func friendlyErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "no such file or directory") || strings.Contains(msg, "resolve path"):
+		return fmt.Errorf("file not found — check the path and try again\n\n  hint: use an absolute path, e.g. /etc/nginx/nginx.conf")
+	case strings.Contains(msg, "is in the system denylist"):
+		return fmt.Errorf("that path is in the protected denylist and cannot be tracked\n\n  hint: edit ~/.sysfig/denylist to allow it, or choose a different file")
+	case strings.Contains(msg, "is not a regular file"):
+		return fmt.Errorf("the path exists but is not a regular file (it may be a directory or device)\n\n  hint: to track a directory use:  sysfig track --recursive <dir>")
+	case strings.Contains(msg, "already tracked"):
+		return fmt.Errorf("this file is already being tracked\n\n  hint: run sysfig status to see all tracked files")
+	case strings.Contains(msg, "master key not found"):
+		return fmt.Errorf("no encryption key found — generate one first\n\n  hint: run sysfig keys generate")
+	case strings.Contains(msg, "managed by source profile"):
+		// pass through — message is already clear and includes --force hint
+		return err
+	case strings.Contains(msg, "no remote configured") || strings.Contains(msg, "remote URL"):
+		return fmt.Errorf("no remote repository configured\n\n  hint: run sysfig remote add <url>  or  sysfig bootstrap <url>")
+	default:
+		return err
+	}
 }

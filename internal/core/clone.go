@@ -55,12 +55,13 @@ type manifestEntry struct {
 	Description string   `yaml:"description"`
 	SystemPath  string   `yaml:"system_path"`
 	RepoPath    string   `yaml:"repo_path"`
+	Branch      string   `yaml:"branch"`
+	Group       string   `yaml:"group"`
+	Encrypt     bool     `yaml:"encrypt"`
+	Template    bool     `yaml:"template"`
 	Encryption  struct {
 		Enabled bool `yaml:"enabled"`
 	} `yaml:"encryption"`
-	Template struct {
-		Enabled bool `yaml:"enabled"`
-	} `yaml:"template"`
 	Tags []string `yaml:"tags"`
 }
 
@@ -263,11 +264,13 @@ func Clone(opts CloneOptions) (*CloneResult, error) {
 				ID:          entry.ID,
 				SystemPath:  entry.SystemPath,
 				RepoPath:    repoRelPath, // git-relative, no leading slash
+				Branch:      entry.Branch,
+				Group:       entry.Group,
 				CurrentHash: fileHash,
 				LastSync:    &now,
 				Status:      types.StatusTracked,
-				Encrypt:     entry.Encryption.Enabled,
-				Template:    entry.Template.Enabled,
+				Encrypt:     entry.Encrypt || entry.Encryption.Enabled,
+				Template:    entry.Template,
 				Tags:        entry.Tags,
 			}
 			seeded++

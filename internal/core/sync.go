@@ -758,6 +758,8 @@ func buildManifest(s *types.State) ([]byte, error) {
 		ID         string   `yaml:"id"`
 		SystemPath string   `yaml:"system_path"`
 		RepoPath   string   `yaml:"repo_path"`
+		Branch     string   `yaml:"branch,omitempty"`
+		Group      string   `yaml:"group,omitempty"`
 		Encrypt    bool     `yaml:"encrypt,omitempty"`
 		Template   bool     `yaml:"template,omitempty"`
 		Tags       []string `yaml:"tags,omitempty"`
@@ -773,6 +775,8 @@ func buildManifest(s *types.State) ([]byte, error) {
 			ID:         rec.ID,
 			SystemPath: rec.SystemPath,
 			RepoPath:   rec.RepoPath,
+			Branch:     rec.Branch,
+			Group:      rec.Group,
 			Encrypt:    rec.Encrypt,
 			Template:   rec.Template,
 			Tags:       rec.Tags,

@@ -1,9 +1,11 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // WriteFileAtomic writes data to targetPath atomically:
@@ -64,6 +66,10 @@ func WriteFileAtomic(targetPath string, data []byte, perm os.FileMode) error {
 
 	// Atomically replace targetPath with the fully written temp file.
 	if err := os.Rename(tmpPath, targetPath); err != nil {
+		var errno syscall.Errno
+		if errors.As(err, &errno) && errno == syscall.EBUSY {
+			return fmt.Errorf("fs: cannot write %q — file is in use by the system (bind-mounted or locked)", targetPath)
+		}
 		return fmt.Errorf("fs: rename temp file to %q: %w", targetPath, err)
 	}
 

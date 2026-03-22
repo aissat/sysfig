@@ -57,15 +57,22 @@ func Watch(opts WatchOptions, stop <-chan struct{}) error {
 		return paths, nil
 	}
 
-	// Register all tracked paths with the OS watcher.
+	// Register all tracked paths AND their parent directories with the OS
+	// watcher. Watching the parent is required to detect atomic saves (e.g.
+	// `sed -i`, vim, nano) that replace the file with a new inode: inotify
+	// loses the watch on the old inode, but fires CREATE/RENAME on the dir.
 	paths, err := loadPaths()
 	if err != nil {
 		return fmt.Errorf("core: watch: load state: %w", err)
 	}
+	// trackedFiles is the set of absolute paths we care about — used to filter
+	// directory events so we only react to changes in tracked files.
+	trackedFiles := map[string]struct{}{}
 	for _, p := range paths {
-		if err := watcher.Add(p); err != nil {
-			// Non-fatal: file may not exist yet (MISSING status).
-			_ = err
+		trackedFiles[p] = struct{}{}
+		_ = watcher.Add(p) // non-fatal if file missing
+		if dir := filepath.Dir(p); dir != "." {
+			_ = watcher.Add(dir) // non-fatal
 		}
 	}
 
@@ -101,7 +108,18 @@ func Watch(opts WatchOptions, stop <-chan struct{}) error {
 				return nil
 			}
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
-				pending[event.Name] = struct{}{}
+				// If the event is on a directory (parent watch), only proceed
+				// when the affected path is one of our tracked files.
+				name := event.Name
+				if _, isTracked := trackedFiles[name]; !isTracked {
+					// Not a directly tracked file — skip unless it's a dir event
+					// that happens to land on a tracked file's path (no-op check).
+					continue
+				}
+				// Re-register the (possibly new) inode so future writes are
+				// caught even when the editor replaced the file atomically.
+				_ = watcher.Add(name)
+				pending[name] = struct{}{}
 				resetTimer()
 			}
 
