@@ -154,26 +154,6 @@ func gitCommit(repoDir, message string, timeout time.Duration) error {
 	return gitBareRun(repoDir, timeout, []string{"GIT_WORK_TREE=/"}, "commit", "-m", message)
 }
 
-// isNothingToCommitBare returns true when the bare repo's index has no staged
-// changes relative to HEAD (i.e. `git status --porcelain` is empty).
-func isNothingToCommitBare(repoDir string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
-	cmd.Env = append(os.Environ(),
-		"GIT_DIR="+repoDir,
-		"GIT_WORK_TREE=/",
-	)
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-
-	if err := cmd.Run(); err != nil {
-		return false
-	}
-	return len(bytes.TrimSpace(buf.Bytes())) == 0
-}
 
 // gitHashObject writes data to the bare repo's object store and returns the
 // 40-character blob SHA. Used to stage encrypted content without touching the

@@ -724,31 +724,6 @@ func advanceBareHEAD(repoDir string) error {
 	return fmt.Errorf("advanceBareHEAD: could not advance refs/heads/%s", branch)
 }
 
-// isNothingToCommit returns true when the bare repo index has no staged
-// changes relative to HEAD.
-//
-// We use `git diff --cached --quiet` rather than `git status --porcelain`
-// because status (with GIT_WORK_TREE=/) also reports unstaged worktree
-// differences which are irrelevant here — we only care whether the index
-// has changes that would be captured by a `git commit`.
-//
-// Exit codes: 0 = nothing staged (index == HEAD), 1 = staged changes exist.
-func isNothingToCommit(repoDir string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
-	cmd.Env = append(os.Environ(), "GIT_DIR="+repoDir)
-
-	err := cmd.Run()
-	if err == nil {
-		return true // exit 0 → index matches HEAD, nothing staged
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-		return false // exit 1 → staged changes present
-	}
-	return false // unexpected error → assume not clean
-}
 
 // buildManifest generates sysfig.yaml bytes from current state so that
 // `sysfig setup` on a new host can seed state.json automatically.

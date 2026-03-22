@@ -185,24 +185,6 @@ func Doctor(opts DoctorOptions) *DoctorResult {
 			})
 		}
 
-		// Uncommitted staged changes?
-		if !isNothingToCommitBare(repoDir) {
-			add(DoctorFinding{
-				Category: "git repo",
-				Label:    "uncommitted changes",
-				Severity: SeverityWarn,
-				Detail:   "staged changes exist that have not been committed",
-				Hint:     "Run: sysfig sync",
-			})
-		} else {
-			add(DoctorFinding{
-				Category: "git repo",
-				Label:    "uncommitted changes",
-				Severity: SeverityOK,
-				Detail:   "index is clean",
-			})
-		}
-
 		// Remote configured?
 		remoteName, remoteURL := doctorRemote(repoDir)
 		if remoteName == "" {
@@ -469,7 +451,13 @@ func doctorCheckFileHealth(add func(DoctorFinding), st *types.State, repoDir str
 			if branch == "" {
 				branch = "track/" + SanitizeBranchName(rec.RepoPath)
 			}
-			if _, err := gitShowBytesAt(repoDir, branch, rec.RepoPath); err != nil {
+			_, err := gitShowBytesAt(repoDir, branch, rec.RepoPath)
+			// Fall back to HEAD — files tracked under the old single-branch
+			// architecture live on HEAD, not on a named track branch.
+			if err != nil {
+				_, err = gitShowBytesAt(repoDir, "HEAD", rec.RepoPath)
+			}
+			if err != nil {
 				missingBlob++
 			}
 		}
