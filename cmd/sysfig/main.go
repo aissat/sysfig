@@ -549,6 +549,7 @@ func newDeployCmd() *cobra.Command {
 		host          string
 		sshKey        string
 		sshPort       int
+		sshSudo       bool
 	)
 
 	cmd := &cobra.Command{
@@ -575,6 +576,7 @@ No sysfig installation is required on the remote host.`,
 				fmt.Println(clrDim.Sprint("  ─────────────────────────────────────────────"))
 				fmt.Println()
 
+				hasSudoHint := false
 				result, err := core.RemoteDeploy(core.RemoteDeployOptions{
 					Host:          host,
 					SSHKey:        sshKey,
@@ -583,38 +585,32 @@ No sysfig installation is required on the remote host.`,
 					IDs:           ids,
 					DryRun:        dryRun,
 					SkipEncrypted: skipEncrypted,
+					Sudo:          sshSudo,
+					Progress: func(r core.RemoteFileResult) {
+						switch {
+						case r.Err != nil:
+							fail("%s  %s", clrErr.Sprint(r.ID), clrErr.Sprint(r.Err.Error()))
+							if !hasSudoHint && strings.Contains(r.Err.Error(), "permission denied") && !sshSudo {
+								hasSudoHint = true
+							}
+						case r.Skipped && r.SkipReason == "dry-run":
+							fmt.Printf("  %s %s → %s\n", clrDim.Sprint("[dry-run]"), clrInfo.Sprint(r.ID), clrDim.Sprint(r.SystemPath))
+						case r.Skipped:
+							fmt.Printf("  %s %s  %s\n", clrDim.Sprint("―"), clrDim.Sprint(r.ID), clrDim.Sprintf("(%s)", r.SkipReason))
+						default:
+							ok("%s → %s", clrBold.Sprint(r.ID), r.SystemPath)
+						}
+					},
 				})
 				if err != nil {
 					return err
 				}
 
-				deployIDW := 0
-				for _, r := range result.Results {
-					if len(r.ID) > deployIDW { deployIDW = len(r.ID) }
-				}
-				deployIDW += 2
-
-				for _, r := range result.Results {
-					switch {
-					case r.Err != nil:
-						fail("%s  %s", clrErr.Sprint(r.ID), clrErr.Sprint(r.Err.Error()))
-					case r.Skipped && r.SkipReason == "dry-run":
-						fmt.Printf("  %s %s %s\n",
-							clrDim.Sprint("[dry-run]"),
-							clrInfo.Sprint(pad(r.ID, deployIDW)),
-							clrDim.Sprint("→ "+r.SystemPath))
-					case r.Skipped:
-						fmt.Printf("  %s %s  %s\n",
-							clrDim.Sprint("―"),
-							clrDim.Sprint(pad(r.ID, deployIDW)),
-							clrDim.Sprintf("(%s)", r.SkipReason))
-					default:
-						ok("%s → %s", clrBold.Sprint(pad(r.ID, deployIDW)), r.SystemPath)
-					}
-				}
-
 				if len(result.Results) == 0 {
 					info("Nothing to deploy (no tracked files).")
+				}
+				if hasSudoHint {
+					fmt.Printf("  %s\n", clrDim.Sprint("Hint: /etc/ files need root — re-run with --sudo to use sudo on the remote."))
 				}
 
 				fmt.Println()
@@ -756,6 +752,7 @@ No sysfig installation is required on the remote host.`,
 	f.StringVar(&host, "host", "", "SSH target (user@hostname) — push files to remote without sysfig installed there")
 	f.StringVar(&sshKey, "ssh-key", "", "path to SSH identity file (default: use ssh-agent)")
 	f.IntVar(&sshPort, "ssh-port", 22, "SSH port on the remote host")
+	f.BoolVar(&sshSudo, "sudo", false, "wrap remote writes with sudo (required for /etc/ and root-owned paths)")
 	return cmd
 }
 
@@ -4563,33 +4560,61 @@ Designed for use in systemd timers or cron jobs:
 				os.Exit(2)
 			}
 
-			var checked, drifted int
+			// Collect in-scope results.
+			type auditRow struct {
+				path   string
+				id     string
+				status core.FileStatusLabel
+			}
+			var rows []auditRow
 			for _, r := range results {
-				// Determine whether this result is in scope.
 				inScope := all ||
 					(hashOnly && r.HashOnly) ||
 					(local && r.LocalOnly) ||
 					(!all && !hashOnly && !local && (r.HashOnly || r.LocalOnly))
-
 				if !inScope {
 					continue
 				}
-				checked++
+				rows = append(rows, auditRow{r.SystemPath, r.ID, r.Status})
+			}
 
-				clean := r.Status == core.StatusSynced
-				if !clean {
-					drifted++
-					if !quiet {
-						label := clrErr.Sprint(string(r.Status))
-						fmt.Printf("  %s  %s\n", label, r.SystemPath)
+			var drifted int
+			if !quiet && len(rows) > 0 {
+				// Compute path column width.
+				pathW := len("PATH")
+				for _, r := range rows {
+					if len(r.path) > pathW {
+						pathW = len(r.path)
 					}
-				} else if !quiet {
-					fmt.Printf("  %s  %s\n", clrOK.Sprint("OK     "), r.SystemPath)
+				}
+				pathW += 2
+				const hashW = 10
+
+				fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint("STATUS"))
+				divider()
+				for _, r := range rows {
+					clean := r.status == core.StatusSynced
+					statusStr := strings.ToLower(string(r.status))
+					hashCol := clrDim.Sprint(pad(r.id, hashW))
+					if clean {
+						fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pad(r.path, pathW)), hashCol, clrSynced.Sprint("✓ "+statusStr))
+					} else {
+						drifted++
+						fmt.Printf("%s  %s  %s\n", clrDirty.Sprint(pad(r.path, pathW)), hashCol, clrErr.Sprint("✗ "+statusStr))
+					}
+				}
+				divider()
+				fmt.Println()
+			} else {
+				for _, r := range rows {
+					if r.status != core.StatusSynced {
+						drifted++
+					}
 				}
 			}
 
+			checked := len(rows)
 			if !quiet {
-				fmt.Println()
 				if drifted > 0 {
 					fmt.Printf("  %s\n", clrErr.Sprintf("Audit: %d/%d file(s) drifted", drifted, checked))
 				} else {
