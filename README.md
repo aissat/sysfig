@@ -148,6 +148,7 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
   - [setup](#setup)
   - [init](#init)
   - [track](#track)
+  - [audit](#audit)
   - [untrack](#untrack)
   - [apply](#apply)
   - [status](#status)
@@ -167,6 +168,7 @@ sysfig undo a3f2b1c --all --force               # rewind every track branch (no 
 - [Configuration File: sysfig.yaml](#configuration-file-sysfigyaml)
 - [state.json vs sysfig.yaml](#statejson-vs-sysfigyaml)
 - [Encryption](#encryption)
+- [Local Integrity Tracking](#local-integrity-tracking)
 - [File Ownership & Permissions](#file-ownership--permissions)
 - [Hooks](#hooks)
 - [Directory Layout](#directory-layout)
@@ -498,14 +500,18 @@ Copies the file into the bare git repo's index, records its BLAKE3 hash and `uid
 
 **Options:**
 
-| Flag          | Default     | Description                                              |
-| ------------- | ----------- | -------------------------------------------------------- |
-| `--id`        | derived     | Explicit tracking ID. Derived from path if omitted.      |
-| `--tag`       | —           | Label to attach (repeatable: `--tag web --tag nginx`)    |
-| `--encrypt`   | `false`     | Encrypt the file at rest in the repo                     |
-| `--template`  | `false`     | Mark as a template with `{{variable}}` expansions        |
-| `--exclude`   | —           | Path or glob to skip when tracking a directory (repeatable) |
-| `--base-dir`  | `~/.sysfig` | Directory where sysfig stores its data                   |
+| Flag           | Default     | Description                                              |
+| -------------- | ----------- | -------------------------------------------------------- |
+| `--id`         | derived     | Explicit tracking ID. Derived from path if omitted.      |
+| `--tag`        | —           | Label to attach (repeatable: `--tag web --tag nginx`)    |
+| `--encrypt`    | `false`     | Encrypt the file at rest in the repo                     |
+| `--template`   | `false`     | Mark as a template with `{{variable}}` expansions        |
+| `--local`      | `false`     | Track locally only — content stored in a `local/` branch that is never pushed to remote. Full git history, diffs, and undo work locally. |
+| `--hash-only`  | `false`     | Record the hash only — no content stored anywhere. Reports `TAMPERED` on drift. Ideal for files too sensitive to store even locally. |
+| `--exclude`    | —           | Path or glob to skip when tracking a directory (repeatable) |
+| `--base-dir`   | `~/.sysfig` | Directory where sysfig stores its data                   |
+
+> `--local` and `--hash-only` are mutually exclusive. See [docs/integrity.md](docs/integrity.md) for a full guide.
 
 **ID derivation:**
 
@@ -527,6 +533,12 @@ sysfig track /etc/nginx/nginx.conf --id nginx_main --tag web --tag nginx
 
 # Encrypt a secret
 sysfig track /etc/myapp/secrets.env --encrypt
+
+# Track a sensitive file locally — full history, never pushed to remote
+sysfig track --local /etc/wireguard/wg0.conf
+
+# Track a file for integrity monitoring only — no content stored
+sysfig track --hash-only /etc/ssh/sshd_config
 
 # Track an entire directory — auto-detected, no --recursive flag needed
 # New files added to the directory later are detected by `sysfig status` (shown as NEW)
@@ -575,6 +587,62 @@ Tracking /etc/nginx/nginx.conf
   ✓ Repo: etc/nginx/nginx.conf
   ✓ Hash: 3a7f2b...
 ```
+
+---
+
+### `audit`
+
+Check integrity of local-only and hash-only tracked files.
+
+```
+sysfig audit [options]
+```
+
+Checks all files tracked with `--local` or `--hash-only` and reports any that have drifted. Designed for use in scripts, cron jobs, and systemd timers.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | all checked files are clean |
+| `1` | one or more files are `TAMPERED` or `DIRTY` |
+| `2` | error (could not read state or hash a file) |
+
+**Options:**
+
+| Flag           | Default | Description |
+| -------------- | ------- | ----------- |
+| `--hash-only`  | `false` | Audit only hash-only tracked files |
+| `--local`      | `false` | Audit only local-only tracked files |
+| `--all`        | `false` | Audit all tracked files (not just local/hash-only) |
+| `--quiet`      | `false` | Suppress per-file output; exit code still reflects drift |
+| `--base-dir`   | `~/.sysfig` | sysfig data directory |
+
+**Examples:**
+
+```bash
+# Check all local/hash-only files (default):
+sysfig audit
+
+# Check only files tracked with --hash-only:
+sysfig audit --hash-only
+
+# Quiet mode for scripts/timers — exit code only:
+sysfig audit --quiet && echo "clean" || echo "drift detected"
+
+# systemd timer (see contrib/systemd/):
+sysfig audit --quiet  # exits 1 if any file drifted → marks unit as failed
+```
+
+**Example output:**
+```
+  DIRTY    /etc/wireguard/wg0.conf
+  TAMPERED /etc/ssh/sshd_config
+
+  Audit: 2/2 file(s) drifted
+```
+
+See [docs/integrity.md](docs/integrity.md) for full details including systemd timer setup.
 
 ---
 
@@ -1711,6 +1779,44 @@ sysfig setup --skip-encrypted git@github.com:you/myconfigs.git
 
 ---
 
+## Local Integrity Tracking
+
+sysfig can track sensitive files without ever pushing them to the remote repo.
+
+| Flag | Stored where | Synced locally | Pushed |
+|------|-------------|---------------|--------|
+| `--local` | `~/.sysfig/repo.git` on `local/<path>` branch | ✅ yes | ❌ never |
+| `--hash-only` | hash only in `state.json` | ❌ no | ❌ never |
+
+```bash
+# Full local history, zero remote exposure:
+sysfig track --local /etc/wireguard/wg0.conf
+
+# After rotating keys — commit the change with a message:
+sysfig sync /etc/wireguard/wg0.conf -m "rotated VPN keys"
+sysfig log /etc/wireguard/wg0.conf
+
+# Tamper detection only — nothing stored:
+sysfig track --hash-only /etc/ssh/sshd_config
+
+# Check for drift:
+sysfig audit          # exits 1 if anything changed
+sysfig audit --quiet  # silent, for timers/scripts
+```
+
+`sysfig status` shows `local` or `hash` tags and the `TAMPERED` status for hash-only drift:
+
+```
+/etc/wireguard/wg0.conf     0b5aac93    DIRTY    local
+/etc/ssh/sshd_config        a26787d2    TAMPERED hash
+```
+
+A systemd timer is available in `contrib/systemd/` for automated hourly checks.
+
+See [docs/integrity.md](docs/integrity.md) for the full guide.
+
+---
+
 ## File Ownership & Permissions
 
 sysfig records `uid`, `gid`, and `mode` for every tracked file. During `sysfig apply`, permissions are restored exactly. Ownership is restored where possible (may require running with `sudo` for system files).
@@ -1825,6 +1931,7 @@ Adding a new service requires only editing `hooks.yaml` — no code changes.
 | `sync`     | Success (or nothing to do)| —                              | Error |
 | `push`     | Success                   | —                              | Error |
 | `pull`     | Success / already up-to-date | —                           | Error |
+| `audit`    | All checked files clean   | Any TAMPERED / DIRTY           | Error |
 | All others | Success                   | —                              | Error |
 
 ---
@@ -1862,6 +1969,8 @@ If `sysfig setup` detects the bare repo already exists locally, it shows hints a
 | Hook injection          | Typed action list only (`reload`, `restart`); no arbitrary shell       |
 | Repository poisoning    | Bare repo is local; remote is never pulled automatically               |
 | Sensitive file tracking | Built-in denylist; blocked paths cannot be tracked regardless of flags |
+| Local-only branch leak  | `local/*` branches excluded from push refspec and bundle creation; they can never reach the remote even by accident |
+| Tamper detection        | `--hash-only` records a BLAKE3 hash of sensitive files without storing any content; `sysfig audit` exits 1 on drift |
 
 **Denylist — these paths are always blocked:**
 

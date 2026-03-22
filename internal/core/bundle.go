@@ -135,9 +135,20 @@ func BundlePush(opts BundlePushOptions) error {
 	tmp.Close()
 	defer os.Remove(tmpPath)
 
-	// git bundle create <tmp> --all
-	if err := bundleGitRun(opts.RepoDir, 60*time.Second,
-		"bundle", "create", tmpPath, "--all"); err != nil {
+	// Collect refs to bundle: all track/* branches + manifest (if exists).
+	// local/* branches are intentionally excluded — they must never leave this machine.
+	refs, err := listBranchRefs(opts.RepoDir, "refs/heads/track/")
+	if err != nil {
+		return fmt.Errorf("bundle push: list refs: %w", err)
+	}
+	if hasBranch(opts.RepoDir, "manifest") {
+		refs = append(refs, "refs/heads/manifest")
+	}
+	if len(refs) == 0 {
+		return fmt.Errorf("bundle push: nothing to bundle (no track/* branches found)")
+	}
+	bundleArgs := append([]string{"bundle", "create", tmpPath}, refs...)
+	if err := bundleGitRun(opts.RepoDir, 60*time.Second, bundleArgs...); err != nil {
 		return fmt.Errorf("bundle push: git bundle create: %w", err)
 	}
 

@@ -62,6 +62,8 @@ func statusColored(s core.FileStatusLabel, label string) string {
 		return clrEncrypted.Sprint(label)
 	case core.StatusNew:
 		return clrNew.Sprint(label)
+	case core.StatusTampered:
+		return clrErr.Sprint(label)
 	default:
 		return label
 	}
@@ -361,6 +363,7 @@ ownership and permissions, and stay fully offline-capable.`,
 		newProfileCmd(),
 		newNodeCmd(),
 		newSourceCmd(),
+		newAuditCmd(),
 	)
 
 	// Force cobra to register the built-in completion subcommands now so we
@@ -927,6 +930,8 @@ func newTrackCmd() *cobra.Command {
 		sysRoot   string
 		tags      []string
 		excludes  []string
+		localOnly bool
+		hashOnly  bool
 	)
 
 	cmd := &cobra.Command{
@@ -953,16 +958,22 @@ func newTrackCmd() *cobra.Command {
 				}
 			}
 
+			if localOnly && hashOnly {
+				return fmt.Errorf("--local and --hash-only are mutually exclusive")
+			}
+
 			if recursive {
 				summary, err := core.TrackDir(core.TrackDirOptions{
-					DirPath:  targetPath,
-					RepoDir:  repoDir,
-					StateDir: baseDir,
-					Tags:     tags,
-					Encrypt:  encrypt,
-					Template: template,
-					SysRoot:  resolveSysRoot(sysRoot),
-					Excludes: excludes,
+					DirPath:   targetPath,
+					RepoDir:   repoDir,
+					StateDir:  baseDir,
+					Tags:      tags,
+					Encrypt:   encrypt,
+					Template:  template,
+					SysRoot:   resolveSysRoot(sysRoot),
+					Excludes:  excludes,
+					LocalOnly: localOnly,
+					HashOnly:  hashOnly,
 				})
 				if err != nil {
 					return err
@@ -1007,7 +1018,8 @@ func newTrackCmd() *cobra.Command {
 				}
 
 				// Auto-sync only the newly tracked files.
-				if len(trackedIDs) > 0 {
+				// LocalOnly and HashOnly files have no repo content to sync.
+				if len(trackedIDs) > 0 && !localOnly && !hashOnly {
 					autoSyncTracked(baseDir, trackedIDs)
 				}
 				return nil
@@ -1022,6 +1034,8 @@ func newTrackCmd() *cobra.Command {
 				Encrypt:    encrypt,
 				Template:   template,
 				SysRoot:    resolveSysRoot(sysRoot),
+				LocalOnly:  localOnly,
+				HashOnly:   hashOnly,
 			})
 			if err != nil {
 				return err
@@ -1036,9 +1050,18 @@ func newTrackCmd() *cobra.Command {
 			if encrypt {
 				ok("%s", clrEncrypted.Sprint("Encrypted: yes (age + HKDF-SHA256 per-file key)"))
 			}
+			if localOnly {
+				ok("%s", clrDim.Sprint("Mode:  local-only (never pushed to remote)"))
+			}
+			if hashOnly {
+				ok("%s", clrDim.Sprint("Mode:  hash-only (integrity monitoring, no content stored)"))
+			}
 
 			// Auto-sync only this newly tracked file.
-			autoSyncTracked(baseDir, []string{result.ID})
+			// LocalOnly and HashOnly files have no repo content to sync.
+			if !localOnly && !hashOnly {
+				autoSyncTracked(baseDir, []string{result.ID})
+			}
 			return nil
 		},
 	}
@@ -1052,6 +1075,8 @@ func newTrackCmd() *cobra.Command {
 	f.StringVar(&sysRoot, "sys-root", "", "strip this prefix from paths before storing in repo and state")
 	f.StringArrayVar(&tags, "tag", nil, "label to attach (repeatable)")
 	f.StringArrayVar(&excludes, "exclude", nil, "path or glob to skip during --recursive walk (repeatable)")
+	f.BoolVar(&localOnly, "local", false, "track locally only — never staged in git or pushed to remote")
+	f.BoolVar(&hashOnly, "hash-only", false, "record hash only for integrity monitoring — no content stored in repo")
 	return cmd
 }
 
@@ -1432,10 +1457,17 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 			rowSlug = files[0].Slug
 		}
 		// grp = any file in this row was tracked via `sysfig track /dir/` (Group != "").
+		// local = tracked with --local (never pushed to remote).
+		// hash = tracked with --hash-only (integrity monitoring only).
 		// no tag = tracked individually via `sysfig track /path/to/file`.
 		isGroup := files[0].Group != ""
 		typeTag := ""
-		if isGroup {
+		switch {
+		case files[0].HashOnly:
+			typeTag = "  " + clrDim.Sprint("hash")
+		case files[0].LocalOnly:
+			typeTag = "  " + clrDim.Sprint("local")
+		case isGroup:
 			typeTag = "  " + clrDim.Sprint("grp")
 		}
 
@@ -4708,5 +4740,95 @@ func newSourcePullCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	return cmd
+}
+
+// ── audit ─────────────────────────────────────────────────────────────────────
+
+// newAuditCmd returns the `sysfig audit` command.
+//
+// Exit codes:
+//
+//	0  all audited files are clean (SYNCED)
+//	1  one or more files are TAMPERED or DIRTY
+//	2  an error prevented the audit from completing
+func newAuditCmd() *cobra.Command {
+	var (
+		baseDir  string
+		hashOnly bool
+		local    bool
+		all      bool
+		quiet    bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "audit",
+		Short: "Check integrity of local-only and hash-only tracked files",
+		Long: `audit checks tracked files that are flagged as --local or --hash-only
+and reports any that have drifted from their recorded hash.
+
+Exit codes:
+  0  all checked files are clean
+  1  one or more files are TAMPERED or DIRTY
+  2  error (could not read state or hash a file)
+
+Designed for use in systemd timers or cron jobs:
+  sysfig audit --hash-only  # exits 1 if any hash-only file is TAMPERED`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+
+			results, err := core.Status(baseDir, nil, "")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "audit: %v\n", err)
+				os.Exit(2)
+			}
+
+			var checked, drifted int
+			for _, r := range results {
+				// Determine whether this result is in scope.
+				inScope := all ||
+					(hashOnly && r.HashOnly) ||
+					(local && r.LocalOnly) ||
+					(!all && !hashOnly && !local && (r.HashOnly || r.LocalOnly))
+
+				if !inScope {
+					continue
+				}
+				checked++
+
+				clean := r.Status == core.StatusSynced
+				if !clean {
+					drifted++
+					if !quiet {
+						label := clrErr.Sprint(string(r.Status))
+						fmt.Printf("  %s  %s\n", label, r.SystemPath)
+					}
+				} else if !quiet {
+					fmt.Printf("  %s  %s\n", clrOK.Sprint("OK     "), r.SystemPath)
+				}
+			}
+
+			if !quiet {
+				fmt.Println()
+				if drifted > 0 {
+					fmt.Printf("  %s\n", clrErr.Sprintf("Audit: %d/%d file(s) drifted", drifted, checked))
+				} else {
+					fmt.Printf("  %s\n", clrOK.Sprintf("Audit: %d/%d file(s) clean", checked, checked))
+				}
+			}
+
+			if drifted > 0 {
+				os.Exit(1)
+			}
+			return nil
+		},
+	}
+
+	f := cmd.Flags()
+	f.StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	f.BoolVar(&hashOnly, "hash-only", false, "audit only hash-only tracked files")
+	f.BoolVar(&local, "local", false, "audit only local-only tracked files")
+	f.BoolVar(&all, "all", false, "audit all tracked files (not just local/hash-only)")
+	f.BoolVar(&quiet, "quiet", false, "suppress per-file output; exit code still reflects drift")
 	return cmd
 }

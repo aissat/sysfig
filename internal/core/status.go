@@ -24,6 +24,7 @@ const (
 	StatusPending   FileStatusLabel = "PENDING"  // repo ahead of system; apply needed
 	StatusNew       FileStatusLabel = "NEW"       // file exists on disk but not yet tracked
 	StatusSource    FileStatusLabel = "SOURCE"    // file is managed by a Config Source profile
+	StatusTampered  FileStatusLabel = "TAMPERED"  // hash-only: on-disk hash differs from recorded
 )
 
 // FileStatusResult holds the computed status for one tracked file.
@@ -43,6 +44,9 @@ type FileStatusResult struct {
 	MetaDrift    bool            // true if any metadata field differs
 	RecordedMeta *types.FileMeta // what state.json holds
 	CurrentMeta  *types.FileMeta // what the live system file has right now
+	// LocalOnly and HashOnly mirror the flags in the underlying FileRecord.
+	LocalOnly bool
+	HashOnly  bool
 }
 
 // Status loads state.json, then for each tracked FileRecord performs a
@@ -106,9 +110,30 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 			RecordedHash: rec.CurrentHash,
 			Encrypted:    rec.Encrypt,
 			Group:        rec.Group,
+			LocalOnly:    rec.LocalOnly,
+			HashOnly:     rec.HashOnly,
 		}
 
 		switch {
+		case rec.HashOnly:
+			// Hash-only: compare current on-disk hash against the recorded hash.
+			// No repo copy exists. Reports SYNCED (unchanged) or TAMPERED (drifted).
+			if _, err := os.Stat(sysPath); os.IsNotExist(err) {
+				r.Status = StatusMissing
+				r.CurrentHash = ""
+				break
+			}
+			sysHash, err := hash.File(sysPath)
+			if err != nil {
+				return nil, fmt.Errorf("core: status: hash system %q: %w", sysPath, err)
+			}
+			r.CurrentHash = sysHash
+			if sysHash == rec.CurrentHash {
+				r.Status = StatusSynced
+			} else {
+				r.Status = StatusTampered
+			}
+
 		case rec.Encrypt:
 			// Encrypted files cannot be compared — report as locked.
 			r.Status = StatusEncrypted

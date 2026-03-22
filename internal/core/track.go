@@ -79,6 +79,13 @@ type TrackOptions struct {
 	// Config Source profile. Without Force, Track returns an error if the path
 	// is source-managed, to protect the ownership model.
 	Force bool
+	// LocalOnly marks the file as local-only — it is recorded in state.json
+	// but never staged in the git repo or pushed to the remote.
+	LocalOnly bool
+	// HashOnly marks the file for hash-only integrity tracking — the content
+	// hash is recorded but no copy is stored in the repo. The file is never
+	// staged or pushed.
+	HashOnly bool
 }
 
 // TrackResult is returned by Track on success.
@@ -220,7 +227,11 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 	}
 
 	// 6. Stage the file into the bare repo index.
-	if opts.Encrypt {
+	// HashOnly files are never staged — only their hash is recorded.
+	// LocalOnly files are staged normally in the local repo (just never pushed).
+	if opts.HashOnly {
+		// Skip all git staging — hash-only records store no content.
+	} else if opts.Encrypt {
 		// Encrypted path: encrypt the plaintext in memory, then store the
 		// ciphertext as a git blob via hash-object + update-index.
 		keysDir := filepath.Join(opts.StateDir, "keys")
@@ -284,11 +295,21 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		now := time.Now()
 		// Branch name: "track/<repoPath>" for individual files,
 		// "track/<group>" for directory-tracked groups.
-		branchBase := repoRel
-		if opts.Group != "" {
-			branchBase = strings.TrimPrefix(opts.Group, "/")
+		// HashOnly files have no branch — nothing is staged.
+		// LocalOnly files use a "local/" prefix so push can exclude them.
+		// Normal files use the "track/" prefix.
+		var branch string
+		if !opts.HashOnly {
+			branchBase := repoRel
+			if opts.Group != "" {
+				branchBase = strings.TrimPrefix(opts.Group, "/")
+			}
+			prefix := "track/"
+			if opts.LocalOnly {
+				prefix = "local/"
+			}
+			branch = resolveTrackBranch(opts.RepoDir, prefix+SanitizeBranchName(branchBase))
 		}
-		branch := resolveTrackBranch(opts.RepoDir, "track/"+SanitizeBranchName(branchBase))
 
 		s.Files[id] = &types.FileRecord{
 			ID:          id,
@@ -303,6 +324,8 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 			Meta:        meta,
 			Group:       opts.Group,
 			Branch:      branch,
+			LocalOnly:   opts.LocalOnly,
+			HashOnly:    opts.HashOnly,
 		}
 		return nil
 	}); err != nil {
@@ -421,7 +444,9 @@ type TrackDirOptions struct {
 	// the recursive walk. Each entry is matched against the absolute file
 	// path using filepath.Match; a plain path prefix also matches any file
 	// underneath it (i.e. excluding /etc/ssl skips /etc/ssl/certs/ca.pem).
-	Excludes []string
+	Excludes  []string
+	LocalOnly bool
+	HashOnly  bool
 }
 
 // TrackDirEntry reports the outcome for a single file encountered during a
@@ -549,6 +574,8 @@ func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
 			Template:   opts.Template,
 			SysRoot:    opts.SysRoot,
 			Group:      opts.DirPath,
+			LocalOnly:  opts.LocalOnly,
+			HashOnly:   opts.HashOnly,
 		})
 
 		entry := TrackDirEntry{Path: path}

@@ -375,6 +375,11 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			result.SkippedSourceFiles = append(result.SkippedSourceFiles, rec.SystemPath)
 			continue
 		}
+		// HashOnly files have no content in the repo — nothing to sync.
+		// LocalOnly files sync normally into the local repo; push skips them.
+		if rec.HashOnly {
+			continue
+		}
 		relPath := rec.RepoPath
 		sysPath := rec.SystemPath
 		if opts.SysRoot != "" {
@@ -576,15 +581,20 @@ func Push(opts PushOptions) error {
 		})
 	}
 
-	// Standard git push — push all local branches to the remote using a
-	// wildcard refspec so only branches that actually exist are pushed.
-	// Listing explicit refs (e.g. "refs/heads/manifest") would fail when the
-	// branch has not been created yet (empty or new repos).
+	// Standard git push — push track/* and manifest branches only.
+	// local/* branches are intentionally excluded: they contain local-only
+	// files that must never leave this machine.
 	args := []string{"push", "origin"}
 	if opts.Force {
 		args = append(args, "--force")
 	}
-	args = append(args, "refs/heads/*:refs/heads/*")
+	// Push track/* branches and manifest (if it exists).
+	// local/* branches are intentionally excluded — they are never sent to remote.
+	args = append(args, "refs/heads/track/*:refs/heads/track/*")
+	// Use + prefix for manifest so a missing manifest doesn't abort the push.
+	if hasBranch(repoDir, "manifest") {
+		args = append(args, "refs/heads/manifest:refs/heads/manifest")
+	}
 	if err := syncGitBareRun(repoDir, 60*time.Second, nil, args...); err != nil {
 		return fmt.Errorf("core: push: %w", err)
 	}

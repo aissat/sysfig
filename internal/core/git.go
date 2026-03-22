@@ -304,3 +304,27 @@ func gitBareExists(repoDir string) bool {
 	_, err := os.Stat(repoDir + "/HEAD")
 	return err == nil
 }
+
+// hasBranch returns true if the named branch exists in the bare repo.
+func hasBranch(repoDir, branch string) bool {
+	_, err := gitBareOutput(repoDir, 5*time.Second, nil,
+		"rev-parse", "--verify", "refs/heads/"+branch)
+	return err == nil
+}
+
+// listBranchRefs returns all ref names (e.g. "refs/heads/track/etc_nginx")
+// that start with the given prefix, using `git for-each-ref`.
+func listBranchRefs(repoDir, prefix string) ([]string, error) {
+	out, err := gitBareOutput(repoDir, 10*time.Second, nil,
+		"for-each-ref", "--format=%(refname)", prefix)
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			refs = append(refs, line)
+		}
+	}
+	return refs, nil
+}

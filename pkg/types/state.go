@@ -59,6 +59,15 @@ type FileRecord struct {
 	// Source-managed files are skipped by `sysfig sync` and cannot be
 	// re-tracked without --force.
 	SourceProfile string `json:"source_profile,omitempty"`
+	// LocalOnly marks files that are tracked only in the local state and
+	// never pushed to the remote git repo. Use this for sensitive files
+	// (e.g. /etc/wireguard/wg0.conf) that must not leave the machine.
+	// sync and push skip these records entirely.
+	LocalOnly bool `json:"local_only,omitempty"`
+	// HashOnly marks files where only the content hash is tracked — no copy
+	// is stored in the repo. Useful for integrity monitoring without storing
+	// sensitive content. Status reports TAMPERED when the hash drifts.
+	HashOnly bool `json:"hash_only,omitempty"`
 }
 
 // BackupRecord represents a single backup entry in state.json.
