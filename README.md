@@ -9,11 +9,32 @@
 
 ## Install
 
+**Binary (Linux / macOS):**
+
+```bash
+# Download the latest release for your platform
+curl -Lo sysfig https://github.com/aissat/sysfig/releases/latest/download/sysfig-linux-amd64
+chmod +x sysfig && sudo mv sysfig /usr/local/bin/
+```
+
+Replace `linux-amd64` with `linux-arm64`, `darwin-amd64`, or `darwin-arm64` as needed.
+
+**Arch Linux (AUR):**
+
+```bash
+yay -S sysfig   # or: paru -S sysfig
+```
+
+**From source:**
+
 ```bash
 git clone https://github.com/aissat/sysfig
 cd sysfig && go build -o sysfig ./cmd/sysfig
 sudo mv sysfig /usr/local/bin/
-sysfig doctor   # verify
+```
+
+```bash
+sysfig doctor   # verify install
 ```
 
 ---

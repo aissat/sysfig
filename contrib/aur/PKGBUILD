@@ -1,0 +1,39 @@
+# Maintainer: aissat <aissat@github>
+pkgname=sysfig
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Config management for people who own their machines — track, encrypt, and audit system configs"
+arch=('x86_64' 'aarch64')
+url="https://github.com/aissat/sysfig"
+license=('MIT')
+depends=('git')
+makedepends=('go')
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "${pkgname}-${pkgver}"
+    export CGO_ENABLED=0
+    go build \
+        -trimpath \
+        -ldflags "-s -w -X main.version=${pkgver} -X main.commit=release -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        -o sysfig \
+        ./cmd/sysfig
+}
+
+check() {
+    cd "${pkgname}-${pkgver}"
+    go test ./...
+}
+
+package() {
+    cd "${pkgname}-${pkgver}"
+    install -Dm755 sysfig "${pkgdir}/usr/bin/sysfig"
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+    # systemd user units (optional)
+    install -Dm644 contrib/systemd/sysfig-audit.service \
+        "${pkgdir}/usr/lib/systemd/user/sysfig-audit.service"
+    install -Dm644 contrib/systemd/sysfig-audit.timer \
+        "${pkgdir}/usr/lib/systemd/user/sysfig-audit.timer"
+}
