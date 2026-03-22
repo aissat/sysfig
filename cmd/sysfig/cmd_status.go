@@ -223,20 +223,17 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 			rowHash = files[0].ID
 			rowSlug = files[0].Slug
 		}
-		// TYPE column: how the file was tracked.
-		isGroup := files[0].Group != ""
-		typeStr := "file"
-		switch {
-		case files[0].HashOnly:
-			typeStr = "hash"
-		case files[0].LocalOnly:
-			typeStr = "local"
-		case isGroup:
-			typeStr = "group"
+		// TYPE column: unanimous type or "mixed" when the group spans types.
+		groupType := fileTypeStr(files[0])
+		for _, f := range files[1:] {
+			if fileTypeStr(f) != groupType {
+				groupType = "mixed"
+				break
+			}
 		}
-		typeCol := clrDim.Sprint(pad(typeStr, 6))
+		typeCol := clrDim.Sprint(pad(groupType, 6))
 
-		// TAGS column: user-defined labels only.
+		// TAGS column: union of all files' tags, fallback to platform tags.
 		seen := make(map[string]bool)
 		var rowTags []string
 		for _, f := range files {
@@ -247,11 +244,7 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 				}
 			}
 		}
-		displayTags := rowTags
-		if len(displayTags) == 0 {
-			displayTags = implicitTags
-		}
-		tagsCol := clrInfo.Sprint(strings.Join(displayTags, ","))
+		tagsCol := clrInfo.Sprint(displayTags(rowTags, implicitTags))
 
 		pathCol := pad(rowLabel, dirW)
 		hashCol := clrDim.Sprint(pad(rowHash, hashW))
@@ -301,41 +294,69 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 	}
 
 	divider()
-	summaryParts := []string{clrBold.Sprintf("%d files", len(results))}
-	if n := totals[string(core.StatusSynced)]; n > 0 {
-		summaryParts = append(summaryParts, clrSynced.Sprintf("%d synced", n))
-	}
-	if n := totals[string(core.StatusDirty)]; n > 0 {
-		summaryParts = append(summaryParts, clrDirty.Sprintf("%d dirty", n))
-	}
-	if n := totals[string(core.StatusPending)]; n > 0 {
-		summaryParts = append(summaryParts, clrPending.Sprintf("%d pending", n))
-	}
-	if n := totals[string(core.StatusMissing)]; n > 0 {
-		summaryParts = append(summaryParts, clrMissing.Sprintf("%d missing", n))
-	}
-	if n := totals[string(core.StatusEncrypted)]; n > 0 {
-		summaryParts = append(summaryParts, clrEncrypted.Sprintf("%d encrypted", n))
-	}
-	if n := totals[string(core.StatusNew)]; n > 0 {
-		summaryParts = append(summaryParts, clrNew.Sprintf("%d new", n))
-	}
-	fmt.Printf("  %s\n", strings.Join(summaryParts, clrDim.Sprint("  ·  ")))
+	printSummaryFooter(totals, len(results))
 	return hasDiff
+}
+
+// fileTypeStr returns the TYPE label for a file result.
+func fileTypeStr(r core.FileStatusResult) string {
+	switch {
+	case r.HashOnly:
+		return "hash"
+	case r.LocalOnly:
+		return "local"
+	case r.Group != "":
+		return "group"
+	default:
+		return "file"
+	}
 }
 
 // flatTypeRank returns a sort key for TYPE so file < group < local < hash.
 func flatTypeRank(r core.FileStatusResult) int {
-	switch {
-	case r.HashOnly:
-		return 3
-	case r.LocalOnly:
-		return 2
-	case r.Group != "":
+	switch fileTypeStr(r) {
+	case "group":
 		return 1
+	case "local":
+		return 2
+	case "hash":
+		return 3
 	default:
 		return 0
 	}
+}
+
+// displayTags returns user-defined tags falling back to platform tags.
+func displayTags(tags []string, implicit []string) string {
+	t := tags
+	if len(t) == 0 {
+		t = implicit
+	}
+	return strings.Join(t, ",")
+}
+
+// printSummaryFooter prints the "N files · N synced · …" summary line.
+func printSummaryFooter(totals map[string]int, total int) {
+	parts := []string{clrBold.Sprintf("%d files", total)}
+	if n := totals[string(core.StatusSynced)]; n > 0 {
+		parts = append(parts, clrSynced.Sprintf("%d synced", n))
+	}
+	if n := totals[string(core.StatusEncrypted)]; n > 0 {
+		parts = append(parts, clrEncrypted.Sprintf("%d encrypted", n))
+	}
+	if n := totals[string(core.StatusDirty)]; n > 0 {
+		parts = append(parts, clrDirty.Sprintf("%d dirty", n))
+	}
+	if n := totals[string(core.StatusPending)]; n > 0 {
+		parts = append(parts, clrPending.Sprintf("%d pending", n))
+	}
+	if n := totals[string(core.StatusMissing)]; n > 0 {
+		parts = append(parts, clrMissing.Sprintf("%d missing", n))
+	}
+	if n := totals[string(core.StatusNew)]; n > 0 {
+		parts = append(parts, clrNew.Sprintf("%d new", n))
+	}
+	fmt.Printf("  %s\n", strings.Join(parts, clrDim.Sprint("  ·  ")))
 }
 
 // printStatusFlat renders every tracked file as its own row.
@@ -390,22 +411,8 @@ func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff boo
 		}
 		totals[string(r.Status)]++
 
-		typeStr := "file"
-		switch {
-		case r.HashOnly:
-			typeStr = "hash"
-		case r.LocalOnly:
-			typeStr = "local"
-		case r.Group != "":
-			typeStr = "group"
-		}
-		typeCol := clrDim.Sprint(pad(typeStr, 6))
-
-		tags := r.Tags
-		if len(tags) == 0 {
-			tags = implicitTags
-		}
-		tagsCol := clrInfo.Sprint(strings.Join(tags, ","))
+		typeCol := clrDim.Sprint(pad(fileTypeStr(r), 6))
+		tagsCol := clrInfo.Sprint(displayTags(r.Tags, implicitTags))
 
 		if showIDs {
 			fmt.Printf("%s  %s  %s  %s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), clrDim.Sprint(pad(r.Slug, slugW)), statusColored(r.Status, pad(label, stW)), typeCol, tagsCol)
@@ -417,27 +424,7 @@ func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff boo
 	}
 
 	divider()
-	var sp []string
-	sp = append(sp, clrBold.Sprintf("%d files", len(results)))
-	if n := totals[string(core.StatusSynced)]; n > 0 {
-		sp = append(sp, clrSynced.Sprintf("%d synced", n))
-	}
-	if n := totals[string(core.StatusDirty)]; n > 0 {
-		sp = append(sp, clrDirty.Sprintf("%d dirty", n))
-	}
-	if n := totals[string(core.StatusPending)]; n > 0 {
-		sp = append(sp, clrPending.Sprintf("%d pending", n))
-	}
-	if n := totals[string(core.StatusMissing)]; n > 0 {
-		sp = append(sp, clrMissing.Sprintf("%d missing", n))
-	}
-	if n := totals[string(core.StatusEncrypted)]; n > 0 {
-		sp = append(sp, clrEncrypted.Sprintf("%d encrypted", n))
-	}
-	if n := totals[string(core.StatusNew)]; n > 0 {
-		sp = append(sp, clrNew.Sprintf("%d new", n))
-	}
-	fmt.Printf("  %s\n", strings.Join(sp, clrDim.Sprint("  ·  ")))
+	printSummaryFooter(totals, len(results))
 	return hasDiff
 }
 
