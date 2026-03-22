@@ -1877,6 +1877,25 @@ hooks:
 
 Adding a new service requires only editing `hooks.yaml` — no code changes.
 
+### Profile post_apply hooks (`source render`)
+
+Config Source profiles can also declare hooks in `profile.yaml`. These fire automatically after `sysfig source render` commits new content — no `hooks.yaml` needed.
+
+```yaml
+# profile.yaml
+hooks:
+  post_apply:
+    - systemd_reload: rsyslog.service
+    - exec: "nginx -t"
+```
+
+| Field | Effect |
+|---|---|
+| `systemd_reload: <service>` | `systemctl reload <service>` after render |
+| `exec: "cmd arg1 arg2"` | Run the command after render |
+
+Hook errors from `source render` are **non-fatal** — the render succeeds and a warning is printed. This differs from `hooks.yaml` hooks (which are fatal by default) because profile hooks may require privileges not always available on every machine.
+
 ---
 
 ## Directory Layout
