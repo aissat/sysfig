@@ -391,6 +391,7 @@ Coming from another machine?
 		newNodeCmd(),
 		newSourceCmd(),
 		newAuditCmd(),
+		newTagCmd(),
 	)
 
 	// Force cobra to register the built-in completion subcommands now so we
@@ -4680,6 +4681,125 @@ Designed for use in systemd timers or cron jobs:
 	f.BoolVar(&local, "local", false, "audit only local-only tracked files")
 	f.BoolVar(&all, "all", false, "audit all tracked files (not just local/hash-only)")
 	f.BoolVar(&quiet, "quiet", false, "suppress per-file output; exit code still reflects drift")
+	return cmd
+}
+
+// ── tag ───────────────────────────────────────────────────────────────────────
+
+func newTagCmd() *cobra.Command {
+	var (
+		baseDir   string
+		listFlag  bool
+		autoFlag  bool
+		overwrite bool
+		renameOld string
+		renameTo  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "tag [path-or-id] [tag...]",
+		Short: "Manage tags on tracked files",
+		Long: `Manage tags on tracked files.
+
+Tags let you target specific files during deploy:
+  sysfig deploy --host user@vm --tag ubuntu --sudo
+
+Usage:
+  sysfig tag --list                     show all tags and file counts
+  sysfig tag --auto                     write OS+distro tags to untagged files
+  sysfig tag --auto --overwrite         rewrite tags on ALL files
+  sysfig tag --rename old --to new      rename a tag across all files
+  sysfig tag <path-or-id> [tag...]      set tags on a specific file`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			baseDir = resolveBaseDir(baseDir)
+
+			switch {
+			case listFlag:
+				result, err := core.TagList(core.TagListOptions{BaseDir: baseDir})
+				if err != nil {
+					return err
+				}
+				fmt.Println()
+				clrBold.Println("  sysfig tag — tag list")
+				fmt.Println(clrDim.Sprint("  ─────────────────────────────────────────────"))
+				fmt.Println()
+				if len(result.Entries) == 0 && result.Untagged == 0 {
+					info("No tracked files.")
+					return nil
+				}
+				const tagW = 16
+				fmt.Printf("  %s  %s\n", clrBold.Sprint(pad("TAG", tagW)), clrBold.Sprint("FILES"))
+				divider()
+				for _, e := range result.Entries {
+					fmt.Printf("  %s  %s\n", clrInfo.Sprint(pad(e.Tag, tagW)), clrBold.Sprintf("%d", e.Count))
+				}
+				divider()
+				if result.Untagged > 0 {
+					implicit := strings.Join(core.DetectPlatformTags(), ",")
+					fmt.Printf("\n  %s\n\n",
+						clrDim.Sprintf("%d file(s) have no explicit tags — platform tags would apply: %s", result.Untagged, implicit))
+				}
+				fmt.Println()
+
+			case renameOld != "" && renameTo != "":
+				result, err := core.TagRename(core.TagRenameOptions{
+					BaseDir: baseDir,
+					OldTag:  renameOld,
+					NewTag:  renameTo,
+				})
+				if err != nil {
+					return err
+				}
+				if result.Updated == 0 {
+					info("Tag %q not found in any tracked file.", renameOld)
+				} else {
+					ok("Renamed tag %q → %q across %d file(s).", renameOld, renameTo, result.Updated)
+				}
+
+			case autoFlag:
+				result, err := core.TagAuto(core.TagAutoOptions{
+					BaseDir:   baseDir,
+					Overwrite: overwrite,
+				})
+				if err != nil {
+					return err
+				}
+				implicit := strings.Join(core.DetectPlatformTags(), ",")
+				ok("Tagged %d file(s) with: %s", result.Updated, clrInfo.Sprint(implicit))
+				if result.Skipped > 0 {
+					fmt.Printf("  %s\n", clrDim.Sprintf("Skipped %d already-tagged file(s) — use --overwrite to rewrite all.", result.Skipped))
+				}
+
+			case len(args) >= 1:
+				newTags := args[1:]
+				result, err := core.TagSet(core.TagSetOptions{
+					BaseDir:  baseDir,
+					PathOrID: args[0],
+					Tags:     newTags,
+				})
+				if err != nil {
+					return err
+				}
+				if len(result.NewTags) == 0 {
+					ok("Cleared tags on %s", clrBold.Sprint(result.SystemPath))
+				} else {
+					ok("%s → [%s]", clrBold.Sprint(result.SystemPath), clrInfo.Sprint(strings.Join(result.NewTags, ",")))
+				}
+
+			default:
+				return cmd.Help()
+			}
+			return nil
+		},
+	}
+
+	f := cmd.Flags()
+	f.StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	f.BoolVar(&listFlag, "list", false, "show all tags and file counts")
+	f.BoolVar(&autoFlag, "auto", false, "write OS+distro tags to untagged files")
+	f.BoolVar(&overwrite, "overwrite", false, "with --auto, rewrite tags on all files")
+	f.StringVar(&renameOld, "rename", "", "rename this tag (use with --to)")
+	f.StringVar(&renameTo, "to", "", "new tag name (use with --rename)")
 	return cmd
 }
 

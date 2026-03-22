@@ -167,8 +167,14 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 			continue
 		}
 
-		if len(tagSet) > 0 && !fileHasTag(rec.Tags, tagSet) {
-			continue
+		if len(tagSet) > 0 {
+			effectiveTags := rec.Tags
+			if len(effectiveTags) == 0 {
+				effectiveTags = DetectPlatformTags()
+			}
+			if !fileHasTag(effectiveTags, tagSet) {
+				continue
+			}
 		}
 
 		fr := RemoteFileResult{
