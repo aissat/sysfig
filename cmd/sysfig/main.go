@@ -767,6 +767,7 @@ func newBootstrapCmd() *cobra.Command {
 		configsOnly   bool
 		skipEncrypted bool
 		yes           bool
+		noApply       bool
 	)
 
 	cmd := &cobra.Command{
@@ -860,10 +861,53 @@ func newBootstrapCmd() *cobra.Command {
 			divider()
 			clrOK.Println("  ✓ Setup complete!")
 			fmt.Println()
-			fmt.Printf("  %s\n", clrBold.Sprint("What to do next:"))
-			fmt.Printf("   %s  Deploy your config files to this machine\n", clrInfo.Sprint("sysfig apply"))
-			fmt.Printf("   %s  Check sync status at any time\n", clrInfo.Sprint("sysfig status"))
-			fmt.Printf("   %s  See your commit history\n", clrInfo.Sprint("sysfig log    "))
+
+			if noApply {
+				fmt.Printf("  %s\n", clrBold.Sprint("What to do next:"))
+				fmt.Printf("   %s  Deploy your config files to this machine\n", clrInfo.Sprint("sysfig apply"))
+				fmt.Printf("   %s  Check sync status at any time\n", clrInfo.Sprint("sysfig status"))
+				fmt.Println()
+				return nil
+			}
+
+			// Auto-apply after bootstrap.
+			fmt.Printf("  %s\n\n", clrBold.Sprint("Applying config files…"))
+			applyResults, applyErr := core.Apply(core.ApplyOptions{
+				BaseDir: baseDir,
+			})
+			applied, permDenied := 0, 0
+			for _, r := range applyResults {
+				if r.Skipped {
+					continue
+				}
+				ok("Applied: %s", clrBold.Sprint(r.ID))
+				fmt.Printf("     %s %s\n", clrDim.Sprint("→"), r.SystemPath)
+				if r.BackupPath != "" {
+					fmt.Printf("     %s %s\n", clrDim.Sprint("backup:"), clrDim.Sprint(r.BackupPath))
+				}
+				applied++
+			}
+			if applyErr != nil {
+				errStr := applyErr.Error()
+				for _, line := range strings.Split(errStr, "\n") {
+					if strings.TrimSpace(line) != "" {
+						fmt.Fprintf(os.Stderr, "  %s %s\n", clrErr.Sprint("error:"), line)
+						if strings.Contains(line, "permission denied") {
+							permDenied++
+						}
+					}
+				}
+			}
+			fmt.Println()
+			divider()
+			fmt.Printf("  Applied: %s\n", clrBold.Sprintf("%d", applied))
+			if permDenied > 0 {
+				fmt.Println()
+				warn("Some files require elevated privileges.")
+				fmt.Printf("     %s\n", clrDim.Sprint("Re-run: sudo sysfig apply"))
+			} else {
+				fmt.Printf("   %s  Check sync status at any time\n", clrInfo.Sprint("sysfig status"))
+			}
 			fmt.Println()
 			return nil
 		},
@@ -874,6 +918,7 @@ func newBootstrapCmd() *cobra.Command {
 	f.BoolVar(&configsOnly, "configs-only", false, "skip package installation, deploy configs only")
 	f.BoolVar(&skipEncrypted, "skip-encrypted", false, "skip encrypted files when master key is absent")
 	f.BoolVar(&yes, "yes", false, "non-interactive: skip all prompts")
+	f.BoolVar(&noApply, "no-apply", false, "skip applying configs after cloning (apply manually later)")
 	return cmd
 }
 
