@@ -1291,6 +1291,29 @@ func statusLabel(s core.FileStatusLabel) string {
 	}
 }
 
+// groupResultsByDir groups FileStatusResults by their display directory,
+// preserving first-seen order.  Files tracked via a group directory
+// (Group != "") are folded under that group root; individually-tracked
+// files use filepath.Dir(SystemPath) as the key.
+func groupResultsByDir(results []core.FileStatusResult) (order []string, groups map[string][]core.FileStatusResult) {
+	groups = map[string][]core.FileStatusResult{}
+	for _, r := range results {
+		dir := filepath.Dir(r.SystemPath)
+		// Files tracked via `sysfig track /dir/` carry rec.Group (the root
+		// tracked directory).  Use that as the grouping key so sub-directory
+		// files (e.g. /etc/pacman.d/hooks/foo) fold under the group row
+		// (e.g. /etc/pacman.d/) instead of appearing in their own row.
+		if r.Group != "" {
+			dir = r.Group
+		}
+		if _, seen := groups[dir]; !seen {
+			order = append(order, dir)
+		}
+		groups[dir] = append(groups[dir], r)
+	}
+	return
+}
+
 // printStatusTable renders the status table grouped by directory.
 // Folders where all files are clean show one summary line.
 // Folders with any changed files expand to list those files.
@@ -1302,15 +1325,7 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 	}
 
 	// Group results by directory, preserving first-seen order.
-	dirOrder := []string{}
-	groups := map[string][]core.FileStatusResult{}
-	for _, r := range results {
-		dir := filepath.Dir(r.SystemPath)
-		if _, seen := groups[dir]; !seen {
-			dirOrder = append(dirOrder, dir)
-		}
-		groups[dir] = append(groups[dir], r)
-	}
+	dirOrder, groups := groupResultsByDir(results)
 
 	// Count totals.
 	totals := map[string]int{}
@@ -1415,19 +1430,27 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 			rowHash = files[0].ID
 			rowSlug = files[0].Slug
 		}
+		// grp = any file in this row was tracked via `sysfig track /dir/` (Group != "").
+		// no tag = tracked individually via `sysfig track /path/to/file`.
+		isGroup := files[0].Group != ""
+		typeTag := ""
+		if isGroup {
+			typeTag = "  " + clrDim.Sprint("grp")
+		}
+
 		pathCol := pad(rowLabel, dirW)
 		hashCol := clrDim.Sprint(pad(rowHash, hashW))
 		if dirDirty {
 			if showIDs {
-				fmt.Printf("%s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary)
+				fmt.Printf("%s  %s  %s  %s%s\n", clrDirty.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary, typeTag)
 			} else {
-				fmt.Printf("%s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, summary)
+				fmt.Printf("%s  %s  %s%s\n", clrDirty.Sprint(pathCol), hashCol, summary, typeTag)
 			}
 		} else {
 			if showIDs {
-				fmt.Printf("%s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary)
+				fmt.Printf("%s  %s  %s  %s%s\n", clrBold.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), summary, typeTag)
 			} else {
-				fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, summary)
+				fmt.Printf("%s  %s  %s%s\n", clrBold.Sprint(pathCol), hashCol, summary, typeTag)
 			}
 		}
 

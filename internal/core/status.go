@@ -36,6 +36,7 @@ type FileStatusResult struct {
 	CurrentHash  string          // hash of the current system file ("" if missing)
 	Status       FileStatusLabel
 	Encrypted    bool
+	Group        string // non-empty when file is part of a directory-tracked group (rec.Group)
 
 	// Metadata drift fields — populated when FileMeta was recorded at track
 	// time and the live system file's metadata has since changed.
@@ -104,6 +105,7 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 			RepoPath:     rec.RepoPath,
 			RecordedHash: rec.CurrentHash,
 			Encrypted:    rec.Encrypt,
+			Group:        rec.Group,
 		}
 
 		switch {
