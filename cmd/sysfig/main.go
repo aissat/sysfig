@@ -3220,10 +3220,13 @@ func newDoctorCmd() *cobra.Command {
 
 // watchRun is the shared foreground-watcher logic used by both
 // `sysfig watch` (bare) and `sysfig watch run`.
-func watchRun(baseDir, sysRoot string, debounce time.Duration, dryRun bool) error {
+func watchRun(baseDir, sysRoot string, debounce time.Duration, dryRun, push bool) error {
 	clrBold.Println("Watching tracked files for changes  (Ctrl-C to stop)")
 	fmt.Printf("  %s %s\n", clrDim.Sprint("base-dir:"), clrDim.Sprint(baseDir))
 	fmt.Printf("  %s %v\n", clrDim.Sprint("debounce:"), debounce)
+	if push {
+		fmt.Printf("  %s %s\n", clrDim.Sprint("push:"), clrOK.Sprint("enabled"))
+	}
 	divider()
 
 	stop := make(chan struct{})
@@ -3266,6 +3269,7 @@ func watchRun(baseDir, sysRoot string, debounce time.Duration, dryRun bool) erro
 		SysRoot:  resolveSysRoot(sysRoot),
 		Debounce: debounce,
 		DryRun:   dryRun,
+		Push:     push,
 		OnEvent:  onEvent,
 	}, stop)
 }
@@ -3276,6 +3280,7 @@ func newWatchCmd() *cobra.Command {
 		sysRoot  string
 		debounce time.Duration
 		dryRun   bool
+		push     bool
 	)
 
 	cmd := &cobra.Command{
@@ -3293,7 +3298,7 @@ Sub-commands:
 Press Ctrl-C to stop the foreground watcher.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
-			return watchRun(baseDir, sysRoot, debounce, dryRun)
+			return watchRun(baseDir, sysRoot, debounce, dryRun, push)
 		},
 	}
 
@@ -3302,6 +3307,7 @@ Press Ctrl-C to stop the foreground watcher.`,
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.DurationVar(&debounce, "debounce", 2*time.Second, "wait this long after last change before syncing")
 	f.BoolVar(&dryRun, "dry-run", false, "print detected changes without syncing")
+	f.BoolVar(&push, "push", false, "push to remote after each successful sync")
 
 	cmd.AddCommand(
 		newWatchRunCmd(),
@@ -3320,13 +3326,14 @@ func newWatchRunCmd() *cobra.Command {
 		sysRoot  string
 		debounce time.Duration
 		dryRun   bool
+		push     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the file watcher in the foreground",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
-			return watchRun(baseDir, sysRoot, debounce, dryRun)
+			return watchRun(baseDir, sysRoot, debounce, dryRun, push)
 		},
 	}
 	f := cmd.Flags()
@@ -3334,6 +3341,7 @@ func newWatchRunCmd() *cobra.Command {
 	f.StringVar(&sysRoot, "sys-root", "", "prepend this path to all system paths (sandbox/testing override)")
 	f.DurationVar(&debounce, "debounce", 2*time.Second, "wait this long after last change before syncing")
 	f.BoolVar(&dryRun, "dry-run", false, "print detected changes without syncing")
+	f.BoolVar(&push, "push", false, "push to remote after each successful sync")
 	return cmd
 }
 
@@ -3347,7 +3355,7 @@ After=default.target
 [Service]
 Type=simple
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=%s watch --base-dir %s --debounce %s
+ExecStart=%s watch --base-dir %s --debounce %s%s
 Restart=on-failure
 RestartSec=5s
 
@@ -3360,6 +3368,7 @@ func newWatchInstallCmd() *cobra.Command {
 		baseDir  string
 		debounce time.Duration
 		enable   bool
+		push     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -3373,7 +3382,11 @@ func newWatchInstallCmd() *cobra.Command {
 			}
 
 			// Build service file content.
-			content := fmt.Sprintf(watchServiceTemplate, binPath, baseDir, debounce)
+			extraFlags := ""
+			if push {
+				extraFlags = " --push"
+			}
+			content := fmt.Sprintf(watchServiceTemplate, binPath, baseDir, debounce, extraFlags)
 
 			// Determine service file path: ~/.config/systemd/user/
 			homeDir, err := os.UserHomeDir()
@@ -3418,6 +3431,7 @@ func newWatchInstallCmd() *cobra.Command {
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	f.DurationVar(&debounce, "debounce", 2*time.Second, "debounce window written into the service file")
 	f.BoolVar(&enable, "enable", false, "also run 'systemctl --user enable --now sysfig-watch'")
+	f.BoolVar(&push, "push", false, "push to remote after each successful sync")
 	return cmd
 }
 

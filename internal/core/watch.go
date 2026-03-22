@@ -15,6 +15,7 @@ type WatchOptions struct {
 	SysRoot  string        // sandbox prefix (testing override)
 	Debounce time.Duration // how long to wait after the last change before syncing
 	DryRun   bool          // print what would be synced without committing
+	Push     bool          // push to remote after each successful sync
 	// OnEvent is called after each sync attempt with the changed path and the
 	// sync result (nil result means DryRun or no-op).
 	OnEvent func(path string, result *SyncResult, err error)
@@ -158,6 +159,14 @@ func Watch(opts WatchOptions, stop <-chan struct{}) error {
 				BaseDir: opts.BaseDir,
 				SysRoot: opts.SysRoot,
 			})
+			// Push to remote if requested and sync produced new commits.
+			if err == nil && opts.Push && result != nil && result.Committed {
+				if pushErr := Push(PushOptions{BaseDir: opts.BaseDir}); pushErr != nil {
+					if opts.OnEvent != nil {
+						opts.OnEvent("", nil, fmt.Errorf("push: %w", pushErr))
+					}
+				}
+			}
 			for _, p := range changed {
 				if opts.OnEvent != nil {
 					opts.OnEvent(p, result, err)
