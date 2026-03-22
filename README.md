@@ -1054,12 +1054,14 @@ Starts a foreground process that monitors every tracked config file using OS-lev
 | ------------ | ----------- | --------------------------------------------------- |
 | `--debounce` | `2s`        | Wait this long after the last change before syncing |
 | `--dry-run`  | `false`     | Print detected changes without syncing              |
+| `--push`     | `false`     | Push to remote after each successful sync           |
 | `--base-dir` | `~/.sysfig` | Directory where sysfig stores its data              |
 
 ```bash
 sysfig watch                    # foreground, 2s debounce
 sysfig watch --debounce 500ms   # faster
 sysfig watch --dry-run          # preview only
+sysfig watch --push             # auto-push to remote after every commit
 ```
 
 **Output:**
@@ -1101,6 +1103,7 @@ sysfig watch uninstall
 | `--base-dir` | `~/.sysfig` | Base dir written into the ExecStart line              |
 | `--debounce` | `2s`        | Debounce window written into the ExecStart line       |
 | `--enable`   | `false`     | Also run `systemctl --user enable --now sysfig-watch` |
+| `--push`     | `false`     | Persist `--push` flag in the service ExecStart line   |
 
 The generated unit file lives at `~/.config/systemd/user/sysfig-watch.service` and uses `Restart=on-failure` so the watcher recovers automatically if it crashes.
 

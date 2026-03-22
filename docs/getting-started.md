@@ -174,6 +174,9 @@ Works correctly with all editors: `sed -i`, vim, nano, and any tool that saves v
 # Start watcher in the foreground (Ctrl-C to stop)
 sysfig watch
 
+# Also push to remote after every commit
+sysfig watch --push
+
 # Adjust debounce window (default 2s)
 sysfig watch --debounce 5s
 
@@ -184,7 +187,12 @@ sysfig watch --dry-run
 Install as a systemd user service so it runs on every login:
 
 ```sh
-sysfig watch install
+# Commit-only service
+sysfig watch install --enable
+
+# Commit + push service (keeps remote bundle in sync automatically)
+sysfig watch install --enable --push
+
 sysfig watch status
 ```
 
@@ -271,7 +279,9 @@ Replace `you` with your username and the path with wherever sysfig is installed 
 | `sysfig audit` | Check integrity of local-only and hash-only files |
 | `sysfig log` | Show commit history |
 | `sysfig watch` | Auto-commit when tracked files change |
-| `sysfig watch install` | Install watch as a systemd user service |
+| `sysfig watch --push` | Auto-commit and push to remote on every change |
+| `sysfig watch install --enable` | Install watch as a systemd user service |
+| `sysfig watch install --enable --push` | Install watch service with auto-push |
 | `sysfig bootstrap <url>` | First-time setup: clone config repo on a new machine |
 | `sysfig deploy <url>` | Pull latest configs from remote and apply (ongoing) |
 | `sysfig doctor` | Check environment health |
