@@ -200,29 +200,51 @@ sysfig watch status
 
 ## Restore on a new machine
 
-```sh
-# One command — clones, applies all configs, done
-sysfig deploy git@github.com:you/conf.git
-```
+### First time (bootstrap)
 
-Or step by step:
+`bootstrap` clones the repo and **applies all configs immediately** — one command, machine is ready:
 
 ```sh
-sysfig bootstrap git@github.com:you/conf.git   # clone repo
-sysfig apply                                # write configs to disk
+sysfig bootstrap git@github.com:you/conf.git
 ```
 
-**Air-gapped / no git server?** `deploy` accepts bundle remotes too — works exactly the same way:
+If some files need root (e.g. `/etc/`), sysfig applies what it can and tells you exactly what to re-run:
+
+```
+  ✓ Applied: ~/.zshrc
+  ✓ Applied: ~/.bashrc
+  error: /etc/nginx/nginx.conf — permission denied
+  warn:  Some files require elevated privileges.
+         Re-run: sudo sysfig apply
+```
+
+Want to review before applying? Use `--no-apply`:
 
 ```sh
-# First-time bootstrap from an NFS share (no internet, no GitHub)
-sysfig deploy bundle+local:///mnt/corp-nfs/sysfig/ops.bundle
-
-# First-time bootstrap from a remote SSH file server
-sysfig deploy bundle+ssh://backup@fileserver/srv/sysfig/ops.bundle
+sysfig bootstrap git@github.com:you/conf.git --no-apply
+sysfig status   # review
+sysfig apply    # apply manually
 ```
 
-sysfig creates a bare repo locally, pulls all branches from the bundle, seeds `state.json` from the manifest, and applies all tracked files — identical result to a git remote deploy.
+### Ongoing updates (deploy)
+
+After the machine is set up, use `deploy` to pull + apply the latest changes:
+
+```sh
+sysfig deploy
+```
+
+### Air-gapped / no git server?
+
+Both `bootstrap` and `deploy` accept bundle remotes:
+
+```sh
+# First-time on an air-gapped machine (USB or NFS share)
+sysfig bootstrap bundle+local:///mnt/usb/ops.bundle
+
+# Ongoing updates from the same bundle
+sysfig deploy bundle+local:///mnt/usb/ops.bundle
+```
 
 ---
 
@@ -282,8 +304,9 @@ Replace `you` with your username and the path with wherever sysfig is installed 
 | `sysfig watch --push` | Auto-commit and push to remote on every change |
 | `sysfig watch install --enable` | Install watch as a systemd user service |
 | `sysfig watch install --enable --push` | Install watch service with auto-push |
-| `sysfig bootstrap <url>` | First-time setup: clone config repo on a new machine |
-| `sysfig deploy <url>` | Pull latest configs from remote and apply (ongoing) |
+| `sysfig bootstrap <url>` | First-time setup: clone + apply all configs immediately |
+| `sysfig bootstrap <url> --no-apply` | Clone only — apply manually afterwards |
+| `sysfig deploy` | Pull latest configs from remote and apply (ongoing) |
 | `sysfig doctor` | Check environment health |
 | `sysfig node add <name> <pubkey>` | Register a remote machine for multi-recipient encryption |
 | `sysfig node list` | Show registered nodes |

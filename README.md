@@ -414,44 +414,44 @@ done
 
 ### `bootstrap`
 
-First-time setup: clone a remote config repo and apply configs on this machine.
+First-time setup: clone a remote config repo and **immediately apply all configs** on this machine.
 
 ```
 sysfig bootstrap [<remote-url>] [options]
 ```
 
-This is the primary onboarding command. It:
-1. Detects if this machine is already set up (no-op if so — shows hints instead)
-2. Clones your remote config repo as a bare git repository to `~/.sysfig/repo.git/`
-3. Seeds `state.json` from the `sysfig.yaml` manifest (read from the `manifest` branch; falls back to `HEAD` for repos created before the branch-per-track migration)
-4. Writes `hooks.yaml` from `hooks.yaml.example` if present in the repo
+This is the primary onboarding command. One command, machine is ready:
+1. Clones your remote config repo as a bare git repository to `~/.sysfig/repo.git/`
+2. Seeds `state.json` from the `sysfig.yaml` manifest
+3. Applies all tracked configs to disk
+4. Shows a `sudo sysfig apply` hint for any files that failed due to permissions
+
+If the machine is already set up (repo exists + state populated), bootstrap exits cleanly with hints.
 
 **Options:**
 
-| Flag               | Default     | Description                                       |
-| ------------------ | ----------- | ------------------------------------------------- |
-| `--base-dir`       | `~/.sysfig` | Directory where sysfig stores its data            |
-| `--configs-only`   | `false`     | Skip package installation, deploy configs only    |
-| `--skip-encrypted` | `false`     | Skip encrypted files when master key is absent    |
-| `--yes`            | `false`     | Non-interactive: skip all prompts                 |
+| Flag               | Default     | Description                                              |
+| ------------------ | ----------- | -------------------------------------------------------- |
+| `--base-dir`       | `~/.sysfig` | Directory where sysfig stores its data                   |
+| `--no-apply`       | `false`     | Skip applying configs after clone (apply manually later) |
+| `--configs-only`   | `false`     | Skip package installation, deploy configs only           |
+| `--skip-encrypted` | `false`     | Skip encrypted files when master key is absent           |
+| `--yes`            | `false`     | Non-interactive: skip all prompts                        |
 
 **Examples:**
 
 ```bash
-# Interactive (prompts for URL if stdin is a TTY)
-sysfig bootstrap
-
-# Non-interactive / scripted
+# Clone + apply immediately (recommended)
 sysfig bootstrap git@github.com:you/myconfigs.git
 
-# No master key available — skip secrets
-sysfig bootstrap --skip-encrypted git@github.com:you/myconfigs.git
+# Clone only — review before applying
+sysfig bootstrap git@github.com:you/myconfigs.git --no-apply
+sysfig status
+sysfig apply
 
-# Custom data directory
-sysfig bootstrap --base-dir /opt/sysfig git@github.com:you/myconfigs.git
+# Air-gapped machine (bundle on USB or NFS)
+sysfig bootstrap bundle+local:///mnt/usb/conf.bundle
 ```
-
-> 
 
 ---
 
