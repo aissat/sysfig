@@ -714,19 +714,23 @@ sysfig status [options]
 
 Compares every tracked file against the repo using BLAKE3 content hashes. Also checks recorded `uid`/`gid`/`mode` against the current system state and reports drift inline.
 
-**Default output is grouped by directory.** Directories where every file is SYNCED are collapsed to a single summary line. Directories with any dirty or pending files expand to show each affected file on its own line. If only one file is tracked in a directory, its full path is shown rather than a folder line.
+**Default output is grouped by directory.** Directories where every file is SYNCED are collapsed to a single summary line. Directories with any dirty or pending files expand to show each affected file — with its tracking ID — aligned under the same `HASH` column as parent rows. If only one file is tracked in a directory, its full path is shown rather than a folder line.
 
 ```
-PATH / STATUS
+PATH                                      HASH        STATUS
 ────────────────────────────────────────────────────────────────────────────
-/etc/pacman.d/        10 synced
+/home/you/                                018e4a02    1 synced  ·  1 dirty
+  └ .zshrc                               7734be1e    DIRTY
+/etc/pacman.d/                            63d01e28    10 synced
 /etc/nginx/
-└ nginx.conf          DIRTY/MODIFIED
-└ nginx-new.conf      NEW  → sysfig track /etc/nginx
-/home/you/.zshrc      SYNCED
+  └ nginx.conf                           a3f2b1c0    DIRTY
+  └ nginx-new.conf                                   NEW  → sysfig track /etc/nginx
+/home/you/.bashrc                         ef891234    SYNCED
 ────────────────────────────────────────────────────────────────────────────
-  12 files  ·  11 synced  ·  1 dirty  ·  1 new
+  5 files  ·  3 synced  ·  2 dirty  ·  1 new
 ```
+
+The tracking ID shown in the `HASH` column of expanded rows (e.g. `7734be1e`) can be used directly in `sysfig sync`, `sysfig undo`, and other commands — no need to run `--files` first.
 
 Use `--files` (or `-f`) to bypass grouping and see every tracked file individually on its own line.
 
@@ -839,12 +843,15 @@ sysfig sync --all --auto    # syncs ALL tracked files
 The optional `[target]` narrows which files are staged and committed. It can be:
 - A directory path — only files under that path are synced
 - A system file path — only that specific file
-- A short tracking ID or hash prefix — only that file
+- A tracking ID (e.g. `7734be1e`) — only that file
+
+> **HASH vs tracking ID:** The `HASH` column in `sysfig status` is a BLAKE3 **content hash** of the committed file — it tells you *what version* is stored. The shorter hex strings shown under dirty/pending files in the grouped view (also in the `HASH` column) are the **tracking IDs** — use those with `sync`, `undo`, and other commands. CWD scoping applies when no target is given: files outside your current directory are skipped. Use an explicit path, ID, or `--all` to reach them.
 
 ```bash
 sysfig sync /etc/nginx --auto              # sync only nginx files
-sysfig sync /home/you/.zshrc -m "update"  # sync one file
-sysfig sync a3f2b1c --auto                # sync by ID prefix
+sysfig sync /home/you/.zshrc -m "update"  # sync one file by path
+sysfig sync 7734be1e -m "update zshrc"    # sync one file by tracking ID
+sysfig sync --all --auto                  # sync everything regardless of CWD
 ```
 
 **NEW files in tracked directories:** `sysfig sync` also auto-tracks any files discovered inside a tracked group directory that haven't been tracked yet (shown as `NEW` in `sysfig status`). They are committed in the same run.
@@ -1086,15 +1093,15 @@ One command for two undo modes — choose the form that matches your situation:
 
 | Form | What it does |
 |---|---|
-| `sysfig undo <path>` | **Non-destructive.** Restores the on-disk file from the HEAD of its track branch. No commit is created; git history is unchanged. Use this to discard accidental edits. |
-| `sysfig undo <commit> <path>` | **Destructive.** Rewinds the file's track branch to `<commit>` via `git update-ref`. The branch pointer moves back; no new commit is added. Other branches are untouched. |
+| `sysfig undo <path\|id>` | **Non-destructive.** Restores the on-disk file from the HEAD of its track branch. No commit is created; git history is unchanged. Use this to discard accidental edits. |
+| `sysfig undo <commit> <path\|id>` | **Destructive.** Rewinds the file's track branch to `<commit>` via `git update-ref`. The branch pointer moves back; no new commit is added. Other branches are untouched. |
 
-A path or `--all` is required. `--all` is only valid with a commit hash.
+A path, tracking ID, or `--all` is required. `--all` is only valid with a commit hash.
 
 ```
-sysfig undo <path> [options]
-sysfig undo <commit> <path> [options]
-sysfig undo <commit> --all  [options]
+sysfig undo <path|id> [options]
+sysfig undo <commit> <path|id> [options]
+sysfig undo <commit> --all     [options]
 ```
 
 **Options:**
@@ -1109,14 +1116,18 @@ sysfig undo <commit> --all  [options]
 **Examples:**
 
 ```bash
-sysfig undo /etc/nginx/nginx.conf                # discard unsaved edits (non-destructive)
-sysfig undo a3f2b1c /etc/nginx/nginx.conf        # rewind one file's branch to that commit
+sysfig undo /etc/nginx/nginx.conf                # discard unsaved edits — by path
+sysfig undo a3f2b1c0                             # discard unsaved edits — by tracking ID
+sysfig undo a3f2b1c /etc/nginx/nginx.conf        # rewind one file to a commit — by path
+sysfig undo a3f2b1c a3f2b1c0                     # rewind one file to a commit — by ID
 sysfig undo a3f2b1c --all                        # rewind all track branches (prompts)
 sysfig undo a3f2b1c --all --force                # same, no prompt
 sysfig undo a3f2b1c --all --dry-run              # preview what would change
 ```
 
-> `sysfig undo <path>` does **not** create a commit. If you want the reverted content recorded in history, run `sysfig sync --auto` after restoring.
+> The tracking ID shown next to a dirty file in `sysfig status` (e.g. `7734be1e`) can be passed directly to `undo` — no need to type the full path.
+
+> `sysfig undo <path|id>` does **not** create a commit. If you want the reverted content recorded in history, run `sysfig sync --auto` after restoring.
 
 > `rollback` and `restore` still work as hidden aliases for backward compatibility.
 

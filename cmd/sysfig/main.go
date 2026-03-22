@@ -1433,40 +1433,28 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 
 		// Expand changed files under the dir (skip if single-file row — it's already shown inline).
 		if dirDirty && len(files) > 1 {
-			// Compute filename column width for alignment within this dir.
-			nameW := 0
-			for _, r := range files {
-				switch r.Status {
-				case core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew:
-					name := filepath.Base(r.SystemPath)
-					if len(name) > nameW {
-						nameW = len(name)
-					}
-				}
-			}
-			nameW += 2
-
 			for _, r := range files {
 				switch r.Status {
 				case core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew:
 				default:
 					continue
 				}
+				// Sub-row: align PATH/HASH/STATUS columns with parent rows.
+				// "  └ " is 4 display columns but 6 bytes (└ is 3 bytes in UTF-8).
+				// Pad only the filename to dirW-4 so total display width equals dirW.
+				subName := pad(filepath.Base(r.SystemPath), dirW-4)
 				if r.Status == core.StatusNew {
-					name := filepath.Base(r.SystemPath)
-					fmt.Printf("  %s %s  %s  %s\n",
-						clrDim.Sprint("└"),
-						clrNew.Sprint(pad(name, nameW)),
-						clrNew.Sprint("NEW"),
-						clrDim.Sprint("→ sysfig track "+filepath.Dir(r.SystemPath)))
+					fmt.Printf("  └ %s  %s  %s\n",
+						clrDim.Sprint(subName),
+						clrDim.Sprint(pad("", hashW)),
+						clrNew.Sprint("NEW  → sysfig track "+filepath.Dir(r.SystemPath)))
 					continue
 				}
-				name := filepath.Base(r.SystemPath)
 				label := statusLabel(r.Status)
 				coloredLabel := statusColored(r.Status, label)
-				fmt.Printf("  %s %s  %s\n",
-					clrDim.Sprint("└"),
-					clrDirty.Sprint(pad(name, nameW)),
+				fmt.Printf("  └ %s  %s  %s\n",
+					clrDirty.Sprint(subName),
+					clrDim.Sprint(pad(r.ID, hashW)),
 					coloredLabel)
 
 				// Meta drift detail.
@@ -2829,7 +2817,15 @@ Examples:
   sysfig rollback 2b8e60e /home/aye7/.zshrc   # rollback one file by path
   sysfig rollback 9b43458 --all               # rollback ALL tracked files (prompts)
   sysfig rollback 9b43458 --all --force       # skip confirmation`,
-		Args: cobra.RangeArgs(1, 2),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return fmt.Errorf("missing argument — provide a commit hash\n\n%s", cmd.UsageString())
+			}
+			if len(args) > 2 {
+				return fmt.Errorf("too many arguments (expected 1 or 2, got %d)", len(args))
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			commit := args[0]
 			var pathArg string
@@ -3070,7 +3066,15 @@ Examples:
   sysfig undo /home/aye7/.zshrc             # discard uncommitted edits
   sysfig undo 2b8e60e /home/aye7/.zshrc     # rewind to that commit
   sysfig undo 9b43458 --all                 # rewind all tracked files`,
-		Args: cobra.RangeArgs(1, 2),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return fmt.Errorf("missing argument — provide a path or a commit hash\n\n%s", cmd.UsageString())
+			}
+			if len(args) > 2 {
+				return fmt.Errorf("too many arguments (expected 1 or 2, got %d)", len(args))
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
 			repoDir := filepath.Join(baseDir, "repo.git")
@@ -3081,26 +3085,52 @@ Examples:
 				return fmt.Errorf("undo: load state: %w", err)
 			}
 
-			// Disambiguate: undo <path>  vs  undo <hash> <path>
-			var commitHash, pathArg string
+			// Disambiguate: undo <path|id>  vs  undo <commit> <path|id>  vs  undo <commit> --all
+			//
+			// A single hex-looking arg could be either a commit hash or a tracking ID.
+			// We check the state for an ID match first — if found, treat it as an ID
+			// (non-destructive restore). Only fall back to commit-hash semantics when
+			// no file in state carries that ID.
+			idByValue := func(id string) bool {
+				for _, rec := range s.Files {
+					if rec.ID == id {
+						return true
+					}
+				}
+				return false
+			}
+
+			var commitHash, pathArg, idArg string
 			if len(args) == 2 {
 				commitHash = args[0]
-				pathArg = filepath.Clean(args[1])
-			} else if isHash(args[0]) {
-				// undo <hash> --all
+				second := args[1]
+				if filepath.IsAbs(second) {
+					pathArg = filepath.Clean(second)
+				} else {
+					idArg = second
+				}
+			} else if isHash(args[0]) && !idByValue(args[0]) {
+				// Hex-looking arg that is NOT a known tracking ID → commit hash.
 				commitHash = args[0]
 				if !all {
-					return fmt.Errorf("provide a path after the commit hash, or use --all\n\nexample: sysfig undo %s /home/aye7/.zshrc", args[0])
+					return fmt.Errorf("provide a path or ID after the commit hash, or use --all\n\nexample: sysfig undo %s <path|id>", args[0])
 				}
-			} else {
+			} else if filepath.IsAbs(args[0]) {
 				pathArg = filepath.Clean(args[0])
+			} else {
+				// Non-absolute arg (tracking ID or relative path treated as ID).
+				idArg = args[0]
 			}
 
 			type target struct{ repoPath, systemPath, branch string }
 			var targets []target
 			for _, rec := range s.Files {
 				sp := filepath.Clean(rec.SystemPath)
-				if pathArg != "" {
+				if idArg != "" {
+					if rec.ID != idArg {
+						continue
+					}
+				} else if pathArg != "" {
 					if sp != pathArg && !strings.HasPrefix(sp, pathArg+string(filepath.Separator)) {
 						continue
 					}
@@ -3113,7 +3143,11 @@ Examples:
 			}
 
 			if len(targets) == 0 {
-				return fmt.Errorf("no tracked files found matching %q", pathArg)
+				ref := pathArg
+				if idArg != "" {
+					ref = idArg
+				}
+				return fmt.Errorf("no tracked files found matching %q", ref)
 			}
 
 			// ── Mode 1: restore from last sync (no commit hash) ──────────────
