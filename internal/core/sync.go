@@ -553,6 +553,11 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		result.Pushed = true
 	}
 
+	// Pack loose objects when enough have accumulated.
+	// --auto is a no-op until the loose object count crosses git's threshold
+	// (~6700 by default), so this adds no overhead on normal syncs.
+	_ = syncGitBareRun(repoDir, 60*time.Second, nil, "gc", "--auto", "--quiet")
+
 	return result, nil
 }
 
