@@ -787,14 +787,26 @@ func newBootstrapCmd() *cobra.Command {
 
 			repoDir := filepath.Join(baseDir, "repo.git")
 			if fi, err := os.Stat(repoDir); err == nil && fi.IsDir() {
-				info("This machine is already set up.")
-				fmt.Printf("     %s %s\n", clrDim.Sprint("config repo:"), clrDim.Sprint(repoDir))
-				fmt.Printf("     %s %s\n", clrDim.Sprint("base dir:   "), clrDim.Sprint(baseDir))
+				// Repo exists — but check if state.json was never seeded
+				// (can happen if bootstrap was interrupted before seeding).
+				// If empty, fall through to core.Clone which will re-seed.
+				stateEmpty := true
+				sm := state.NewManager(filepath.Join(baseDir, "state.json"))
+				if s, err := sm.Load(); err == nil && len(s.Files) > 0 {
+					stateEmpty = false
+				}
+				if !stateEmpty {
+					info("This machine is already set up.")
+					fmt.Printf("     %s %s\n", clrDim.Sprint("config repo:"), clrDim.Sprint(repoDir))
+					fmt.Printf("     %s %s\n", clrDim.Sprint("base dir:   "), clrDim.Sprint(baseDir))
+					fmt.Println()
+					info("Run %s to check for remote updates.", clrBold.Sprint("sysfig pull"))
+					info("Run %s to see current state.", clrBold.Sprint("sysfig status"))
+					fmt.Println()
+					return nil
+				}
+				info("Repo exists but state is empty — re-seeding from manifest...")
 				fmt.Println()
-				info("Run %s to check for remote updates.", clrBold.Sprint("sysfig pull"))
-				info("Run %s to see current state.", clrBold.Sprint("sysfig status"))
-				fmt.Println()
-				return nil
 			}
 
 			step(1, "Remote config repository")
