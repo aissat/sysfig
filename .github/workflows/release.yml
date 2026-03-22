@@ -126,11 +126,7 @@ jobs:
           cat checksums.txt
 
       - name: Install git-cliff
-        run: |
-          curl -Lo /tmp/git-cliff.tar.gz \
-            https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-x86_64-unknown-linux-musl.tar.gz
-          tar -xzf /tmp/git-cliff.tar.gz -C /tmp
-          sudo mv /tmp/git-cliff-*/git-cliff /usr/local/bin/
+        uses: kenji-miyake/setup-git-cliff@v2
 
       - name: Generate changelog
         id: changelog
