@@ -22,6 +22,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"gopkg.in/yaml.v3"
 )
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -4399,11 +4400,17 @@ func newSourceListCmd() *cobra.Command {
 
 func newSourceUseCmd() *cobra.Command {
 	var baseDir string
+	var varFlags []string
+	var valuesFile string
 	cmd := &cobra.Command{
 		Use:   "use <source/profile>",
 		Short: "Activate a profile with per-machine variables",
-		Long: `Activate a profile from a registered source. You will be prompted for each
-variable declared in the profile. Defaults are shown in brackets.
+		Long: `Activate a profile from a registered source.
+
+Supply variables with --values values.yaml (a flat YAML map of key: value
+pairs) and/or --var key=value flags. --var takes precedence over --values.
+Any variable not supplied is prompted interactively when stdin is a TTY, or
+read line-by-line in alphabetical order when piped.
 
 After activation, run 'sysfig source render' to commit the rendered files.`,
 		Args: cobra.ExactArgs(1),
@@ -4412,6 +4419,7 @@ After activation, run 'sysfig source render' to commit the rendered files.`,
 			sourceProfile := args[0]
 
 			parts := strings.SplitN(sourceProfile, "/", 2)
+
 			if len(parts) != 2 {
 				return fmt.Errorf("invalid source reference %q — expected <source>/<profile>", sourceProfile)
 			}
@@ -4427,42 +4435,80 @@ After activation, run 'sysfig source render' to commit the rendered files.`,
 				return err
 			}
 
-			// Prompt for variables interactively (if TTY) or accept defaults.
-			variables := make(map[string]string, len(profile.Variables))
-			scanner := bufio.NewScanner(os.Stdin)
-			isTTY := term.IsTerminal(int(os.Stdin.Fd()))
+			if valuesFile != "" && len(varFlags) > 0 {
+				return fmt.Errorf("--values and --var are mutually exclusive — use one or the other")
+			}
 
-			// Sort variable names for deterministic prompt order.
+			// Seed variables from --values file or --var flags.
+			variables := make(map[string]string, len(profile.Variables))
+			if valuesFile != "" {
+				data, err := os.ReadFile(valuesFile)
+				if err != nil {
+					return fmt.Errorf("--values: %w", err)
+				}
+				var fileVars map[string]string
+				if err := yaml.Unmarshal(data, &fileVars); err != nil {
+					return fmt.Errorf("--values %q: %w", valuesFile, err)
+				}
+				for k, v := range fileVars {
+					variables[k] = v
+				}
+			}
+
+			// --var flags override values from file.
+			for _, kv := range varFlags {
+				idx := strings.IndexByte(kv, '=')
+				if idx < 1 {
+					return fmt.Errorf("--var %q: expected key=value", kv)
+				}
+				variables[kv[:idx]] = kv[idx+1:]
+			}
+
+			// Collect variables still needed (not provided via --var).
 			varNames := make([]string, 0, len(profile.Variables))
 			for k := range profile.Variables {
 				varNames = append(varNames, k)
 			}
 			sort.Strings(varNames)
 
+			// Build the list of variables that still need a value.
+			var needPrompt []string
 			for _, varName := range varNames {
-				decl := profile.Variables[varName]
-				prompt := "  " + varName
-				if decl.Required {
-					prompt += " (required)"
+				if _, provided := variables[varName]; !provided {
+					needPrompt = append(needPrompt, varName)
 				}
-				if decl.Default != "" {
-					prompt += " [" + decl.Default + "]"
-				}
-				prompt += ": "
+			}
 
-				if isTTY {
-					fmt.Print(prompt)
-				}
-				if scanner.Scan() {
-					val := strings.TrimSpace(scanner.Text())
-					if val == "" && decl.Default != "" {
-						val = decl.Default
+			// Prompt / read from stdin only for variables not already set.
+			if len(needPrompt) > 0 {
+				scanner := bufio.NewScanner(os.Stdin)
+				isTTY := term.IsTerminal(int(os.Stdin.Fd()))
+
+				for _, varName := range needPrompt {
+					decl := profile.Variables[varName]
+					prompt := "  " + varName
+					if decl.Required {
+						prompt += " (required)"
 					}
-					if val == "" && decl.Required {
-						return fmt.Errorf("variable %q is required", varName)
+					if decl.Default != "" {
+						prompt += " [" + decl.Default + "]"
 					}
-					if val != "" {
-						variables[varName] = val
+					prompt += ": "
+
+					if isTTY {
+						fmt.Print(prompt)
+					}
+					if scanner.Scan() {
+						val := strings.TrimSpace(scanner.Text())
+						if val == "" && decl.Default != "" {
+							val = decl.Default
+						}
+						if val == "" && decl.Required {
+							return fmt.Errorf("variable %q is required", varName)
+						}
+						if val != "" {
+							variables[varName] = val
+						}
 					}
 				}
 			}
@@ -4481,6 +4527,8 @@ After activation, run 'sysfig source render' to commit the rendered files.`,
 		},
 	}
 	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
+	cmd.Flags().StringArrayVar(&varFlags, "var", nil, "set a variable (key=value, repeatable)")
+	cmd.Flags().StringVar(&valuesFile, "values", "", "YAML file of variable values (key: value)")
 	return cmd
 }
 
@@ -4488,8 +4536,10 @@ func newSourceRenderCmd() *cobra.Command {
 	var baseDir string
 	var force, dryRun bool
 	var renderProfile string
+	var valuesFile string
+	var varFlags []string
 	cmd := &cobra.Command{
-		Use:   "render [--profile <source/profile>] [--force] [--dry-run]",
+		Use:   "render [--profile <source/profile>] [--values values.yaml] [--var key=value] [--force] [--dry-run]",
 		Short: "Render activated profiles into the local repo",
 		Long: `Render all activated profiles (or one specific profile) by:
   1. Fetching each source bundle into the local cache
@@ -4497,9 +4547,100 @@ func newSourceRenderCmd() *cobra.Command {
   3. Rendering each template and committing to track/* branches
   4. Updating state.json with source ownership
 
+--values values.yaml sets variables for multiple profiles at once (mutually
+exclusive with --var):
+
+  corp/system-proxy:
+    proxy_url: http://proxy.corp.com:3128
+    bypass_list: 10.0.0.0/8,localhost
+  corp/dns-resolvers:
+    primary_dns: 10.0.0.53
+
+--var sets variables inline for a single profile (mutually exclusive with
+--values). Format: key=value or source/profile:key=value.
+
 After rendering, run 'sysfig diff' and 'sysfig apply' to write files to disk.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
+
+			if valuesFile != "" && len(varFlags) > 0 {
+				return fmt.Errorf("--values and --var are mutually exclusive — use one or the other")
+			}
+
+			// Parse --var flags into per-profile variable maps.
+			// Format: "corp/system-proxy:proxy_url=value" or "proxy_url=value" (global).
+			profileOverrides := map[string]map[string]string{}
+			globalOverrides := map[string]string{}
+			for _, kv := range varFlags {
+				// Check for scoped format: contains "/" before ":"
+				colonIdx := strings.IndexByte(kv, ':')
+				eqIdx := strings.IndexByte(kv, '=')
+				if eqIdx < 1 {
+					return fmt.Errorf("--var %q: expected key=value or profile:key=value", kv)
+				}
+				if colonIdx > 0 && colonIdx < eqIdx {
+					// Scoped: "corp/system-proxy:proxy_url=value"
+					profile := kv[:colonIdx]
+					rest := kv[colonIdx+1:]
+					eqIdx2 := strings.IndexByte(rest, '=')
+					if eqIdx2 < 1 {
+						return fmt.Errorf("--var %q: expected profile:key=value", kv)
+					}
+					if profileOverrides[profile] == nil {
+						profileOverrides[profile] = map[string]string{}
+					}
+					profileOverrides[profile][rest[:eqIdx2]] = rest[eqIdx2+1:]
+				} else {
+					// Global: "proxy_url=value"
+					globalOverrides[kv[:eqIdx]] = kv[eqIdx+1:]
+				}
+			}
+
+			// If --values supplied, build per-profile variable maps, then apply overrides.
+			if valuesFile != "" {
+				data, err := os.ReadFile(valuesFile)
+				if err != nil {
+					return fmt.Errorf("--values: %w", err)
+				}
+				var multiVars map[string]map[string]string
+				if err := yaml.Unmarshal(data, &multiVars); err != nil {
+					return fmt.Errorf("--values %q: %w", valuesFile, err)
+				}
+				// Merge global and scoped --var overrides into the file values.
+				for profile, vars := range multiVars {
+					if vars == nil {
+						vars = map[string]string{}
+						multiVars[profile] = vars
+					}
+					for k, v := range globalOverrides {
+						vars[k] = v
+					}
+					for k, v := range profileOverrides[profile] {
+						vars[k] = v
+					}
+				}
+				// Activate profiles in sorted order for deterministic output.
+				profiles := make([]string, 0, len(multiVars))
+				for p := range multiVars {
+					profiles = append(profiles, p)
+				}
+				sort.Strings(profiles)
+				for _, sourceProfile := range profiles {
+					vars := multiVars[sourceProfile]
+					if err := core.SourceUse(core.SourceUseOptions{
+						BaseDir:       baseDir,
+						SourceProfile: sourceProfile,
+						Variables:     vars,
+					}); err != nil {
+						return fmt.Errorf("values: activate %q: %w", sourceProfile, err)
+					}
+					ok("Activated: %s", sourceProfile)
+				}
+				if len(profiles) > 0 {
+					fmt.Println()
+				}
+			}
+
 			result, err := core.SourceRender(core.RenderOptions{
 				BaseDir: baseDir,
 				Profile: renderProfile,
@@ -4542,6 +4683,8 @@ After rendering, run 'sysfig diff' and 'sysfig apply' to write files to disk.`,
 	}
 	cmd.Flags().StringVar(&baseDir, "base-dir", "", "sysfig data directory")
 	cmd.Flags().StringVar(&renderProfile, "profile", "", "limit render to one profile (e.g. corporate/system-proxy)")
+	cmd.Flags().StringVar(&valuesFile, "values", "", "YAML file with per-profile variables (profile: {key: value})")
+	cmd.Flags().StringArrayVar(&varFlags, "var", nil, "override a variable: key=value or profile:key=value (repeatable)")
 	cmd.Flags().BoolVar(&force, "force", false, "transfer ownership of conflicting files")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be rendered without writing")
 	return cmd

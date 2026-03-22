@@ -1479,8 +1479,8 @@ Manage **Config Source** template catalogs — consume shared config templates (
 ```
 sysfig source add    <name> <url>
 sysfig source list   <source>
-sysfig source use    <source/profile>
-sysfig source render [--force] [--dry-run] [--profile <source/profile>]
+sysfig source use    <source/profile> [--var key=value]... | --values <file>
+sysfig source render [--values <file>] [--profile <source/profile>] [--force] [--dry-run]
 sysfig source pull   <source>
 ```
 
@@ -1488,7 +1488,7 @@ sysfig source pull   <source>
 
 1. A *source bundle* is a git repo or bundle file containing profile directories (`profiles/<name>/profile.yaml` + templates).
 2. `sysfig source add` registers the source URL in `~/.sysfig/sources.yaml` (local, never committed).
-3. `sysfig source use` prompts for per-machine variable values and saves them to `sources.yaml`.
+3. `sysfig source use` sets per-machine variable values (interactive prompts, `--var key=value` flags, or `--values file`) and saves them to `sources.yaml`.
 4. `sysfig source render` fetches the bundle, renders each template with your variables, and commits the output to `track/*` branches exactly like manually tracked files.
 5. `sysfig diff` / `sysfig apply` work unchanged — nothing new to learn.
 
@@ -1520,11 +1520,25 @@ sysfig source list corp
 #     system-proxy        4      HTTP/HTTPS proxy — /etc/environment, apt, Docker
 #   ────────────────────────────────────────────────────────────────────────
 
-# Activate a profile (prompts for each variable in alphabetical order)
+# Activate a profile — three ways to supply variables:
+
+# 1. Interactive (TTY prompts)
 sysfig source use corp/system-proxy
 #   bypass_list [localhost,127.0.0.1,::1]: 10.0.0.0/8,localhost
 #   proxy_url (required): http://proxy.corp.com:3128
 #   ✓ Profile "corp/system-proxy" added to sources.yaml
+
+# 2. Inline flags (any order, no prompts)
+sysfig source use corp/system-proxy \
+  --var proxy_url=http://proxy.corp.com:3128 \
+  --var bypass_list=10.0.0.0/8,localhost
+
+# 3. Values file — all profiles at once, then render in one command
+sysfig source render --values corp-values.yaml
+#   ✓ Activated: corp/dns-resolvers
+#   ✓ Activated: corp/system-proxy
+#   ✓ Rendered: /etc/environment
+#   ...
 
 # Render — commits rendered output to track/* branches
 sysfig source render
@@ -1536,14 +1550,6 @@ sysfig source render
 # Review and apply (standard sysfig flow — nothing new)
 sysfig diff
 sysfig apply
-```
-
-**Scripted / unattended activation** (pipe values in alphabetical variable order):
-
-```bash
-# system-proxy: bypass_list first (a < p), then proxy_url
-printf "10.0.0.0/8,localhost\nhttp://proxy.corp.com:3128\n" \
-  | sysfig source use corp/system-proxy
 ```
 
 **Updating when the upstream template changes:**
@@ -1586,8 +1592,9 @@ sysfig track --force /etc/environment   # clears source_profile, enables sync
 | ---------- | ----------- |
 | `source add <name> <url>` | Register a source bundle URL in `~/.sysfig/sources.yaml` |
 | `source list <source>` | List available profiles (pulls latest first) |
-| `source use <source/profile>` | Activate a profile and set per-machine variable values |
-| `source render [--profile P] [--dry-run] [--force]` | Render all active profiles into `track/*` branches |
+| `source use <source/profile> [--var key=value]...` | Activate a profile; set variables inline (mutually exclusive with `--values`) |
+| `source use <source/profile> --values <file>` | Activate a profile from a flat YAML values file |
+| `source render [--values F] [--profile P] [--dry-run] [--force]` | Render profiles; `--values` activates all listed profiles before rendering |
 | `source pull <source>` | Fetch the latest bundle / git commits without rendering |
 
 > See [docs/config-sources.md](docs/config-sources.md) for the complete guide — from writing templates to publishing and deploying on a new machine. For the design rationale see [docs/rfcs/config-sources.md](docs/rfcs/config-sources.md).

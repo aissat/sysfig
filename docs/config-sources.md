@@ -28,7 +28,7 @@ profiles/                         sysfig source add corp <url>
       apt-proxy.tmpl
 ```
 
-Templates use `{{variable}}` — the same syntax as `sysfig track --template`. The rendered output lands in `track/*` branches exactly like manually tracked files. `diff`, `log`, `apply`, and `status` all work unchanged.
+Templates use `{{variable}}` — the same syntax as `sysfig track --template`. The rendered output lands in `track/*` branches exactly like manually tracked files. `diff`, `log`, and `apply` work on rendered files identically to manually tracked ones. `status`, `sync`, and `track` gain source-aware behaviour: `status` shows a `SOURCE` label, `sync` skips source-managed files, and `track` refuses to re-take ownership without `--force`.
 
 **Supported transports:**
 
@@ -110,10 +110,6 @@ files:
     owner: "root"
     group: "root"
 
-hooks:
-  post_apply:
-    - exec: systemctl daemon-reload
-    - systemd_reload: docker
 ```
 
 **Field reference:**
@@ -133,8 +129,8 @@ hooks:
 | `files[].owner` | no | File owner name |
 | `files[].group` | no | File group name |
 | `files[].encrypt` | no | If `true`, the rendered file is age-encrypted in the repo |
-| `hooks.post_apply[].exec` | no | Shell command to run after `sysfig apply` |
-| `hooks.post_apply[].systemd_reload` | no | Systemd unit to reload after apply |
+
+> **Note:** The `hooks` section (`post_apply`) is parsed from `profile.yaml` but not yet executed — hook support is planned for a future release.
 
 ### 1.3 Writing templates
 
@@ -183,17 +179,9 @@ Environment="NO_PROXY={{bypass_list}}"
 | `{{os}}` | `linux`, `darwin`, or `windows` |
 | `{{env.VAR}}` | Value of environment variable `VAR` at render time |
 
-Built-in variables can be used as defaults in `profile.yaml`. For example, a syslog profile can default the reported hostname to the machine's real hostname:
+Built-in variables (`{{hostname}}`, `{{env.VAR}}`, etc.) are available **inside template files**. They are resolved at render time by the same engine that renders `{{variable}}` placeholders. Default values in `profile.yaml` are treated as plain strings and are **not** re-rendered — writing `default: "{{hostname}}"` would produce the literal string `{{hostname}}` in output, not the machine's hostname. To use a built-in as a fallback, reference it directly in the template.
 
-```yaml
-variables:
-  hostname_override:
-    required: false
-    default: "{{hostname}}"
-    description: "Override the hostname sent to the log server"
-```
-
-**Sensitive values:** Use `{{env.PROXY_PASSWORD}}` for secrets — they are resolved from the shell environment at render time and never stored in `sources.yaml` or the repo.
+**Sensitive values:** Use `{{env.PROXY_PASSWORD}}` in template files — values are resolved from the shell environment at render time and never stored in `sources.yaml` or the repo.
 
 ### 1.4 Adding more profiles to the same bundle
 
@@ -367,23 +355,56 @@ When connected to a TTY, sysfig prompts for each variable in alphabetical order.
 
 Press Enter to accept a default. For required variables with no default, you must provide a value.
 
-**Scripted / non-interactive use:**
+**Non-interactive use with `--values` (recommended for scripting):**
 
-Pipe values in alphabetical variable order (the same order as the interactive prompts):
+Create a YAML file with all variable values and pass it to `source render` directly — activates and renders all profiles in one command:
 
 ```bash
-# Variables for system-proxy in alphabetical order: bypass_list, proxy_url
-printf "10.0.0.0/8,localhost\nhttp://proxy.corp.com:3128\n" \
-  | sysfig source use corp/system-proxy
+# lab-values.yaml
+cat > lab-values.yaml <<'EOF'
+corp/system-proxy:
+  proxy_url: http://proxy.corp.com:3128
+  bypass_list: 10.0.0.0/8,localhost
+
+corp/dns-resolvers:
+  primary_dns: 10.0.0.53
+  secondary_dns: 10.0.0.54
+  search_domain: corp.internal
+  dnssec: allow-downgrade
+  dns_over_tls: "no"
+EOF
+
+sysfig source render --values lab-values.yaml
+sysfig diff
+sysfig apply
+```
+
+You can also pass `--values` to `source use` for a single profile (flat key/value YAML):
+
+```bash
+sysfig source use corp/dns-resolvers --values dns-values.yaml
+```
+
+**Non-interactive use with `--var`:**
+
+Pass variables directly with `--var key=value` (repeatable) — no need to match alphabetical order:
+
+```bash
+sysfig source use corp/system-proxy \
+  --var proxy_url=http://proxy.corp.com:3128 \
+  --var bypass_list=10.0.0.0/8,localhost
 ```
 
 ```bash
-# Variables for dns-resolvers in alphabetical order:
-# dns_over_tls, dnssec, primary_dns, search_domain, secondary_dns
-printf "\n\n10.0.0.53\ncorp.internal\n10.0.0.54\n" \
-  | sysfig source use corp/dns-resolvers
-# (empty lines accept the default for that variable)
+sysfig source use corp/dns-resolvers \
+  --var primary_dns=10.0.0.53 \
+  --var secondary_dns=10.0.0.54 \
+  --var search_domain=corp.internal \
+  --var dnssec=allow-downgrade \
+  --var dns_over_tls=no
 ```
+
+Variables not supplied via `--var` are prompted interactively when stdin is a TTY, or read line-by-line in alphabetical order when piped.
 
 The variable values are written to `~/.sysfig/sources.yaml`. This file is local to the machine and is not committed to the machine's config repo.
 
@@ -464,7 +485,7 @@ PATH                                          HASH        STATUS
 /etc/nginx/nginx.conf                         d4e5f6a7    SYNCED
 /home/you/.bashrc                             ef891234    DIRTY
 ──────────────────────────────────────────────────────────────────────────
-  6 files  ·  4 source  ·  1 synced  ·  1 dirty
+  6 files  ·  1 synced  ·  1 dirty
 ```
 
 **Status labels for source-managed files:**
@@ -624,12 +645,8 @@ For CI or auto-provisioning where no TTY is available:
 sysfig init
 sysfig source add corp git@github.com:your-org/corp-configs.git
 
-# Pipe variables in alphabetical order
-# system-proxy: bypass_list first, then proxy_url
-printf "10.10.0.0/16,localhost\nhttp://proxy.corp.com:3128\n" \
-  | sysfig source use corp/system-proxy
-
-sysfig source render
+# All profiles + variables in one file
+sysfig source render --values /etc/provision/corp-values.yaml
 sysfig apply
 ```
 
@@ -665,10 +682,20 @@ git commit -m "update proxy profile"
 git bundle create /mnt/nfs/corp-configs.bundle --all
 # or just: git push   (for git remote transport)
 
-# ── First-time setup (consumer) ───────────────────────────────────────────
+# ── First-time setup — values file (all profiles at once) ────────────────
+sysfig source add  corp git@github.com:your-org/corp-configs.git
+sysfig source render --values corp-values.yaml
+sysfig diff && sysfig apply
+
+# ── First-time setup — inline flags (one profile at a time) ──────────────
 sysfig source add  corp git@github.com:your-org/corp-configs.git
 sysfig source list corp
-sysfig source use  corp/system-proxy
+sysfig source use  corp/system-proxy \
+  --var proxy_url=http://proxy.corp.com:3128 \
+  --var bypass_list=10.0.0.0/8,localhost
+sysfig source use  corp/dns-resolvers \
+  --var primary_dns=10.0.0.53 \
+  --var search_domain=corp.internal
 sysfig source render
 sysfig diff && sysfig apply
 
@@ -696,8 +723,10 @@ sysfig track --force /etc/environment
 |---|---|
 | `sysfig source add <name> <url>` | Register a new source bundle |
 | `sysfig source list <name>` | List all profiles in a source (pulls latest first) |
-| `sysfig source use <name>/<profile>` | Activate a profile and set variable values |
-| `sysfig source render [--profile P] [--dry-run] [--force]` | Render all active profiles into the repo |
+| `sysfig source use <name>/<profile> [--var key=value]...` | Activate a profile; pass variables inline (mutually exclusive with `--values`) |
+| `sysfig source use <name>/<profile> --values <file>` | Activate a profile from a flat YAML values file (mutually exclusive with `--var`) |
+| `sysfig source render [--values F] [--profile P] [--dry-run] [--force]` | Render profiles; `--values` activates all listed profiles before rendering |
+| `sysfig source render [--var key=value]... [--profile P]` | Render with inline variable overrides (`--var` and `--values` are mutually exclusive) |
 | `sysfig source pull <name>` | Fetch the latest bundle without rendering |
 
 ### `sources.yaml` reference
@@ -735,7 +764,7 @@ profiles:
       log_port: "514"
       log_protocol: "tcp"
       log_facility: "*.warn;auth,authpriv.*"
-      # hostname_override omitted — defaults to {{hostname}} (machine hostname)
+      # hostname_override omitted — uses the plain-string default from profile.yaml
 ```
 
 **Notes:**
@@ -786,9 +815,4 @@ files:
     mode: "0644"
     owner: "root"
     group: "root"
-
-hooks:
-  post_apply:
-    - exec: systemctl daemon-reload
-    - systemd_reload: docker
 ```
