@@ -1,0 +1,14 @@
+[Unit]
+Description=Run sysfig integrity audit periodically
+Documentation=https://github.com/aissat/sysfig
+
+[Timer]
+# Run 5 minutes after boot (give the system time to settle).
+OnBootSec=5min
+# Then every hour.
+OnUnitActiveSec=1h
+# If the timer fires while the system was suspended, catch up immediately.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

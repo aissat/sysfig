@@ -1,0 +1,17 @@
+[Unit]
+Description=sysfig integrity audit
+Documentation=https://github.com/aissat/sysfig
+# Only run if sysfig state exists; skip silently on fresh systems.
+ConditionPathExists=%h/.sysfig/state.json
+
+[Service]
+Type=oneshot
+# Audit local-only and hash-only files.
+# Exit code 1 = drift detected; systemd marks the unit as failed → OnFailure
+# or alerting tools (e.g. systemd-notify, email via OnFailure=) can react.
+ExecStart=/usr/local/bin/sysfig audit --quiet
+# Uncomment to send a desktop notification on drift (requires libnotify):
+# OnFailure=sysfig-audit-notify@%n.service
+
+[Install]
+WantedBy=default.target
