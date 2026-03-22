@@ -1,5 +1,5 @@
 name: sysfig
-arch: amd64
+arch: ${GOARCH}
 platform: linux
 version: ${VERSION}
 maintainer: aissat <aissat@github>
@@ -13,8 +13,8 @@ depends:
   - git
 
 contents:
-  # Main binary
-  - src: dist/sysfig-linux-${GOARCH}
+  # Main binary — staged by CI to a fixed name before nfpm is invoked
+  - src: dist/sysfig-pkg
     dst: /usr/bin/sysfig
     file_info:
       mode: 0755

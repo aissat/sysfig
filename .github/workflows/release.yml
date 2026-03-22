@@ -108,6 +108,7 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           for arch in amd64 arm64; do
+            cp dist/sysfig-linux-${arch} dist/sysfig-pkg
             for fmt in deb rpm apk; do
               GOARCH=${arch} VERSION=${VERSION} \
                 nfpm package \
@@ -116,6 +117,7 @@ jobs:
                   --target dist/
             done
           done
+          rm -f dist/sysfig-pkg
 
       - name: Generate checksums
         run: |
