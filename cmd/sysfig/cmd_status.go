@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -323,8 +324,31 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 	return hasDiff
 }
 
+// flatTypeRank returns a sort key for TYPE so file < group < local < hash.
+func flatTypeRank(r core.FileStatusResult) int {
+	switch {
+	case r.HashOnly:
+		return 3
+	case r.LocalOnly:
+		return 2
+	case r.Group != "":
+		return 1
+	default:
+		return 0
+	}
+}
+
 // printStatusFlat renders every tracked file as its own row.
 func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff bool) {
+	// Sort by type rank first, then alphabetically by system path.
+	sort.Slice(results, func(i, j int) bool {
+		ri, rj := flatTypeRank(results[i]), flatTypeRank(results[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return results[i].SystemPath < results[j].SystemPath
+	})
+
 	pathW := len("PATH")
 	stW := len("STATUS")
 	slugW := 0
@@ -350,24 +374,43 @@ func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff boo
 
 	const hashW = 10 // "HASH" + 2 padding
 	if showIDs {
-		fmt.Printf("%s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", slugW)), clrBold.Sprint("STATUS"))
+		fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", slugW)), clrBold.Sprint(pad("STATUS", stW)), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
 	} else {
-		fmt.Printf("%s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint("STATUS"))
+		fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("STATUS", stW)), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
 	}
 	divider()
 
+	implicitTags := core.DetectPlatformTags()
 	totals := map[string]int{}
 	for _, r := range results {
 		label := statusLabel(r.Status)
 		switch r.Status {
-		case core.StatusDirty, core.StatusPending, core.StatusMissing:
+		case core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew:
 			hasDiff = true
 		}
 		totals[string(r.Status)]++
+
+		typeStr := "file"
+		switch {
+		case r.HashOnly:
+			typeStr = "hash"
+		case r.LocalOnly:
+			typeStr = "local"
+		case r.Group != "":
+			typeStr = "group"
+		}
+		typeCol := clrDim.Sprint(pad(typeStr, 6))
+
+		tags := r.Tags
+		if len(tags) == 0 {
+			tags = implicitTags
+		}
+		tagsCol := clrInfo.Sprint(strings.Join(tags, ","))
+
 		if showIDs {
-			fmt.Printf("%s  %s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), clrDim.Sprint(pad(r.Slug, slugW)), statusColored(r.Status, pad(label, stW)))
+			fmt.Printf("%s  %s  %s  %s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), clrDim.Sprint(pad(r.Slug, slugW)), statusColored(r.Status, pad(label, stW)), typeCol, tagsCol)
 		} else {
-			fmt.Printf("%s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), statusColored(r.Status, pad(label, stW)))
+			fmt.Printf("%s  %s  %s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), statusColored(r.Status, pad(label, stW)), typeCol, tagsCol)
 		}
 
 		formatMetaDrift(&r, "   ")
@@ -376,11 +419,24 @@ func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff boo
 	divider()
 	var sp []string
 	sp = append(sp, clrBold.Sprintf("%d files", len(results)))
-	if n := totals[string(core.StatusSynced)]; n > 0 { sp = append(sp, clrSynced.Sprintf("%d synced", n)) }
-	if n := totals[string(core.StatusDirty)]; n > 0 { sp = append(sp, clrDirty.Sprintf("%d dirty", n)) }
-	if n := totals[string(core.StatusPending)]; n > 0 { sp = append(sp, clrPending.Sprintf("%d pending", n)) }
-	if n := totals[string(core.StatusMissing)]; n > 0 { sp = append(sp, clrMissing.Sprintf("%d missing", n)) }
-	if n := totals[string(core.StatusEncrypted)]; n > 0 { sp = append(sp, clrEncrypted.Sprintf("%d encrypted", n)) }
+	if n := totals[string(core.StatusSynced)]; n > 0 {
+		sp = append(sp, clrSynced.Sprintf("%d synced", n))
+	}
+	if n := totals[string(core.StatusDirty)]; n > 0 {
+		sp = append(sp, clrDirty.Sprintf("%d dirty", n))
+	}
+	if n := totals[string(core.StatusPending)]; n > 0 {
+		sp = append(sp, clrPending.Sprintf("%d pending", n))
+	}
+	if n := totals[string(core.StatusMissing)]; n > 0 {
+		sp = append(sp, clrMissing.Sprintf("%d missing", n))
+	}
+	if n := totals[string(core.StatusEncrypted)]; n > 0 {
+		sp = append(sp, clrEncrypted.Sprintf("%d encrypted", n))
+	}
+	if n := totals[string(core.StatusNew)]; n > 0 {
+		sp = append(sp, clrNew.Sprintf("%d new", n))
+	}
 	fmt.Printf("  %s\n", strings.Join(sp, clrDim.Sprint("  ·  ")))
 	return hasDiff
 }
