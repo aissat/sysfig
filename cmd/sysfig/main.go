@@ -540,6 +540,9 @@ func main() {
 func newDeployCmd() *cobra.Command {
 	var (
 		baseDir       string
+		fromURL       string
+		profile       string
+		vars          []string
 		dryRun        bool
 		noBackup      bool
 		skipEncrypted bool
@@ -571,6 +574,99 @@ No sysfig installation is required on the remote host.`,
 			remoteURL := ""
 			if len(args) > 0 {
 				remoteURL = args[0]
+			}
+
+			// ── --from + --profile: render template repo → push to host ──
+			if fromURL != "" && profile != "" {
+				if host == "" {
+					return fmt.Errorf("deploy --from --profile requires --host")
+				}
+				fmt.Println()
+				clrBold.Printf("  sysfig deploy (source) → %s\n", host)
+				fmt.Println(clrDim.Sprint("  ─────────────────────────────────────────────"))
+				fmt.Println()
+
+				tmpDir, err := os.MkdirTemp("", "sysfig-source-*")
+				if err != nil {
+					return fmt.Errorf("deploy --from: create temp dir: %w", err)
+				}
+				defer os.RemoveAll(tmpDir)
+
+				info("Fetching %s …", clrBold.Sprint(fromURL))
+				repoDir := filepath.Join(tmpDir, "repo.git")
+				if err := core.FetchProfileRepo(fromURL, repoDir); err != nil {
+					return fmt.Errorf("deploy --from: fetch: %w", err)
+				}
+
+				// Parse --var key=value pairs.
+				varMap := make(map[string]string, len(vars))
+				for _, v := range vars {
+					k, val, ok := strings.Cut(v, "=")
+					if !ok {
+						return fmt.Errorf("deploy --var: invalid format %q (expected key=value)", v)
+					}
+					varMap[k] = val
+				}
+
+				info("Rendering profile %s …", clrBold.Sprint(profile))
+				rendered, err := core.RenderProfileFromRepo(repoDir, profile, varMap)
+				if err != nil {
+					return err
+				}
+
+				applied, failed, err := core.RemoteDeployRendered(core.RemoteRenderedOptions{
+					Host:    host,
+					SSHKey:  sshKey,
+					SSHPort: sshPort,
+					Files:   rendered,
+					Sudo:    sshSudo,
+					DryRun:  dryRun,
+					Progress: func(path string, writeErr error) {
+						if dryRun {
+							fmt.Printf("  %s %s → %s\n", clrDim.Sprint("[dry-run]"), clrInfo.Sprint(profile), clrDim.Sprint(path))
+						} else if writeErr != nil {
+							fail("%s  %s", path, writeErr)
+						} else {
+							ok("Applied: %s → %s", clrBold.Sprint(profile), path)
+						}
+					},
+				})
+				if err != nil {
+					return err
+				}
+
+				fmt.Println()
+				divider()
+				clrOK.Printf("  ✓ Source deploy complete! (%s)\n\n", host)
+				fmt.Printf("  Applied: %d", applied)
+				if failed > 0 {
+					fmt.Printf("  ·  %s", clrErr.Sprintf("Failed: %d", failed))
+				}
+				fmt.Println()
+				if failed > 0 {
+					os.Exit(1)
+				}
+				return nil
+			}
+
+			// ── --from: clone a sysfig repo into a temp dir ───────────
+			if fromURL != "" {
+				tmpDir, err := os.MkdirTemp("", "sysfig-from-*")
+				if err != nil {
+					return fmt.Errorf("deploy --from: create temp dir: %w", err)
+				}
+				defer os.RemoveAll(tmpDir)
+
+				info("Fetching from %s …", clrBold.Sprint(fromURL))
+				if _, err := core.Clone(core.CloneOptions{
+					RemoteURL:     fromURL,
+					BaseDir:       tmpDir,
+					SkipEncrypted: skipEncrypted,
+					Yes:           true,
+				}); err != nil {
+					return fmt.Errorf("deploy --from: fetch: %w", err)
+				}
+				baseDir = tmpDir
 			}
 
 			// ── Remote host mode ──────────────────────────────────────
@@ -751,6 +847,9 @@ No sysfig installation is required on the remote host.`,
 
 	f := cmd.Flags()
 	f.StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
+	f.StringVar(&fromURL, "from", "", "fetch configs from this git remote or bundle URL instead of local repo")
+	f.StringVar(&profile, "profile", "", "render this profile from a config-template repo (requires --from and --host)")
+	f.StringArrayVar(&vars, "var", nil, "profile variable value: key=value (repeatable, used with --profile)")
 	f.StringArrayVar(&ids, "id", nil, "deploy only this ID or 8-char prefix (repeatable)")
 	f.StringArrayVar(&tags, "tag", nil, "deploy only files with this tag (repeatable) — e.g. --tag arch")
 	f.StringArrayVar(&paths, "path", nil, "deploy only the file at this system path (repeatable)")

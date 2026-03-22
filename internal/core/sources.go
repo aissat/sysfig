@@ -648,3 +648,103 @@ func runProfileHooks(hooks []ProfileHookDecl) []error {
 	}
 	return errs
 }
+
+// ── Direct remote profile rendering ──────────────────────────────────────────
+
+// RenderedFile is a single rendered template output ready to be written.
+type RenderedFile struct {
+	Dest    string      // absolute destination path, e.g. /etc/environment
+	Content []byte      // fully rendered file content
+	Mode    os.FileMode // file permission (defaults to 0o644)
+}
+
+// FetchProfileRepo clones any git/bundle URL into a bare repo at repoDir.
+// If repoDir already contains a valid bare repo it is updated (fetch/pull).
+// This is the lightweight version of ensureSourceRepo for one-shot operations.
+func FetchProfileRepo(url, repoDir string) error {
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		return fmt.Errorf("source: create repo dir: %w", err)
+	}
+	repoExists := func() bool {
+		_, err := os.Stat(filepath.Join(repoDir, "HEAD"))
+		return err == nil
+	}
+	if ParseRemoteKind(url) != RemoteGit {
+		if !repoExists() {
+			if err := bundleGitInitBare(repoDir); err != nil {
+				return fmt.Errorf("source: init repo: %w", err)
+			}
+		}
+		_, err := BundlePull(BundlePullOptions{RepoDir: repoDir, RemoteURL: url})
+		return err
+	}
+	if !repoExists() {
+		return gitClone(url, repoDir)
+	}
+	return gitBareRun(repoDir, 60*time.Second, nil, "fetch", "origin")
+}
+
+// RenderProfileFromRepo renders a single profile from an already-fetched bare
+// repo dir and returns the rendered files ready for deployment.
+//
+//   - repoDir: path to the bare git repo containing profiles/
+//   - profileName: name of the profile directory under profiles/
+//   - vars: user-supplied variable values (override defaults from profile.yaml)
+func RenderProfileFromRepo(repoDir, profileName string, vars map[string]string) ([]RenderedFile, error) {
+	ref := sourceBestRef(repoDir)
+	profilePath := "profiles/" + profileName + "/profile.yaml"
+	data, err := gitShowBytesAt(repoDir, ref, profilePath)
+	if err != nil {
+		return nil, fmt.Errorf("source: read profile %q: %w", profileName, err)
+	}
+	var profile ProfileYAML
+	if err := yaml.Unmarshal(data, &profile); err != nil {
+		return nil, fmt.Errorf("source: parse profile.yaml: %w", err)
+	}
+
+	// Build template vars: start with built-in OS vars, overlay declared
+	// profile defaults, then overlay caller-supplied vars.
+	tvars := DefaultTemplateVars()
+	if tvars.Extra == nil {
+		tvars.Extra = make(map[string]string)
+	}
+	for name, decl := range profile.Variables {
+		if decl.Default != "" {
+			tvars.Extra[name] = decl.Default
+		}
+	}
+	for k, v := range vars {
+		tvars.Extra[k] = v
+	}
+
+	// Validate required variables.
+	for name, decl := range profile.Variables {
+		if decl.Required {
+			if _, ok := tvars.Extra[name]; !ok {
+				return nil, fmt.Errorf("source: profile %q: required variable %q not provided", profileName, name)
+			}
+		}
+	}
+
+	var results []RenderedFile
+	for _, f := range profile.Files {
+		tmplPath := "profiles/" + profileName + "/" + f.Template
+		tmplData, err := gitShowBytesAt(repoDir, ref, tmplPath)
+		if err != nil {
+			return nil, fmt.Errorf("source: read template %q: %w", f.Template, err)
+		}
+		rendered, err := RenderTemplate(tmplData, tvars)
+		if err != nil {
+			return nil, fmt.Errorf("source: render %q: %w", f.Dest, err)
+		}
+		mode := os.FileMode(0o644)
+		if f.Mode != "" {
+			var m uint32
+			if _, err := fmt.Sscanf(f.Mode, "%o", &m); err == nil {
+				mode = os.FileMode(m)
+			}
+		}
+		results = append(results, RenderedFile{Dest: f.Dest, Content: rendered, Mode: mode})
+	}
+	return results, nil
+}

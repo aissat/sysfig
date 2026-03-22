@@ -27,6 +27,9 @@ The `<remote-url>` can be any URL supported by `sysfig remote set`: a git remote
 | Flag               | Default     | Description                                              |
 | ------------------ | ----------- | -------------------------------------------------------- |
 | `--base-dir`       | `~/.sysfig` | Directory where sysfig stores its data                   |
+| `--from`           | —           | Fetch configs from this git remote or bundle URL instead of local `~/.sysfig` |
+| `--profile`        | —           | Render this profile from a config-template repo (requires `--from` and `--host`) |
+| `--var`            | —           | Profile variable: `key=value` (repeatable, used with `--profile`) |
 | `--id`             | —           | Apply only this tracking ID or 8-char prefix (repeatable) |
 | `--tag`            | —           | Apply only files with this tag (repeatable) — e.g. `--tag arch` |
 | `--path`           | —           | Apply only the file at this system path (repeatable)     |
@@ -44,11 +47,13 @@ The `<remote-url>` can be any URL supported by `sysfig remote set`: a git remote
 | `--host`       | —       | SSH target (`user@hostname`) — pushes files to the remote instead |
 | `--ssh-key`    | —       | Path to SSH identity file (default: use ssh-agent)                |
 | `--ssh-port`   | `22`    | SSH port on the remote host                                       |
-| `--sudo`       | off     | Wrap remote writes with `sudo` — required for `/etc/` and other root-owned paths |
+| `--sudo`       | off     | Use `sudo` for root-owned paths; automatically skipped for the SSH user's home dir, with retry on permission denied |
 
 > When `--host` is set sysfig reads files from the **local** repo and writes them to the remote using Go's native SSH client (no `ssh` binary required on the local machine). **No sysfig installation is needed on the remote** — only `mkdir`, `cat`, and `chmod`.
 >
 > Files tracked with `--local` or `--hash-only` are silently skipped — they have no content in the repo.
+>
+> **`--from <url>`:** When set, sysfig clones the URL into a temporary directory, deploys from it, then cleans up. The local `~/.sysfig` is not read or modified. Accepts any URL supported by `sysfig remote set` — git remotes (`git@github.com:…`) and bundle remotes (`bundle+local://…`, `bundle+ssh://…`).
 >
 > **Troubleshooting — 90-second hang per file:** If deploy is slow, the remote sshd is likely running `pam_systemd.so` without `systemd-logind` active (common in containers and minimal VMs). Fix: `sudo sed -i 's/^session.*optional.*pam_systemd.so/#&/' /etc/pam.d/common-session` on the target.
 
@@ -96,7 +101,7 @@ sysfig deploy bundle+local:///mnt/share/ops.bundle --dry-run
 # Deploy all tracked files to a remote server
 sysfig deploy --host user@192.168.1.10 --all
 
-# Deploy /etc/ files (root-owned on remote) — requires sudo on target
+# Deploy /etc/ files (root-owned on remote) — sudo applied automatically where needed
 sysfig deploy --host user@server --tag linux --sudo
 
 # Deploy only arch-tagged files
@@ -108,6 +113,12 @@ sysfig deploy --host user@server --path /etc/nginx/nginx.conf
 # Deploy a specific file by tracking ID
 sysfig deploy --host user@server --id nginx_main
 
+# Deploy directly from a git remote — no local ~/.sysfig needed
+sysfig deploy --host user@server --from git@github.com:you/configs.git --tag linux --sudo
+
+# Deploy directly from a bundle file on NFS
+sysfig deploy --host user@server --from bundle+local:///mnt/nfs/ops.bundle --all --sudo
+
 # Preview what would be pushed (no SSH writes)
 sysfig deploy --host user@server --tag arch --dry-run
 
@@ -117,6 +128,43 @@ sysfig deploy --host deploy@server --tag linux --ssh-key ~/.ssh/deploy_ed25519
 # Non-standard SSH port
 sysfig deploy --host user@server --tag arch --ssh-port 2222 --sudo
 ```
+
+**Config-template deploy (no local `~/.sysfig` needed):**
+
+```bash
+# Deploy an NTP config profile from a public template repo
+sysfig deploy --host user@server \
+  --from git@github.com:aissat/config-template.git \
+  --profile ntp-pool \
+  --var ntp_server="ntp.corp.internal" \
+  --sudo
+
+# Deploy DNS resolver config
+sysfig deploy --host user@server \
+  --from git@github.com:aissat/config-template.git \
+  --profile dns-resolvers \
+  --var primary_dns="10.0.0.53" \
+  --var secondary_dns="1.1.1.1" \
+  --var search_domain="corp.internal" \
+  --sudo
+
+# Deploy system-wide HTTP proxy config
+sysfig deploy --host user@server \
+  --from git@github.com:aissat/config-template.git \
+  --profile system-proxy \
+  --var proxy_url="http://proxy.corp.com:3128" \
+  --var bypass_list="localhost,127.0.0.1,10.0.0.0/8" \
+  --sudo
+
+# Preview before writing
+sysfig deploy --host user@server \
+  --from git@github.com:aissat/config-template.git \
+  --profile ntp-pool \
+  --var ntp_server="ntp.ubuntu.com" \
+  --sudo --dry-run
+```
+
+> **Config-template repos** contain `profiles/<name>/profile.yaml` + template files with `{{variable}}` placeholders. Built-in variables (`{{hostname}}`, `{{os}}`, `{{user}}`, `{{home}}`, `{{env.VAR}}`) are resolved from the **remote host's perspective** at render time on the local machine. The rendered output is pushed directly to the target via SSH — no sysfig installation required on either machine.
 
 **Use in CI / server provisioning:**
 
@@ -145,6 +193,7 @@ done
 | `--host` set, `--tag` filter       | Only files carrying that tag are pushed; untagged files fall back to `DetectPlatformTags()` |
 | `--host` set, `--path` filter      | Only the file at that exact system path is pushed |
 | No `--all`, `--tag`, `--id`, `--path` | Error — explicit scope required                |
+| `--from` + `--profile` + `--host`  | Clone template repo → render with `--var` values → push rendered files to remote host |
 | Remote path's parent dir missing   | Created automatically (`mkdir -p`)               |
 
 ---

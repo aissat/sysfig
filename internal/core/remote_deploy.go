@@ -266,12 +266,25 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 			mode,
 			shellQuote(dstPath),
 		)
-		if opts.Sudo {
+		// Use sudo only when needed: --sudo is set AND the destination is
+		// not inside the SSH user's home directory (which they already own).
+		useSudo := opts.Sudo && needsSudo(dstPath, sshUser)
+		if useSudo {
 			remoteShell = "sudo sh -c " + shellQuote(remoteShell)
 		}
 
-		if err := sshExecWithStdin(sshClient, remoteShell, content); err != nil {
-			fr.Err = err
+		writeErr := sshExecWithStdin(sshClient, remoteShell, content)
+		// If write failed with permission denied and --sudo is set but we
+		// skipped sudo (home-dir heuristic), retry with sudo.
+		if writeErr != nil && opts.Sudo && !useSudo && strings.Contains(writeErr.Error(), "Permission denied") {
+			sudoShell := "sudo sh -c " + shellQuote(fmt.Sprintf(
+				"mkdir -p %s && cat > %s && chmod %04o %s",
+				shellQuote(destDir), shellQuote(dstPath), mode, shellQuote(dstPath),
+			))
+			writeErr = sshExecWithStdin(sshClient, sudoShell, content)
+		}
+		if writeErr != nil {
+			fr.Err = writeErr
 			emit(fr)
 			result.Failed++
 			continue
@@ -286,6 +299,74 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	netConn.Close()
 
 	return result, nil
+}
+
+// ── RemoteDeployRendered ──────────────────────────────────────────────────────
+
+// RemoteRenderedOptions configures a push of pre-rendered files to a remote host.
+type RemoteRenderedOptions struct {
+	Host    string
+	SSHKey  string
+	SSHPort int
+	Files   []RenderedFile
+	Sudo    bool
+	DryRun  bool
+	Progress func(path string, err error)
+}
+
+// RemoteDeployRendered pushes a slice of already-rendered files to a remote
+// host over SSH. Used by `deploy --from <template-repo> --profile <name>`.
+func RemoteDeployRendered(opts RemoteRenderedOptions) (applied, failed int, err error) {
+	sshCfg, err := buildSSHClientConfig(opts.SSHKey)
+	if err != nil {
+		return 0, 0, fmt.Errorf("remote deploy rendered: %w", err)
+	}
+	sshUser, sshAddr := parseSSHTarget(opts.Host, opts.SSHPort)
+	sshCfg.User = sshUser
+
+	netConn, err := net.DialTimeout("tcp", sshAddr, 30*time.Second)
+	if err != nil {
+		return 0, 0, fmt.Errorf("remote deploy rendered: tcp dial %s: %w", sshAddr, err)
+	}
+	sshConn, chans, reqs, connErr := gossh.NewClientConn(netConn, sshAddr, sshCfg)
+	if connErr != nil {
+		netConn.Close()
+		return 0, 0, fmt.Errorf("remote deploy rendered: ssh handshake: %w", connErr)
+	}
+	sshClient := gossh.NewClient(sshConn, chans, reqs)
+
+	for _, rf := range opts.Files {
+		if opts.DryRun {
+			if opts.Progress != nil {
+				opts.Progress(rf.Dest, nil)
+			}
+			continue
+		}
+		destDir := filepath.Dir(rf.Dest)
+		shell := fmt.Sprintf("mkdir -p %s && cat > %s && chmod %04o %s",
+			shellQuote(destDir), shellQuote(rf.Dest), rf.Mode, shellQuote(rf.Dest))
+		useSudo := opts.Sudo && needsSudo(rf.Dest, sshUser)
+		if useSudo {
+			shell = "sudo sh -c " + shellQuote(shell)
+		}
+		writeErr := sshExecWithStdin(sshClient, shell, rf.Content)
+		if writeErr != nil && opts.Sudo && !useSudo && strings.Contains(writeErr.Error(), "Permission denied") {
+			sudo := fmt.Sprintf("mkdir -p %s && cat > %s && chmod %04o %s",
+				shellQuote(destDir), shellQuote(rf.Dest), rf.Mode, shellQuote(rf.Dest))
+			writeErr = sshExecWithStdin(sshClient, "sudo sh -c "+shellQuote(sudo), rf.Content)
+		}
+		if opts.Progress != nil {
+			opts.Progress(rf.Dest, writeErr)
+		}
+		if writeErr != nil {
+			failed++
+		} else {
+			applied++
+		}
+	}
+
+	netConn.Close()
+	return applied, failed, nil
 }
 
 // sshExecWithStdin runs cmd on the remote host, piping content to its stdin.
@@ -372,6 +453,17 @@ func parseSSHTarget(target string, port int) (user, addr string) {
 		p = port
 	}
 	return u, fmt.Sprintf("%s:%d", host, p)
+}
+
+// needsSudo reports whether writing to dstPath requires elevated privileges.
+// Returns false when the path is under the SSH user's home directory — they
+// already own it. Returns true for system paths (/etc/, /usr/, /var/, etc.).
+func needsSudo(dstPath, sshUser string) bool {
+	if sshUser == "" {
+		return true
+	}
+	userHome := "/home/" + sshUser + "/"
+	return !strings.HasPrefix(dstPath, userHome)
 }
 
 // shellQuote wraps s in single quotes, escaping any embedded single quotes.
