@@ -143,7 +143,7 @@ sysfig track /etc/apt/sources.list     # stored as: linux,debian
 
 # status and audit now show TYPE and TAGS columns:
 # PATH              HASH        STATUS    TYPE    TAGS
-# /home/aye7/       018e4a02    3 synced  file    linux,arch
+# /home/user/       018e4a02    3 synced  file    linux,arch
 # /etc/pacman.d/    63d01e28    11 synced  group   linux,arch
 
 # Deploy only to matching hosts — --tag or --all is required:

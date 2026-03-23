@@ -1514,7 +1514,7 @@ sysfig tag --list
 # Tag all currently-untagged files with the local OS + distro
 sysfig tag --auto
 #   ✓ Tagged  /etc/pacman.conf        linux,arch
-#   ✓ Tagged  /home/aye7/.zshrc      linux,arch
+#   ✓ Tagged  /home/user/.zshrc      linux,arch
 #   ✓ Skipped /etc/nginx/nginx.conf  (already tagged)
 
 # Rewrite tags on every tracked file (useful after distro migration)

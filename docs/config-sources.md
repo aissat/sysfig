@@ -123,7 +123,7 @@ files:
 | `variables.<name>.default` | no | Value used when the variable is omitted (use `""` for intentionally empty) |
 | `variables.<name>.description` | no | Shown during interactive `sysfig source use` prompt |
 | `variables.<name>.example` | no | Example value shown when the field is required |
-| `files[].dest` | yes | Absolute path on the target machine (e.g. `/etc/environment`) |
+| `files[].dest` | yes | Absolute destination path; supports `{{variable}}` substitution (e.g. `/home/{{user}}/Workspace/{{workspace}}/.gitconfig`) |
 | `files[].template` | yes | Path to the template file, relative to the profile directory |
 | `files[].mode` | no | Octal permission string (e.g. `"0644"`) |
 | `files[].owner` | no | File owner name |
@@ -417,7 +417,43 @@ Variables not supplied via `--var` are prompted interactively when stdin is a TT
 
 The variable values are written to `~/.sysfig/sources.yaml`. This file is local to the machine and is not committed to the machine's config repo.
 
-If the profile is already activated, running `source use` again overwrites the variable values.
+Running `source use` again with the **same variables** overwrites the existing entry (idempotent). Running it with **different variables** adds a second activation — useful for profiles that are used multiple times with different parameters (see [Multiple activations](#multiple-activations-of-the-same-profile) below).
+
+### Multiple activations of the same profile
+
+Some profiles are designed to be activated more than once with different variables. A common example is `git-identity` from the community bundle, which generates a per-workspace `.gitconfig`:
+
+```bash
+# Activate for the "acme" workspace
+sysfig source use community/git-identity \
+  --var workspace=acme \
+  --var user=alice \
+  --var name="alice" \
+  --var email="alice@acme.com" \
+  --var ssh_key=acme
+
+# Activate again for "personal" — different variables → second entry, no conflict
+sysfig source use community/git-identity \
+  --var workspace=personal \
+  --var user=alice \
+  --var name="alice" \
+  --var email="alice@example.com"
+
+sysfig source render
+# ✓ Rendered: /home/alice/Workspace/acme/.gitconfig
+# ✓ Rendered: /home/alice/Workspace/personal/.gitconfig
+```
+
+The `dest` path in the profile uses `{{workspace}}` as a variable:
+
+```yaml
+files:
+  - dest: /home/{{user}}/Workspace/{{workspace}}/.gitconfig
+    mode: "0644"
+    template: templates/gitconfig.tmpl
+```
+
+Each unique combination of `source + variables` is stored as a separate entry in `sources.yaml`. Running the same command twice (identical variables) is idempotent — no duplicate is added.
 
 ### 3.4 Render
 
@@ -732,7 +768,7 @@ sysfig track --force /etc/environment
 |---|---|
 | `sysfig source add <name> <url>` | Register a new source bundle |
 | `sysfig source list <name>` | List all profiles in a source (pulls latest first) |
-| `sysfig source use <name>/<profile> [--var key=value]...` | Activate a profile; pass variables inline (mutually exclusive with `--values`) |
+| `sysfig source use <name>/<profile> [--var key=value]...` | Activate a profile inline; same profile + same vars = update, same profile + different vars = new activation |
 | `sysfig source use <name>/<profile> --values <file>` | Activate a profile from a flat YAML values file (mutually exclusive with `--var`) |
 | `sysfig source render [--values F] [--profile P] [--dry-run] [--force]` | Render profiles; `--values` activates all listed profiles before rendering |
 | `sysfig source render [--var key=value]... [--profile P]` | Render with inline variable overrides (`--var` and `--values` are mutually exclusive) |
