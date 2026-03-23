@@ -17,6 +17,7 @@ package core
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -329,19 +330,21 @@ func SourceUse(opts SourceUseOptions) error {
 		return err
 	}
 
-	// Update existing activation if it already exists.
+	incoming := ProfileActivation{
+		Source:    opts.SourceProfile,
+		Variables: opts.Variables,
+	}
+
+	// Dedup by source + variables: same profile with same vars = update in place.
+	// Same profile with different vars = new activation (e.g. git-identity for proda vs charik).
 	for i, p := range cfg.Profiles {
-		if p.Source == opts.SourceProfile {
-			cfg.Profiles[i].Variables = opts.Variables
+		if p.Source == incoming.Source && maps.Equal(p.Variables, incoming.Variables) {
+			cfg.Profiles[i] = incoming
 			return SaveSourcesConfig(opts.BaseDir, cfg)
 		}
 	}
 
-	// Add new activation.
-	cfg.Profiles = append(cfg.Profiles, ProfileActivation{
-		Source:    opts.SourceProfile,
-		Variables: opts.Variables,
-	})
+	cfg.Profiles = append(cfg.Profiles, incoming)
 	return SaveSourcesConfig(opts.BaseDir, cfg)
 }
 
@@ -505,7 +508,12 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 
 		// Render each output file declared in the profile.
 		for _, fileDecl := range profile.Files {
-			dest := fileDecl.Dest // e.g. /etc/environment
+			// Substitute variables in the dest path too (e.g. /home/{{user}}/…).
+			renderedDest, err := RenderTemplate([]byte(fileDecl.Dest), tmplVars)
+			if err != nil {
+				return nil, fmt.Errorf("source render: render dest path %q: %w", fileDecl.Dest, err)
+			}
+			dest := strings.TrimRight(string(renderedDest), "\n")
 			relPath := strings.TrimPrefix(dest, "/")
 
 			// Read template from source repo.
@@ -737,6 +745,12 @@ func RenderProfileFromRepo(repoDir, profileName string, vars map[string]string) 
 		if err != nil {
 			return nil, fmt.Errorf("source: render %q: %w", f.Dest, err)
 		}
+		// Substitute variables in dest path (e.g. /home/{{user}}/Workspace/{{workspace}}/).
+		renderedDestBytes, err := RenderTemplate([]byte(f.Dest), tvars)
+		if err != nil {
+			return nil, fmt.Errorf("source: render dest path %q: %w", f.Dest, err)
+		}
+		f.Dest = strings.TrimRight(string(renderedDestBytes), "\n")
 		mode := os.FileMode(0o644)
 		if f.Mode != "" {
 			var m uint32
