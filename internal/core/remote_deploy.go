@@ -396,6 +396,28 @@ func sshExec(client *gossh.Client, cmd string) error {
 	return sshExecWithStdin(client, cmd, nil)
 }
 
+// loadHostKeyCallback loads an allow-listed SSH host public key and returns a HostKeyCallback
+// that verifies the server's host key against it. The host key file path is taken from the
+// SYSFIG_SSH_HOST_KEY environment variable and should point to a public key file (e.g. *.pub).
+func loadHostKeyCallback() (gossh.HostKeyCallback, error) {
+	hostKeyPath := os.Getenv("SYSFIG_SSH_HOST_KEY")
+	if hostKeyPath == "" {
+		return nil, fmt.Errorf("SSH host key verification not configured: set SYSFIG_SSH_HOST_KEY to a host public key file")
+	}
+
+	hostKeyBytes, err := os.ReadFile(hostKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read SSH host key %s: %w", hostKeyPath, err)
+	}
+
+	publicKey, err := gossh.ParsePublicKey(hostKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse SSH host key %s: %w", hostKeyPath, err)
+	}
+
+	return gossh.FixedHostKey(publicKey), nil
+}
+
 // buildSSHClientConfig creates an ssh.ClientConfig using a key file and/or
 // the SSH agent (SSH_AUTH_SOCK).
 func buildSSHClientConfig(sshKey string) (*gossh.ClientConfig, error) {
@@ -430,9 +452,14 @@ func buildSSHClientConfig(sshKey string) (*gossh.ClientConfig, error) {
 		return nil, fmt.Errorf("no SSH auth available — provide --ssh-key or set SSH_AUTH_SOCK")
 	}
 
+	hostKeyCallback, err := loadHostKeyCallback()
+	if err != nil {
+		return nil, err
+	}
+
 	return &gossh.ClientConfig{
 		Auth:            authMethods,
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec — matches prior StrictHostKeyChecking=accept-new behaviour
+		HostKeyCallback: hostKeyCallback,
 	}, nil
 }
 
