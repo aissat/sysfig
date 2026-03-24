@@ -326,6 +326,35 @@ func flatTypeRank(r core.FileStatusResult) int {
 	}
 }
 
+// filterByArg filters results by a positional argument that is either:
+//   - a path prefix (starts with "/") → keeps files whose SystemPath has that prefix
+//   - a hash prefix (hex chars only)  → keeps files whose ID starts with the arg
+func filterByArg(results []core.FileStatusResult, arg string) []core.FileStatusResult {
+	if arg == "" {
+		return results
+	}
+	isPath := strings.HasPrefix(arg, "/")
+	var out []core.FileStatusResult
+	for _, r := range results {
+		if isPath {
+			if strings.HasPrefix(r.SystemPath, arg) {
+				out = append(out, r)
+			}
+		} else {
+			// Match file ID or the group/dir hash shown in the grouped table.
+			groupKey := r.Group
+			if groupKey == "" {
+				groupKey = filepath.Dir(r.SystemPath)
+			}
+			groupHash := core.DeriveID(groupKey)
+			if strings.HasPrefix(r.ID, arg) || strings.HasPrefix(groupHash, arg) {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
 // displayTags returns user-defined tags falling back to platform tags.
 func displayTags(tags []string, implicit []string) string {
 	t := tags
@@ -441,8 +470,9 @@ func newStatusCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "status",
+		Use:   "status [path|hash]",
 		Short: "Show sync status of all tracked files",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
 			if watchMode {
@@ -454,6 +484,9 @@ func newStatusCmd() *cobra.Command {
 				return err
 			}
 			results = filterByTags(results, tags)
+			if len(args) == 1 {
+				results = filterByArg(results, args[0])
+			}
 			if len(results) == 0 {
 				info("No tracked files.")
 				return nil
