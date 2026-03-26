@@ -27,6 +27,11 @@ type FileMeta struct {
 	// Mode is the file permission bits as a decimal uint32
 	// (e.g. 0o644 → 420). Stored as a number for reliable JSON round-trip.
 	Mode uint32 `json:"mode"`
+	// HasOwnership is true when UID/GID were explicitly recorded.
+	// When false, ApplyMeta skips chown to avoid clobbering ownership
+	// with the zero value (uid=0/gid=0 = root).
+	// Old records without this field default to false (safe: skip chown).
+	HasOwnership bool `json:"has_ownership,omitempty"`
 }
 
 // FileRecord represents a tracked file's state in state.json.

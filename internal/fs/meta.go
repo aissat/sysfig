@@ -26,9 +26,10 @@ func ReadMeta(path string) (*types.FileMeta, error) {
 	}
 
 	meta := &types.FileMeta{
-		UID:  int(stat.Uid),
-		GID:  int(stat.Gid),
-		Mode: uint32(info.Mode().Perm()),
+		UID:          int(stat.Uid),
+		GID:          int(stat.Gid),
+		Mode:         uint32(info.Mode().Perm()),
+		HasOwnership: true,
 	}
 
 	// Best-effort name resolution — never fatal.
@@ -82,7 +83,12 @@ func ApplyMeta(path string, meta *types.FileMeta) MetaApplyResult {
 	}
 	result.ChmodOK = true
 
-	// 2. chown — privilege-aware, demote EPERM/EACCES to warning.
+	// 2. chown — only when ownership was explicitly recorded.
+	// Skipped when HasOwnership is false to avoid silently re-owning files
+	// to root:root via the zero value (uid=0, gid=0).
+	if !meta.HasOwnership {
+		return result
+	}
 	if err := os.Lchown(path, meta.UID, meta.GID); err != nil {
 		if isPermError(err) {
 			owner := meta.Owner

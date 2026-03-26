@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -559,7 +561,7 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 				if hash.Bytes(existing) == hash.Bytes(rendered) {
 					result.Skipped = append(result.Skipped, dest)
 					// Still refresh the state record to ensure source_profile is set.
-					updateSourceRecord(sm, dest, relPath, trackBranch, activation.Source, rendered)
+					updateSourceRecord(sm, dest, relPath, trackBranch, activation.Source, rendered, fileDecl)
 					continue
 				}
 			}
@@ -578,19 +580,19 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 			result.Rendered = append(result.Rendered, dest)
 			renderedCount++
 
-			// Update state.json.
-			updateSourceRecord(sm, dest, relPath, trackBranch, activation.Source, rendered)
-			// Refresh pathToRecord so subsequent profiles see the updated ownership.
-			_ = sm.Load // force reload is done implicitly by WithLock; refresh local map
-		}
-
-		// Run post_apply hooks if any files were newly committed.
-		if !opts.DryRun && renderedCount > 0 {
-			for _, hookErr := range runProfileHooks(profile.Hooks.PostApply) {
-				// Non-fatal: collect but don't abort the render.
-				result.HookErrors = append(result.HookErrors, hookErr)
+			// Update state.json with metadata from profile declaration (Bug 2 fix).
+			updateSourceRecord(sm, dest, relPath, trackBranch, activation.Source, rendered, fileDecl)
+			// Update pathToRecord so subsequent profiles in this invocation
+			// see the correct ownership for conflict detection (Bug 4 fix).
+			pathToRecord[dest] = &types.FileRecord{
+				ID:            deriveID(dest),
+				SystemPath:    dest,
+				SourceProfile: activation.Source,
 			}
 		}
+		// post_apply hooks not run here — they belong in Apply, after rendered
+		// files are written to disk. Running during render mutates the live
+		// system before files are applied (Bug 3 fix).
 	}
 
 	// If there are unresolved conflicts, return an error.
@@ -603,10 +605,34 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 
 // updateSourceRecord creates or updates the FileRecord for a source-managed
 // file in state.json.
-func updateSourceRecord(sm *state.Manager, systemPath, relPath, branch, sourceProfile string, rendered []byte) {
+func updateSourceRecord(sm *state.Manager, systemPath, relPath, branch, sourceProfile string, rendered []byte, fileDecl ProfileFileDecl) {
 	id := deriveID(systemPath)
 	h := hash.Bytes(rendered)
 	now := time.Now()
+
+	// Parse mode from profile declaration (e.g. "0644" or "644").
+	var declaredMode uint32
+	if fileDecl.Mode != "" {
+		if m, err := strconv.ParseUint(strings.TrimPrefix(fileDecl.Mode, "0o"), 8, 32); err == nil {
+			declaredMode = uint32(m)
+		}
+	}
+
+	// Resolve owner/group names to numeric IDs for ApplyMeta.
+	var uid, gid int
+	hasOwnership := false
+	if fileDecl.Owner != "" {
+		if u, err := user.Lookup(fileDecl.Owner); err == nil {
+			uid, _ = strconv.Atoi(u.Uid)
+			hasOwnership = true
+		}
+	}
+	if fileDecl.Group != "" {
+		if g, err := user.LookupGroup(fileDecl.Group); err == nil {
+			gid, _ = strconv.Atoi(g.Gid)
+			hasOwnership = true
+		}
+	}
 
 	_ = sm.WithLock(func(s *types.State) error {
 		rec, exists := s.Files[id]
@@ -624,6 +650,19 @@ func updateSourceRecord(sm *state.Manager, systemPath, relPath, branch, sourcePr
 		rec.SourceProfile = sourceProfile
 		rec.Branch = branch
 		rec.RepoPath = relPath
+		rec.Encrypt = fileDecl.Encrypt
+
+		// Wire declared metadata so apply can restore permissions/ownership.
+		if declaredMode != 0 || hasOwnership {
+			rec.Meta = &types.FileMeta{
+				Mode:         declaredMode,
+				UID:          uid,
+				GID:          gid,
+				Owner:        fileDecl.Owner,
+				Group:        fileDecl.Group,
+				HasOwnership: hasOwnership,
+			}
+		}
 		s.Files[id] = rec
 		return nil
 	})
