@@ -2,9 +2,11 @@ package core_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,11 +143,11 @@ func TestApply_Basic(t *testing.T) {
 		SysRoot: sysRoot,
 	}
 
-	results, err := core.Apply(opts)
+	report, err := core.Apply(opts)
 	require.NoError(t, err)
-	require.Len(t, results, 1)
+	require.Len(t, report.Results, 1)
 
-	r := results[0]
+	r := report.Results[0]
 	assert.Equal(t, id, r.ID)
 	assert.False(t, r.Skipped)
 
@@ -173,11 +175,11 @@ func TestApply_SysRoot(t *testing.T) {
 		SysRoot: sysRoot,
 	}
 
-	results, err := core.Apply(opts)
+	report, err := core.Apply(opts)
 	require.NoError(t, err)
-	require.Len(t, results, 1)
+	require.Len(t, report.Results, 1)
 
-	r := results[0]
+	r := report.Results[0]
 	assert.Equal(t, id, r.ID)
 	assert.Equal(t, expectedDest, r.SystemPath, "SystemPath in result must include SysRoot prefix")
 
@@ -209,11 +211,11 @@ func TestApply_DryRun(t *testing.T) {
 		DryRun:  true,
 	}
 
-	results, err := core.Apply(opts)
+	report, err := core.Apply(opts)
 	require.NoError(t, err)
-	require.Len(t, results, 1)
+	require.Len(t, report.Results, 1)
 
-	r := results[0]
+	r := report.Results[0]
 	assert.Equal(t, id, r.ID)
 	assert.True(t, r.Skipped, "DryRun result must have Skipped=true")
 	assert.Empty(t, r.BackupPath, "DryRun must not create a backup")
@@ -246,11 +248,11 @@ func TestApply_CreatesBackup(t *testing.T) {
 		Force:    true, // pre-existing file has different hash → treat as force-overwrite
 	}
 
-	results, err := core.Apply(opts)
+	report, err := core.Apply(opts)
 	require.NoError(t, err)
-	require.Len(t, results, 1)
+	require.Len(t, report.Results, 1)
 
-	r := results[0]
+	r := report.Results[0]
 	assert.Equal(t, id, r.ID)
 	assert.NotEmpty(t, r.BackupPath, "a backup path must be set when pre-existing file is backed up")
 
@@ -294,11 +296,11 @@ func TestApply_NoBackup(t *testing.T) {
 		Force:    true, // pre-existing file has different hash → treat as force-overwrite
 	}
 
-	results, err := core.Apply(opts)
+	report, err := core.Apply(opts)
 	require.NoError(t, err)
-	require.Len(t, results, 1)
+	require.Len(t, report.Results, 1)
 
-	r := results[0]
+	r := report.Results[0]
 	assert.Empty(t, r.BackupPath, "NoBackup=true must not produce a backup path")
 
 	// The backups/<id> directory must not have been created.
@@ -309,6 +311,63 @@ func TestApply_NoBackup(t *testing.T) {
 		assert.Empty(t, entries, "backups directory must remain empty when NoBackup=true")
 	}
 	// os.IsNotExist is also acceptable — backups dir never created.
+}
+
+// ---------------------------------------------------------------------------
+// TestApply_SourceHookNotFiredOnDirtySkip
+// ---------------------------------------------------------------------------
+
+// TestApply_SourceHookNotFiredOnDirtySkip verifies that post_apply source
+// hooks are NOT triggered when a source-managed file is DirtySkipped.
+// Regression test for: SourceProfileApplied was set unconditionally in
+// applyOne, so dirty-skipped files were still queued for hook execution.
+func TestApply_SourceHookNotFiredOnDirtySkip(t *testing.T) {
+	requireGitApply(t)
+	baseDir := t.TempDir()
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	id := "etc_myapp_conf"
+	relPath := "etc/myapp.conf"
+	content := []byte("key=value\n")
+
+	initBareRepoApply(t, repoDir, relPath, content)
+
+	now := time.Now()
+	s := &types.State{
+		Version: 1,
+		Files: map[string]*types.FileRecord{
+			id: {
+				ID:            id,
+				SystemPath:    "/etc/myapp.conf",
+				RepoPath:      relPath,
+				Branch:        "track/" + core.SanitizeBranchName(relPath),
+				CurrentHash:   "deadbeef", // won't match on-disk content → DIRTY
+				LastSync:      &now,
+				Status:        types.StatusTracked,
+				SourceProfile: "git-identity/personal", // source-managed
+			},
+		},
+		Backups: map[string][]types.BackupRecord{},
+	}
+	stateData, err := json.MarshalIndent(s, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "state.json"), stateData, 0o600))
+
+	// Write a locally-modified file to trigger DIRTY detection.
+	sysRoot := t.TempDir()
+	destPath := filepath.Join(sysRoot, "/etc/myapp.conf")
+	require.NoError(t, os.MkdirAll(filepath.Dir(destPath), 0o755))
+	require.NoError(t, os.WriteFile(destPath, []byte("locally modified\n"), 0o644))
+
+	report, err := core.Apply(core.ApplyOptions{
+		BaseDir: baseDir,
+		SysRoot: sysRoot,
+		Force:   false,
+	})
+	require.NoError(t, err)
+	require.Len(t, report.Results, 1)
+	assert.True(t, report.Results[0].DirtySkipped, "source-managed DIRTY file must be DirtySkipped")
+	assert.Empty(t, report.SourceHookErrs, "source hooks must not fire for DirtySkipped files")
 }
 
 // ---------------------------------------------------------------------------
@@ -330,14 +389,14 @@ func TestApply_DirtyProtection(t *testing.T) {
 	require.NoError(t, os.WriteFile(destPath, dirtyContent, 0o644))
 
 	// Without --force: file must be skipped (DirtySkipped=true).
-	results, err := core.Apply(core.ApplyOptions{
+	report, err := core.Apply(core.ApplyOptions{
 		BaseDir: baseDir,
 		SysRoot: sysRoot,
 		Force:   false,
 	})
 	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.True(t, results[0].DirtySkipped, "DIRTY file must be skipped without --force")
+	require.Len(t, report.Results, 1)
+	assert.True(t, report.Results[0].DirtySkipped, "DIRTY file must be skipped without --force")
 
 	// On-disk content must be unchanged.
 	got, err := os.ReadFile(destPath)
@@ -345,18 +404,197 @@ func TestApply_DirtyProtection(t *testing.T) {
 	assert.Equal(t, dirtyContent, got, "DIRTY file must not be overwritten without --force")
 
 	// With --force: file must be applied.
-	results, err = core.Apply(core.ApplyOptions{
+	report, err = core.Apply(core.ApplyOptions{
 		BaseDir: baseDir,
 		SysRoot: sysRoot,
 		Force:   true,
 	})
 	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.False(t, results[0].DirtySkipped, "Force=true must not skip DIRTY file")
+	require.Len(t, report.Results, 1)
+	assert.False(t, report.Results[0].DirtySkipped, "Force=true must not skip DIRTY file")
 
 	got, err = os.ReadFile(destPath)
 	require.NoError(t, err)
 	assert.Equal(t, repoContent, got, "--force must overwrite DIRTY file with repo content")
 
 	_ = id
+}
+
+// ---------------------------------------------------------------------------
+// Source hook integration tests
+// ---------------------------------------------------------------------------
+
+// buildSourceRepoWithHooks creates a bare source repo at
+// baseDir/sources/<sourceName>/repo.git with a profile.yaml committed on
+// branch "main". postApplyExecs are registered as post_apply exec hooks.
+func buildSourceRepoWithHooks(t *testing.T, baseDir, sourceName, profileName string, postApplyExecs []string) {
+	t.Helper()
+	requireGitApply(t)
+
+	repoDir := core.SourceRepoDir(baseDir, sourceName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(repoDir), 0o755))
+
+	cmd := exec.Command("git", "init", "--bare", repoDir)
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git init --bare source repo: %s", out)
+
+	workDir := t.TempDir()
+	runGitApply(t, workDir, "clone", repoDir, "work")
+	workClone := filepath.Join(workDir, "work")
+	runGitApply(t, workClone, "config", "user.email", "test@sysfig.local")
+	runGitApply(t, workClone, "config", "user.name", "sysfig-test")
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "name: %s\nfiles: []\n", profileName)
+	if len(postApplyExecs) > 0 {
+		sb.WriteString("hooks:\n  post_apply:\n")
+		for _, execCmd := range postApplyExecs {
+			fmt.Fprintf(&sb, "  - exec: %q\n", execCmd)
+		}
+	}
+	profileDir := filepath.Join(workClone, "profiles", profileName)
+	require.NoError(t, os.MkdirAll(profileDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(profileDir, "profile.yaml"), []byte(sb.String()), 0o644))
+
+	runGitApply(t, workClone, "checkout", "-b", "main")
+	runGitApply(t, workClone, "add", ".")
+	runGitApply(t, workClone, "commit", "-m", "test: add profile")
+	runGitApply(t, workClone, "push", "origin", "main")
+}
+
+// TestApply_SourceHookFiredOnSuccess verifies that a post_apply source hook
+// runs after a source-managed file is successfully written to disk.
+func TestApply_SourceHookFiredOnSuccess(t *testing.T) {
+	baseDir, _, id, _ := buildApplyFixture(t)
+
+	sentinelFile := filepath.Join(baseDir, "hook-ran")
+	buildSourceRepoWithHooks(t, baseDir, "mysource", "myprofile",
+		[]string{"touch " + sentinelFile})
+
+	statePath := filepath.Join(baseDir, "state.json")
+	raw, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	var s types.State
+	require.NoError(t, json.Unmarshal(raw, &s))
+	s.Files[id].SourceProfile = "mysource/myprofile"
+	s.Files[id].CurrentHash = "" // empty → dirty check skipped → file is applied
+	patched, err := json.MarshalIndent(&s, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(statePath, patched, 0o600))
+
+	sysRoot := t.TempDir()
+	report, err := core.Apply(core.ApplyOptions{BaseDir: baseDir, SysRoot: sysRoot})
+	require.NoError(t, err)
+	require.Len(t, report.Results, 1)
+	assert.False(t, report.Results[0].Skipped)
+	assert.False(t, report.Results[0].DirtySkipped)
+	assert.Empty(t, report.SourceHookErrs)
+
+	_, statErr := os.Stat(sentinelFile)
+	assert.NoError(t, statErr, "post_apply hook must have created the sentinel file")
+}
+
+// TestApply_SourceHookDeduplicatedAcrossFiles verifies that two files sharing
+// the same SourceProfile trigger the profile's post_apply hook exactly once.
+func TestApply_SourceHookDeduplicatedAcrossFiles(t *testing.T) {
+	requireGitApply(t)
+	baseDir := t.TempDir()
+
+	// Counter script: each invocation appends one line. Dedup → exactly 1 line.
+	counterFile := filepath.Join(baseDir, "counter")
+	counterScript := filepath.Join(baseDir, "counter.sh")
+	require.NoError(t, os.WriteFile(counterScript,
+		[]byte("#!/bin/sh\necho x >> "+counterFile+"\n"), 0o755))
+	buildSourceRepoWithHooks(t, baseDir, "mysource", "myprofile", []string{counterScript})
+
+	// Commit two files into the same bare repo, each on its own track branch.
+	repoDir := filepath.Join(baseDir, "repo.git")
+	relA, relB := "etc/app/a.conf", "etc/app/b.conf"
+	initBareRepoApply(t, repoDir, relA, []byte("a\n"))
+
+	workDir := t.TempDir()
+	runGitApply(t, workDir, "clone", repoDir, "work")
+	workClone := filepath.Join(workDir, "work")
+	runGitApply(t, workClone, "config", "user.email", "test@sysfig.local")
+	runGitApply(t, workClone, "config", "user.name", "sysfig-test")
+	branchB := "track/" + core.SanitizeBranchName(relB)
+	runGitApply(t, workClone, "checkout", "-b", branchB)
+	destB := filepath.Join(workClone, relB)
+	require.NoError(t, os.MkdirAll(filepath.Dir(destB), 0o755))
+	require.NoError(t, os.WriteFile(destB, []byte("b\n"), 0o644))
+	runGitApply(t, workClone, "add", relB)
+	runGitApply(t, workClone, "commit", "-m", "test: add b.conf")
+	runGitApply(t, workClone, "push", "origin", branchB)
+
+	now := time.Now()
+	s := &types.State{
+		Version: 1,
+		Files: map[string]*types.FileRecord{
+			"id_a": {
+				ID: "id_a", SystemPath: "/etc/app/a.conf", RepoPath: relA,
+				Branch:        "track/" + core.SanitizeBranchName(relA),
+				Status:        types.StatusTracked,
+				SourceProfile: "mysource/myprofile",
+				LastSync:      &now,
+			},
+			"id_b": {
+				ID: "id_b", SystemPath: "/etc/app/b.conf", RepoPath: relB,
+				Branch:        branchB,
+				Status:        types.StatusTracked,
+				SourceProfile: "mysource/myprofile",
+				LastSync:      &now,
+			},
+		},
+		Backups: map[string][]types.BackupRecord{},
+	}
+	data, err := json.MarshalIndent(s, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "state.json"), data, 0o600))
+
+	sysRoot := t.TempDir()
+	report, err := core.Apply(core.ApplyOptions{BaseDir: baseDir, SysRoot: sysRoot})
+	require.NoError(t, err)
+	require.Len(t, report.Results, 2)
+	assert.Empty(t, report.SourceHookErrs)
+
+	raw, err := os.ReadFile(counterFile)
+	require.NoError(t, err, "counter file must exist — hook must have run at least once")
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	assert.Len(t, lines, 1, "hook must run exactly once despite two files sharing the same SourceProfile")
+}
+
+// TestApply_SourceHookNotFiredOnDryRun verifies that post_apply source hooks
+// are NOT executed during a dry-run.
+func TestApply_SourceHookNotFiredOnDryRun(t *testing.T) {
+	baseDir, _, id, _ := buildApplyFixture(t)
+
+	sentinelFile := filepath.Join(baseDir, "hook-ran")
+	buildSourceRepoWithHooks(t, baseDir, "mysource", "myprofile",
+		[]string{"touch " + sentinelFile})
+
+	statePath := filepath.Join(baseDir, "state.json")
+	raw, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	var s types.State
+	require.NoError(t, json.Unmarshal(raw, &s))
+	s.Files[id].SourceProfile = "mysource/myprofile"
+	s.Files[id].CurrentHash = ""
+	patched, err := json.MarshalIndent(&s, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(statePath, patched, 0o600))
+
+	sysRoot := t.TempDir()
+	report, err := core.Apply(core.ApplyOptions{
+		BaseDir: baseDir,
+		SysRoot: sysRoot,
+		DryRun:  true,
+	})
+	require.NoError(t, err)
+	require.Len(t, report.Results, 1)
+	assert.True(t, report.Results[0].Skipped)
+	assert.Empty(t, report.SourceHookErrs)
+
+	_, statErr := os.Stat(sentinelFile)
+	assert.True(t, os.IsNotExist(statErr), "post_apply hook must NOT run during dry-run")
 }

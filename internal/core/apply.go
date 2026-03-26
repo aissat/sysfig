@@ -44,6 +44,15 @@ type ApplyResult struct {
 	SourceProfileApplied string      // non-empty when this file is source-managed
 }
 
+// ApplyReport is the aggregate result of an Apply call.
+type ApplyReport struct {
+	// Results holds one entry per file that was considered for apply.
+	Results []ApplyResult
+	// SourceHookErrs holds non-fatal errors from post_apply hooks that ran
+	// after source-managed files were written to disk. Never set on dry-runs.
+	SourceHookErrs []error
+}
+
 // Apply reads all (or specified) FileRecords from state.json, then for each:
 //  1. Resolves the final destination: if SysRoot != "", prepend it to SystemPath
 //  2. Unless NoBackup or DryRun: backs up the current system file via backup.Manager
@@ -53,10 +62,12 @@ type ApplyResult struct {
 //  4. Writes the file to the destination atomically (WriteFileAtomic)
 //     using the mode from rec.Meta.Mode if available, defaulting to 0o600
 //  5. Updates state.json: sets FileRecord.LastApply = now, Status = StatusTracked
+//  6. Runs post_apply hooks for any source-managed files that were applied
 //
 // If DryRun == true: prints each action and returns without writing anything.
-// Returns a slice of ApplyResult and any fatal error.
-func Apply(opts ApplyOptions) ([]ApplyResult, error) {
+// Returns an ApplyReport and any fatal error.
+func Apply(opts ApplyOptions) (*ApplyReport, error) {
+	report := &ApplyReport{}
 	statePath := filepath.Join(opts.BaseDir, "state.json")
 	sm := state.NewManager(statePath)
 
@@ -108,7 +119,6 @@ func Apply(opts ApplyOptions) ([]ApplyResult, error) {
 		return nil, fmt.Errorf("core: apply: %w", err)
 	}
 
-	var results []ApplyResult
 	var errs []error
 
 	for _, rec := range records {
@@ -126,21 +136,21 @@ func Apply(opts ApplyOptions) ([]ApplyResult, error) {
 				}
 			}
 		}
-		results = append(results, result)
+		report.Results = append(report.Results, result)
 	}
 
 	if len(errs) > 0 {
-		return results, errors.Join(errs...)
+		return report, errors.Join(errs...)
 	}
 
 	// If dry-run we never mutate state, return early.
 	if opts.DryRun {
-		return results, nil
+		return report, nil
 	}
 
 	// Update state.json for all successfully applied records.
-	appliedIDs := make(map[string]bool, len(results))
-	for _, r := range results {
+	appliedIDs := make(map[string]bool, len(report.Results))
+	for _, r := range report.Results {
 		appliedIDs[r.ID] = true
 	}
 
@@ -153,8 +163,6 @@ func Apply(opts ApplyOptions) ([]ApplyResult, error) {
 			rec.LastApply = &now
 			rec.Status = types.StatusTracked
 
-			// Refresh the recorded metadata and hash from the live system
-			// file so that the next `status` run reflects the applied state.
 			sysPath := rec.SystemPath
 			if opts.SysRoot != "" {
 				sysPath = filepath.Join(opts.SysRoot, rec.SystemPath)
@@ -168,10 +176,20 @@ func Apply(opts ApplyOptions) ([]ApplyResult, error) {
 		}
 		return nil
 	}); err != nil {
-		return results, fmt.Errorf("core: apply: update state: %w", err)
+		return report, fmt.Errorf("core: apply: update state: %w", err)
 	}
 
-	return results, nil
+	// Run post_apply hooks for source-managed files — correct timing is
+	// after files are on disk, not during source render.
+	var sourceProfiles []string
+	for _, r := range report.Results {
+		if r.SourceProfileApplied != "" && !r.Skipped && !r.DirtySkipped {
+			sourceProfiles = append(sourceProfiles, r.SourceProfileApplied)
+		}
+	}
+	report.SourceHookErrs = RunSourceHooks(opts.BaseDir, sourceProfiles)
+
+	return report, nil
 }
 
 // applyOne applies a single FileRecord according to opts.

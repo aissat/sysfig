@@ -457,11 +457,11 @@ func newBootstrapCmd() *cobra.Command {
 
 			// Auto-apply after bootstrap.
 			fmt.Printf("  %s\n\n", clrBold.Sprint("Applying config files…"))
-			applyResults, applyErr := core.Apply(core.ApplyOptions{
+			applyReport, applyErr := core.Apply(core.ApplyOptions{
 				BaseDir: baseDir,
 			})
 			applied, permDenied := 0, 0
-			for _, r := range applyResults {
+			for _, r := range applyReport.Results {
 				if r.Skipped {
 					continue
 				}
@@ -586,7 +586,7 @@ func newApplyCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
 			defer fixSudoOwnership(baseDir)
-			results, err := core.Apply(core.ApplyOptions{
+			report, err := core.Apply(core.ApplyOptions{
 				BaseDir:  baseDir,
 				IDs:      ids,
 				DryRun:   dryRun,
@@ -596,7 +596,7 @@ func newApplyCmd() *cobra.Command {
 			})
 
 			applied, skipped, dirty, hookFailed := 0, 0, 0, 0
-			for _, r := range results {
+			for _, r := range report.Results {
 				if r.Skipped {
 					fmt.Printf("  %s %s %s\n", clrDim.Sprint("[dry-run]"), clrInfo.Sprint(r.ID), clrDim.Sprint("→ "+r.SystemPath))
 					skipped++
@@ -647,17 +647,9 @@ func newApplyCmd() *cobra.Command {
 				}
 			}
 
-			// Run post_apply hooks for source-managed files after they are on disk.
-			if !dryRun {
-				var sourceProfiles []string
-				for _, r := range results {
-					if r.SourceProfileApplied != "" {
-						sourceProfiles = append(sourceProfiles, r.SourceProfileApplied)
-					}
-				}
-				for _, hookErr := range core.RunSourceHooks(baseDir, sourceProfiles) {
-					warn("Source hook error (non-fatal): %v", hookErr)
-				}
+			// Report source hook errors (non-fatal, already executed inside core.Apply).
+			for _, hookErr := range report.SourceHookErrs {
+				warn("Source hook error (non-fatal): %v", hookErr)
 			}
 
 			if err != nil {
@@ -679,7 +671,7 @@ func newApplyCmd() *cobra.Command {
 				}
 				os.Exit(1)
 			}
-			if len(results) == 0 {
+			if len(report.Results) == 0 {
 				info("Nothing to apply (no tracked files found).")
 				return nil
 			}

@@ -139,7 +139,7 @@ func Deploy(opts DeployOptions) (*DeployResult, error) {
 	}
 
 	// ── Apply ───────────────────────────────────────────────────────────────
-	applyResults, err := Apply(ApplyOptions{
+	applyReport, err := Apply(ApplyOptions{
 		BaseDir:  opts.BaseDir,
 		IDs:      opts.IDs,
 		Tags:     opts.Tags,
@@ -152,8 +152,8 @@ func Deploy(opts DeployOptions) (*DeployResult, error) {
 		return nil, fmt.Errorf("core: deploy: apply: %w", err)
 	}
 
-	result.ApplyResults = applyResults
-	for _, r := range applyResults {
+	result.ApplyResults = applyReport.Results
+	for _, r := range applyReport.Results {
 		if r.Skipped {
 			result.Skipped++
 		} else {
