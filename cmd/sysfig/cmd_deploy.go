@@ -647,6 +647,19 @@ func newApplyCmd() *cobra.Command {
 				}
 			}
 
+			// Run post_apply hooks for source-managed files after they are on disk.
+			if !dryRun {
+				var sourceProfiles []string
+				for _, r := range results {
+					if r.SourceProfileApplied != "" {
+						sourceProfiles = append(sourceProfiles, r.SourceProfileApplied)
+					}
+				}
+				for _, hookErr := range core.RunSourceHooks(baseDir, sourceProfiles) {
+					warn("Source hook error (non-fatal): %v", hookErr)
+				}
+			}
+
 			if err != nil {
 				// Print each sub-error on its own line for readability.
 				errStr := err.Error()

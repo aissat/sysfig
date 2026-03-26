@@ -28,6 +28,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/aissat/sysfig/internal/crypto"
 	"github.com/aissat/sysfig/internal/hash"
 	"github.com/aissat/sysfig/internal/state"
 	"github.com/aissat/sysfig/pkg/types"
@@ -429,6 +430,9 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
 	result := &RenderResult{}
 
+	// Node recipients resolved once — used when encrypting source-managed files.
+	nodeRecipients, _ := NodeRecipients(currentState.Nodes)
+
 	// Build a map from source name → URL for fast lookup.
 	sourceURLs := make(map[string]string, len(cfg.Sources))
 	for _, s := range cfg.Sources {
@@ -566,8 +570,23 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 				}
 			}
 
+			// Encrypt if the profile declares encrypt: true — mirrors sync.go behaviour.
+			toCommit := rendered
+			if fileDecl.Encrypt {
+				keysDir := filepath.Join(opts.BaseDir, "keys")
+				master, err := crypto.NewKeyManager(keysDir).Load()
+				if err != nil {
+					return nil, fmt.Errorf("source render: encrypt %s: master key not found: %w", dest, err)
+				}
+				enc, err := crypto.EncryptForFile(rendered, master, deriveID(dest), nodeRecipients...)
+				if err != nil {
+					return nil, fmt.Errorf("source render: encrypt %s: %w", dest, err)
+				}
+				toCommit = enc
+			}
+
 			// Hash and commit the rendered blob.
-			blobHash, err := syncHashBlob(repoDir, rendered)
+			blobHash, err := syncHashBlob(repoDir, toCommit)
 			if err != nil {
 				return nil, fmt.Errorf("source render: hash blob %s: %w", dest, err)
 			}
@@ -619,7 +638,10 @@ func updateSourceRecord(sm *state.Manager, systemPath, relPath, branch, sourcePr
 	}
 
 	// Resolve owner/group names to numeric IDs for ApplyMeta.
-	var uid, gid int
+	// Use -1 (the POSIX "leave unchanged" sentinel for Lchown) for whichever
+	// side was not specified, so a profile with only `group: wheel` does not
+	// inadvertently re-own the uid to root (0).
+	uid, gid := -1, -1
 	hasOwnership := false
 	if fileDecl.Owner != "" {
 		if u, err := user.Lookup(fileDecl.Owner); err == nil {
@@ -692,6 +714,38 @@ func runProfileHooks(hooks []ProfileHookDecl) []error {
 				errs = append(errs, fmt.Errorf("source hook systemd_reload %q: %w", h.SystemdReload, err))
 			}
 		}
+	}
+	return errs
+}
+
+// RunSourceHooks loads each named profile from the local source cache and
+// executes its post_apply hooks. Called by Apply after source-managed files
+// are written to disk — the correct time for post_apply semantics.
+// Duplicate profile names are deduplicated; errors are returned but non-fatal.
+func RunSourceHooks(baseDir string, profiles []string) []error {
+	if len(profiles) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(profiles))
+	var errs []error
+	for _, sourceProfile := range profiles {
+		if seen[sourceProfile] {
+			continue
+		}
+		seen[sourceProfile] = true
+
+		parts := strings.SplitN(sourceProfile, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		sourceName, profileName := parts[0], parts[1]
+		sourceRepoDir := filepath.Join(baseDir, "sources", sourceName, "repo.git")
+		profile, err := ReadProfileYAML(baseDir, sourceName, profileName)
+		if err != nil || len(profile.Hooks.PostApply) == 0 {
+			_ = sourceRepoDir
+			continue
+		}
+		errs = append(errs, runProfileHooks(profile.Hooks.PostApply)...)
 	}
 	return errs
 }

@@ -39,8 +39,9 @@ type ApplyResult struct {
 	Encrypted        bool
 	TemplateRendered bool         // true when {{variable}} substitution was performed
 	ChownWarning     string       // non-empty if chown failed due to insufficient privilege
-	Hooks      []HookResult // results of post-apply hooks
-	HookFailed bool         // true if any hook returned an error
+	Hooks               []HookResult // results of post-apply hooks
+	HookFailed          bool         // true if any hook returned an error
+	SourceProfileApplied string      // non-empty when this file is source-managed
 }
 
 // Apply reads all (or specified) FileRecords from state.json, then for each:
@@ -176,9 +177,10 @@ func Apply(opts ApplyOptions) ([]ApplyResult, error) {
 // applyOne applies a single FileRecord according to opts.
 func applyOne(opts ApplyOptions, bm *backup.Manager, rec *types.FileRecord) (ApplyResult, error) {
 	result := ApplyResult{
-		ID:        rec.ID,
-		RepoPath:  rec.RepoPath,
-		Encrypted: rec.Encrypt,
+		ID:                   rec.ID,
+		RepoPath:             rec.RepoPath,
+		Encrypted:            rec.Encrypt,
+		SourceProfileApplied: rec.SourceProfile,
 	}
 
 	// 1. Resolve destination path.
