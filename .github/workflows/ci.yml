@@ -1,6 +1,6 @@
 name: CI
 permissions:
-  contents: read
+  contents: write
 
 on:
   push:
@@ -14,10 +14,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -31,7 +31,143 @@ jobs:
         run: go tool cover -func=coverage.out
 
       - name: Upload coverage profile
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage
           path: coverage.out
+
+  build_release:
+    name: Build release artifacts
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+          - goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            suffix: linux-armv7
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set version info
+        id: info
+        run: |
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          VERSION="latest-${COMMIT}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}"   >> "$GITHUB_OUTPUT"
+          echo "date=${DATE}"       >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: "0"
+        run: |
+          go build \
+            -trimpath \
+            -ldflags="-s -w \
+              -X main.version=${{ steps.info.outputs.version }} \
+              -X main.commit=${{ steps.info.outputs.commit }} \
+              -X main.buildDate=${{ steps.info.outputs.date }}" \
+            -o "dist/sysfig-${{ matrix.suffix }}" \
+            ./cmd/sysfig
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: sysfig-${{ matrix.suffix }}
+          path: dist/sysfig-${{ matrix.suffix }}
+
+  publish_latest:
+    name: Publish latest
+    needs: build_release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history for git-cliff)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
+            | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update -qq
+          sudo apt-get install -y nfpm
+
+      - name: Build packages (.deb / .rpm / .apk)
+        run: |
+          VERSION="latest"
+          for arch in amd64 arm64; do
+            cp dist/sysfig-linux-${arch} dist/sysfig-pkg
+            for fmt in deb rpm apk; do
+              GOARCH=${arch} VERSION=${VERSION} \
+                nfpm package \
+                  --config contrib/pkg/nfpm.yaml \
+                  --packager ${fmt} \
+                  --target dist/
+            done
+          done
+          rm -f dist/sysfig-pkg
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum sysfig-* sysfig_* > checksums.txt
+          cat checksums.txt
+
+      - name: Install git-cliff
+        uses: kenji-miyake/setup-git-cliff@v2
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          git cliff --unreleased --config cliff.toml -o /tmp/CHANGELOG_RELEASE.md
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/CHANGELOG_RELEASE.md >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Publish latest (rolling)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "latest (main)"
+          prerelease: true
+          body: ${{ steps.changelog.outputs.body }}
+          files: |
+            dist/sysfig-*
+            dist/sysfig_*
+            dist/checksums.txt

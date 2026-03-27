@@ -1,10 +1,6 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types:
-      - completed
   push:
     tags:
       - 'v*'
@@ -15,11 +11,6 @@ permissions:
 jobs:
   build:
     name: Build
-    if: |
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main') ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
 
     strategy:
@@ -44,12 +35,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -58,11 +47,7 @@ jobs:
         run: |
           COMMIT="$(git rev-parse --short HEAD)"
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          if [[ "${{ github.event_name }}" == "push" && "${GITHUB_REF}" == refs/tags/* ]]; then
-            VERSION="${GITHUB_REF_NAME}"
-          else
-            VERSION="latest-${COMMIT}"
-          fi
+          VERSION="${GITHUB_REF_NAME}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "commit=${COMMIT}"   >> "$GITHUB_OUTPUT"
           echo "date=${DATE}"       >> "$GITHUB_OUTPUT"
@@ -84,7 +69,7 @@ jobs:
             ./cmd/sysfig
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: sysfig-${{ matrix.suffix }}
           path: dist/sysfig-${{ matrix.suffix }}
@@ -92,22 +77,16 @@ jobs:
   publish:
     name: Publish release
     needs: build
-    if: |
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main') ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout (full history for git-cliff)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: dist
           merge-multiple: true
@@ -146,38 +125,19 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          if [[ "${{ github.event_name }}" == "push" && "${GITHUB_REF}" == refs/tags/* ]]; then
-            # Changelog from previous tag to this tag
-            PREV=$(git tag --sort=-version:refname | sed -n '2p')
-            if [ -n "$PREV" ]; then
-              git cliff "${PREV}..HEAD" --config cliff.toml -o /tmp/CHANGELOG_RELEASE.md
-            else
-              git cliff --config cliff.toml -o /tmp/CHANGELOG_RELEASE.md
-            fi
+          PREV=$(git tag --sort=-version:refname | sed -n '2p')
+          if [ -n "$PREV" ]; then
+            git cliff "${PREV}..HEAD" --config cliff.toml -o /tmp/CHANGELOG_RELEASE.md
           else
-            git cliff --unreleased --config cliff.toml -o /tmp/CHANGELOG_RELEASE.md
+            git cliff --config cliff.toml -o /tmp/CHANGELOG_RELEASE.md
           fi
           echo "body<<EOF" >> "$GITHUB_OUTPUT"
           cat /tmp/CHANGELOG_RELEASE.md >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Publish tagged release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          body: ${{ steps.changelog.outputs.body }}
-          files: |
-            dist/sysfig-*
-            dist/sysfig_*
-            dist/checksums.txt
-
-      - name: Publish latest (rolling)
-        if: github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: "latest (main)"
-          prerelease: true
           body: ${{ steps.changelog.outputs.body }}
           files: |
             dist/sysfig-*
