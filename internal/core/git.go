@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -264,7 +266,7 @@ func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, timeo
 	if parent != "" {
 		commitArgs = append(commitArgs, "-p", parent)
 	}
-	commitOut, err := gitBareOutput(repoDir, timeout, nil, commitArgs...)
+	commitOut, err := gitBareOutput(repoDir, timeout, resolveGitIdentity(repoDir), commitArgs...)
 	if err != nil {
 		return fmt.Errorf("git commit-tree: %w", err)
 	}
@@ -275,6 +277,77 @@ func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, timeo
 		return fmt.Errorf("git update-ref %s: %w", branch, err)
 	}
 	return nil
+}
+
+// resolveGitIdentity returns GIT_AUTHOR_* and GIT_COMMITTER_* env vars for
+// git commit-tree. Reads from (in priority order):
+//  1. The repo's local git config (user.name / user.email)
+//  2. The real user's ~/.gitconfig (via SUDO_USER when running under sudo)
+//  3. Hard fallback: "sysfig" / "sysfig@localhost"
+func resolveGitIdentity(repoDir string) []string {
+	name, email := repoLocalGitIdentity(repoDir)
+	if name == "" || email == "" {
+		n2, e2 := realUserGitIdentity()
+		if name == "" {
+			name = n2
+		}
+		if email == "" {
+			email = e2
+		}
+	}
+	if name == "" {
+		name = "sysfig"
+	}
+	if email == "" {
+		email = "sysfig@localhost"
+	}
+	return []string{
+		"GIT_AUTHOR_NAME=" + name,
+		"GIT_AUTHOR_EMAIL=" + email,
+		"GIT_COMMITTER_NAME=" + name,
+		"GIT_COMMITTER_EMAIL=" + email,
+	}
+}
+
+// repoLocalGitIdentity reads user.name and user.email from the bare repo's
+// own config file (GIT_DIR/config).
+func repoLocalGitIdentity(repoDir string) (name, email string) {
+	if out, err := gitBareOutput(repoDir, 3*time.Second, nil, "config", "--local", "user.name"); err == nil {
+		name = strings.TrimSpace(string(out))
+	}
+	if out, err := gitBareOutput(repoDir, 3*time.Second, nil, "config", "--local", "user.email"); err == nil {
+		email = strings.TrimSpace(string(out))
+	}
+	return
+}
+
+// realUserGitIdentity reads user.name and user.email from the real user's
+// ~/.gitconfig. When running under sudo, SUDO_USER identifies the real user.
+func realUserGitIdentity() (name, email string) {
+	homeDir := ""
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if u, err := user.Lookup(sudoUser); err == nil {
+			homeDir = u.HomeDir
+		}
+	}
+	if homeDir == "" {
+		homeDir = os.Getenv("HOME")
+	}
+	if homeDir == "" {
+		return
+	}
+	gitconfigPath := filepath.Join(homeDir, ".gitconfig")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "git", "config", "--file", gitconfigPath, "user.name").Output(); err == nil {
+		name = strings.TrimSpace(string(out))
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel2()
+	if out, err := exec.CommandContext(ctx2, "git", "config", "--file", gitconfigPath, "user.email").Output(); err == nil {
+		email = strings.TrimSpace(string(out))
+	}
+	return
 }
 
 // isNoUpstreamError returns true when a git push failed because the branch

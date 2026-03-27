@@ -130,6 +130,9 @@ sysfig sync --push --message "tuned"   # commit + push
 
 # Or just run:
 sysfig watch --push                    # auto-commit + push on every save
+# Output shows which process triggered each change:
+#   15:04:05  changed  /etc/hosts
+#               actor  vim · pid 1234 · user aye7 · exact
 ```
 
 ### Auto-tagging and tag-based deploy

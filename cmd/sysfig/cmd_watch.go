@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,10 +38,13 @@ func watchRun(baseDir, sysRoot string, debounce time.Duration, dryRun, push bool
 		close(stop)
 	}()
 
-	onEvent := func(path string, result *core.SyncResult, err error) {
-		ts := time.Now().Format("15:04:05")
+	onEvent := func(path string, info core.ChangeInfo, result *core.SyncResult, err error) {
+		ts := info.ChangedAt.Format("15:04:05")
 		if dryRun {
 			fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrInfo.Sprint("[dry-run]"), path)
+			if actor := actorLine(info); actor != "" {
+				fmt.Printf("            %s  %s\n", clrDim.Sprint("actor"), clrDim.Sprint(actor))
+			}
 			return
 		}
 		if err != nil {
@@ -51,6 +55,9 @@ func watchRun(baseDir, sysRoot string, debounce time.Duration, dryRun, push bool
 			return
 		}
 		fmt.Printf("  %s  %s  %s\n", clrDim.Sprint(ts), clrWarn.Sprint("changed"), path)
+		if actor := actorLine(info); actor != "" {
+			fmt.Printf("            %s  %s\n", clrDim.Sprint("actor"), clrDim.Sprint(actor))
+		}
 		if len(result.CommittedFiles) > 0 {
 			for _, f := range result.CommittedFiles {
 				fmt.Printf("            %s %s\n", clrOK.Sprint("committed"), clrDim.Sprint(f))
@@ -290,5 +297,37 @@ func runSystemctl(args ...string) (string, error) {
 	cmd := exec.Command("systemctl", args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// actorLine formats a one-line process attribution string for display.
+// Returns "" when no attribution is available (Source == ChangeSourceUnknown).
+// Prefix "maybe" and suffix "best-effort" when attribution is not reliable,
+// so the user can calibrate trust accordingly.
+func actorLine(info core.ChangeInfo) string {
+	if info.Source == core.ChangeSourceUnknown {
+		return ""
+	}
+	var parts []string
+	if info.ProcName != "" {
+		name := info.ProcName
+		if !info.Reliable {
+			name = "maybe " + name
+		}
+		parts = append(parts, name)
+	}
+	if info.PID != 0 {
+		parts = append(parts, fmt.Sprintf("pid %d", info.PID))
+	}
+	if info.UserName != "" {
+		parts = append(parts, "user "+info.UserName)
+	} else if info.UID >= 0 {
+		parts = append(parts, fmt.Sprintf("uid %d", info.UID))
+	}
+	if info.Reliable {
+		parts = append(parts, "exact")
+	} else {
+		parts = append(parts, "best-effort")
+	}
+	return strings.Join(parts, " · ")
 }
 

@@ -3,6 +3,7 @@ package state
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 
@@ -196,3 +197,71 @@ func TestWithLock_ErrorRollback(t *testing.T) {
 		t.Errorf("Files count = %d, want 1", len(s.Files))
 	}
 }
+
+// TestOpenLockFile_StaleRoot verifies that openLockFile returns (nil, nil)
+// only when the lock file itself exists but is inaccessible — not for generic
+// permission failures such as a missing or inaccessible directory.
+func TestOpenLockFile_StaleRoot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping filesystem-permission test in short mode")
+	}
+
+	dir := t.TempDir()
+	lockPath := dir + "/state.json.lock"
+
+	// Create the lock file and make it unreadable — simulates a stale
+	// root-owned lock from a previous sudo run.
+	f, err := openLockFile(lockPath)
+	if err != nil {
+		t.Fatalf("initial openLockFile: %v", err)
+	}
+	f.Close()
+
+	if err := chmodNoAccess(lockPath); err != nil {
+		t.Skip("cannot chmod lock file (may be running as root):", err)
+	}
+	t.Cleanup(func() { _ = chmodReadWrite(lockPath) })
+
+	got, err := openLockFile(lockPath)
+	if err != nil {
+		t.Fatalf("openLockFile with unreadable existing file: unexpected error %v", err)
+	}
+	if got != nil {
+		got.Close()
+		t.Fatal("openLockFile returned non-nil file, want nil (stale-lock path)")
+	}
+}
+
+// TestOpenLockFile_BadDir verifies that a permission error caused by an
+// inaccessible directory is propagated as an error, not swallowed as a
+// stale-lock false-positive.
+func TestOpenLockFile_BadDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping filesystem-permission test in short mode")
+	}
+
+	dir := t.TempDir()
+	subDir := dir + "/locked"
+	if err := mkdirAll(subDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := chmodNoAccess(subDir); err != nil {
+		t.Skip("cannot chmod directory (may be running as root):", err)
+	}
+	t.Cleanup(func() { _ = chmodReadWrite(subDir) })
+
+	lockPath := subDir + "/state.json.lock"
+	got, err := openLockFile(lockPath)
+	if err == nil {
+		if got != nil {
+			got.Close()
+		}
+		t.Fatal("openLockFile with inaccessible directory: expected error, got nil")
+	}
+}
+
+// ── test helpers ──────────────────────────────────────────────────────────────
+
+func chmodNoAccess(path string) error { return os.Chmod(path, 0o000) }
+func chmodReadWrite(path string) error { return os.Chmod(path, 0o600) }
+func mkdirAll(path string, perm os.FileMode) error { return os.MkdirAll(path, perm) }
