@@ -15,12 +15,12 @@ import (
 
 func newDiffCmd() *cobra.Command {
 	var (
-		baseDir      string
-		sysRoot      string
-		colorFlag    bool
-		colorSet     bool
-		ids          []string
-		sideBySide   bool
+		baseDir    string
+		sysRoot    string
+		colorFlag  bool
+		colorSet   bool
+		ids        []string
+		sideBySide bool
 	)
 
 	cmd := &cobra.Command{
@@ -135,19 +135,19 @@ func termWidth() int {
 // added lines on the right.
 func renderSideBySide(diff string, totalWidth int) string {
 	const (
-		lineNoW  = 4  // digits for line number
-		gutterW  = 2  // " │" separator
+		lineNoW    = 4 // digits for line number
+		gutterW    = 2 // " │" separator
 		padBetween = 2 // gap between left and right panels
 	)
 
 	// ANSI codes (no fatih/color — direct codes keep it simple here).
 	const (
-		reset    = "\033[0m"
-		bold     = "\033[1m"
-		dim      = "\033[2m"
-		red      = "\033[38;2;255;255;255m\033[48;2;139;0;0m"   // white text, dark red bg
-		green    = "\033[38;2;255;255;255m\033[48;2;0;100;0m"   // white text, dark green bg
-		dimLine  = "\033[2m"
+		reset   = "\033[0m"
+		bold    = "\033[1m"
+		dim     = "\033[2m"
+		red     = "\033[38;2;255;255;255m\033[48;2;139;0;0m" // white text, dark red bg
+		green   = "\033[38;2;255;255;255m\033[48;2;0;100;0m" // white text, dark green bg
+		dimLine = "\033[2m"
 	)
 
 	// Each panel gets half the width minus line-number and gutter columns.
@@ -156,23 +156,15 @@ func renderSideBySide(diff string, totalWidth int) string {
 		panelW = 20
 	}
 
-	// truncate or pad a string to exactly w visible chars (no ANSI).
-	fit := func(s string, w int) string {
-		if len(s) >= w {
-			return s[:w]
-		}
-		return s + strings.Repeat(" ", w-len(s))
-	}
-
 	// Parse the unified diff into side-by-side rows.
 	type row struct {
-		leftNo  int    // 0 = empty
-		leftTxt string
-		leftChg bool   // removed line
-		rightNo int
+		leftNo   int // 0 = empty
+		leftTxt  string
+		leftChg  bool // removed line
+		rightNo  int
 		rightTxt string
-		rightChg bool  // added line
-		header  string // non-empty for @@ lines
+		rightChg bool   // added line
+		header   string // non-empty for @@ lines
 	}
 
 	var rows []row
@@ -254,7 +246,7 @@ func renderSideBySide(diff string, totalWidth int) string {
 	sep := dim + " │ " + reset
 	for _, r := range rows {
 		if r.header != "" {
-			hdr := fit(r.header, totalWidth-2)
+			hdr := fitANSI(r.header, totalWidth-2)
 			out.WriteString(bold + dim + hdr + reset + "\n")
 			continue
 		}
@@ -277,8 +269,8 @@ func renderSideBySide(diff string, totalWidth int) string {
 		if r.leftChg && r.rightChg {
 			leftTxt, rightTxt = inlineHighlight(leftTxt, rightTxt)
 		}
-		leftContent := fit(leftTxt, panelW)
-		rightContent := fit(rightTxt, panelW)
+		leftContent := fitANSI(leftTxt, panelW)
+		rightContent := fitANSI(rightTxt, panelW)
 
 		var leftFmt, rightFmt string
 		if r.leftChg {
@@ -296,6 +288,46 @@ func renderSideBySide(diff string, totalWidth int) string {
 	}
 
 	return out.String()
+}
+
+// fitANSI pads or truncates s to exactly w visible columns while preserving
+// ANSI escape sequences used for coloring inline diffs.
+func fitANSI(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	visible := 0
+
+	for i := 0; i < len(s) && visible < w; {
+		if s[i] == '\x1b' {
+			end := i + 1
+			if end < len(s) && s[end] == '[' {
+				end++
+				for end < len(s) {
+					c := s[end]
+					end++
+					if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+						break
+					}
+				}
+				b.WriteString(s[i:end])
+				i = end
+				continue
+			}
+		}
+
+		b.WriteByte(s[i])
+		i++
+		visible++
+	}
+
+	if visible < w {
+		b.WriteString(strings.Repeat(" ", w-visible))
+	}
+
+	return b.String()
 }
 
 // wordTokens splits s into a slice of word/non-word tokens for word-level diff.
@@ -327,8 +359,8 @@ func wordTokens(s string) []string {
 // and returns both lines with changed tokens highlighted using ANSI bg colors.
 func inlineHighlight(oldLine, newLine string) (oldHL, newHL string) {
 	const (
-		hlRed   = "\033[48;2;139;0;0m\033[38;2;255;255;255m"   // dark red bg
-		hlGreen = "\033[48;2;0;100;0m\033[38;2;255;255;255m"   // dark green bg
+		hlRed   = "\033[48;2;139;0;0m\033[38;2;255;255;255m" // dark red bg
+		hlGreen = "\033[48;2;0;100;0m\033[38;2;255;255;255m" // dark green bg
 		hlReset = "\033[0m"
 	)
 
@@ -464,4 +496,3 @@ func colorize(diff string) string {
 	}
 	return out.String()
 }
-
