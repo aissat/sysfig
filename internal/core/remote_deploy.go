@@ -168,6 +168,10 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	}
 	sshClient := gossh.NewClient(sshConn, chans, reqs)
 
+	// FUN-003: query the actual remote home dir once so needsSudo works on
+	// non-Linux layouts (root → /root, macOS → /Users/<u>, NixOS → /var/home/<u>).
+	remoteHome := queryRemoteHome(sshClient, sshUser)
+
 	// ── Deploy each file ─────────────────────────────────────────────────
 	for id, rec := range currentState.Files {
 		if len(idSet) > 0 && !(idSet[id] || hasIDPrefixInSet(id, idSet)) {
@@ -268,7 +272,7 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 		)
 		// Use sudo only when needed: --sudo is set AND the destination is
 		// not inside the SSH user's home directory (which they already own).
-		useSudo := opts.Sudo && needsSudo(dstPath, sshUser)
+		useSudo := opts.Sudo && needsSudo(dstPath, remoteHome)
 		if useSudo {
 			remoteShell = "sudo sh -c " + shellQuote(remoteShell)
 		}
@@ -334,6 +338,7 @@ func RemoteDeployRendered(opts RemoteRenderedOptions) (applied, failed int, err 
 		return 0, 0, fmt.Errorf("remote deploy rendered: ssh handshake: %w", connErr)
 	}
 	sshClient := gossh.NewClient(sshConn, chans, reqs)
+	remoteHome := queryRemoteHome(sshClient, sshUser)
 
 	for _, rf := range opts.Files {
 		if opts.DryRun {
@@ -345,7 +350,7 @@ func RemoteDeployRendered(opts RemoteRenderedOptions) (applied, failed int, err 
 		destDir := filepath.Dir(rf.Dest)
 		shell := fmt.Sprintf("mkdir -p %s && cat > %s && chmod %04o %s",
 			shellQuote(destDir), shellQuote(rf.Dest), rf.Mode, shellQuote(rf.Dest))
-		useSudo := opts.Sudo && needsSudo(rf.Dest, sshUser)
+		useSudo := opts.Sudo && needsSudo(rf.Dest, remoteHome)
 		if useSudo {
 			shell = "sudo sh -c " + shellQuote(shell)
 		}
@@ -482,15 +487,38 @@ func parseSSHTarget(target string, port int) (user, addr string) {
 	return u, fmt.Sprintf("%s:%d", host, p)
 }
 
+// queryRemoteHome runs `echo $HOME` on the remote host and returns the result.
+// Falls back to "/home/<sshUser>" if the command fails (e.g. restricted shell).
+func queryRemoteHome(client *gossh.Client, sshUser string) string {
+	sess, err := client.NewSession()
+	if err != nil {
+		return "/home/" + sshUser
+	}
+	defer sess.Close()
+	var out bytes.Buffer
+	sess.Stdout = &out
+	if err := sess.Run("echo $HOME"); err != nil {
+		return "/home/" + sshUser
+	}
+	if h := strings.TrimSpace(out.String()); h != "" {
+		return h
+	}
+	return "/home/" + sshUser
+}
+
 // needsSudo reports whether writing to dstPath requires elevated privileges.
 // Returns false when the path is under the SSH user's home directory — they
 // already own it. Returns true for system paths (/etc/, /usr/, /var/, etc.).
-func needsSudo(dstPath, sshUser string) bool {
-	if sshUser == "" {
+// remoteHome is the actual home directory queried from the remote (via queryRemoteHome);
+// it must not be empty. Using the queried home avoids the FUN-003 bug where the
+// hardcoded "/home/<user>/" prefix fails for root (/root), macOS (/Users/<user>),
+// NixOS (/var/home/<user>), etc.
+func needsSudo(dstPath, remoteHome string) bool {
+	if remoteHome == "" {
 		return true
 	}
-	userHome := "/home/" + sshUser + "/"
-	return !strings.HasPrefix(dstPath, userHome)
+	home := strings.TrimSuffix(remoteHome, "/") + "/"
+	return !strings.HasPrefix(dstPath, home)
 }
 
 // shellQuote wraps s in single quotes, escaping any embedded single quotes.

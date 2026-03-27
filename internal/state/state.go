@@ -25,9 +25,10 @@ func NewManager(statePath string) *Manager {
 	}
 }
 
-// Load reads and parses state.json. Returns an empty State if the file does
-// not exist. Does NOT acquire a lock — callers use WithLock for mutations.
-func (m *Manager) Load() (*types.State, error) {
+// load reads and parses state.json without acquiring any lock.
+// Must only be called while the caller already holds at least LOCK_SH
+// on m.lockPath (enforced by Load and WithLock).
+func (m *Manager) load() (*types.State, error) {
 	data, err := os.ReadFile(m.statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -52,6 +53,26 @@ func (m *Manager) Load() (*types.State, error) {
 	return &s, nil
 }
 
+// Load acquires a shared lock, reads and parses state.json, then releases
+// the lock. Returns an empty State if the file does not exist.
+// Use WithLock when you need to mutate state.
+func (m *Manager) Load() (*types.State, error) {
+	lockFile, err := os.OpenFile(m.lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("state: open lock file %q: %w", m.lockPath, err)
+	}
+	defer lockFile.Close()
+
+	// FUN-002: acquire a shared lock so concurrent WithLock writes cannot
+	// produce a torn read on filesystems without atomic rename guarantees.
+	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_SH); err != nil {
+		return nil, fmt.Errorf("state: acquire shared lock: %w", err)
+	}
+	defer unix.Flock(int(lockFile.Fd()), unix.LOCK_UN) //nolint:errcheck
+
+	return m.load()
+}
+
 // WithLock acquires an exclusive flock on the lock file, loads the current
 // state, calls fn with it, and — if fn returns nil — atomically writes the
 // (possibly mutated) state back. The lock is released when WithLock returns.
@@ -74,8 +95,9 @@ func (m *Manager) WithLock(fn func(s *types.State) error) error {
 		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
 	}()
 
-	// Load the current state while holding the lock.
-	s, err := m.Load()
+	// Load the current state while holding the exclusive lock.
+	// Calls the private load() to avoid opening a second lock fd.
+	s, err := m.load()
 	if err != nil {
 		return err
 	}

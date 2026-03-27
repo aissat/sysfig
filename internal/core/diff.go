@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	sysfigfs "github.com/aissat/sysfig/internal/fs"
 	"github.com/aissat/sysfig/internal/state"
 	"github.com/aissat/sysfig/pkg/types"
 )
@@ -283,7 +284,7 @@ func CheckDiffPrereqs() error {
 // the file when done. Used when we need to diff content that is not directly
 // on disk (e.g. bare-repo content read via git-show).
 func writeTempFile(prefix string, data []byte) (path string, cleanup func(), err error) {
-	f, err := os.CreateTemp("", "sysfig-diff-"+prefix+"-*")
+	f, err := os.CreateTemp(sysfigfs.SecureTempDir(), "sysfig-diff-"+prefix+"-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("core: diff: create temp file: %w", err)
 	}

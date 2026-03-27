@@ -139,7 +139,7 @@ func stageFilePlain(repoDir, relPath string) error {
 // The temporary file is always removed before the function returns.
 func stageBlob(repoDir, relPath string, data []byte) error {
 	// Write bytes to a temp file outside the repo so hash-object can read it.
-	tmpFile, err := os.CreateTemp("", "sysfig-blob-*")
+	tmpFile, err := os.CreateTemp(sysfigfs.SecureTempDir(), "sysfig-blob-*")
 	if err != nil {
 		return fmt.Errorf("core: stage blob %q: create temp file: %w", relPath, err)
 	}

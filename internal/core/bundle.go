@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	sysfigfs "github.com/aissat/sysfig/internal/fs"
 )
 
 // RemoteKind classifies how push/pull should move data.
@@ -127,7 +129,7 @@ func BundlePush(opts BundlePushOptions) error {
 
 	// Create bundle in a temp file next to the repo so rename is atomic on
 	// the same filesystem.
-	tmp, err := os.CreateTemp("", "sysfig-bundle-*.bundle")
+	tmp, err := os.CreateTemp(sysfigfs.SecureTempDir(), "sysfig-bundle-*.bundle")
 	if err != nil {
 		return fmt.Errorf("bundle push: create temp: %w", err)
 	}
@@ -208,7 +210,7 @@ func BundlePull(opts BundlePullOptions) (*BundlePullResult, error) {
 		return nil, fmt.Errorf("bundle pull: RemoteURL must not be empty")
 	}
 
-	tmp, err := os.CreateTemp("", "sysfig-bundle-*.bundle")
+	tmp, err := os.CreateTemp(sysfigfs.SecureTempDir(), "sysfig-bundle-*.bundle")
 	if err != nil {
 		return nil, fmt.Errorf("bundle pull: create temp: %w", err)
 	}

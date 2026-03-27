@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	sysfigfs "github.com/aissat/sysfig/internal/fs"
 )
 
 // resolveTrackBranch returns a branch name that won't conflict with existing
@@ -210,7 +212,7 @@ type BlobEntry struct {
 //  5. git update-ref  → advance refs/heads/<branch>
 func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, timeout time.Duration) error {
 	// Temporary index file — isolated per branch, safe for concurrent groups.
-	tmpIdx, err := os.CreateTemp("", "sysfig-index-*")
+	tmpIdx, err := os.CreateTemp(sysfigfs.SecureTempDir(), "sysfig-index-*")
 	if err != nil {
 		return fmt.Errorf("gitCommitToBranch: create temp index: %w", err)
 	}

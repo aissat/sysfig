@@ -109,7 +109,7 @@ func syncStagePlain(repoDir, relPath string) error {
 // syncHashBlob stores data as a git blob object and returns its 40-char SHA.
 // The blob is written to the object store but NOT added to any index.
 func syncHashBlob(repoDir string, data []byte) (string, error) {
-	tmp, err := os.CreateTemp("", "sysfig-sync-blob-*")
+	tmp, err := os.CreateTemp(sysfigfs.SecureTempDir(), "sysfig-sync-blob-*")
 	if err != nil {
 		return "", fmt.Errorf("core: sync: hash blob: create temp: %w", err)
 	}
