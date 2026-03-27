@@ -202,11 +202,11 @@ Designed for use in systemd timers or cron jobs:
 
 			// Collect in-scope results.
 			type auditRow struct {
-				path     string
-				id       string
-				tags     []string
-				trackType string // "hash" or "local"
-				status   core.FileStatusLabel
+				path      string
+				id        string
+				tags      []string
+				trackType string
+				status    core.FileStatusLabel
 			}
 			filteredResults := filterByTags(results, tags)
 			var rows []auditRow
@@ -230,36 +230,62 @@ Designed for use in systemd timers or cron jobs:
 
 			var drifted int
 			if !quiet && len(rows) > 0 {
-				// Compute path column width.
 				pathW := len("PATH")
+				stateW := len("STATE") + 2
+				trackW := len("TRACK") + 2
+				tagsW := len("TAGS") + 2
+				detailsW := len("DETAILS")
+				implicitTags := core.DetectPlatformTags()
 				for _, r := range rows {
 					if len(r.path) > pathW {
 						pathW = len(r.path)
 					}
+					if len(healthSummary(map[core.FileStatusLabel]int{r.status: 1}))+2 > stateW {
+						stateW = len(healthSummary(map[core.FileStatusLabel]int{r.status: 1})) + 2
+					}
+					if len(r.trackType)+2 > trackW {
+						trackW = len(r.trackType) + 2
+					}
+					if l := len(displayTags(compactTags(r.tags, 3), implicitTags)); l+2 > tagsW {
+						tagsW = l + 2
+					}
+					details := "verified"
+					if r.status != core.StatusSynced {
+						details = strings.ToLower(string(r.status))
+					}
+					if len(details) > detailsW {
+						detailsW = len(details)
+					}
 				}
 				pathW += 2
-				const hashW = 10
 
-				const typeW = 6
-				implicitTags := core.DetectPlatformTags()
-				fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("STATUS", 12)), clrBold.Sprint(pad("TYPE", typeW)), clrBold.Sprint("TAGS"))
+				fmt.Printf("%s  %s  %s  %s  %s\n",
+					clrBold.Sprint(pad("PATH", pathW)),
+					clrBold.Sprint(pad("STATE", stateW)),
+					clrBold.Sprint(pad("TRACK", trackW)),
+					clrBold.Sprint(pad("TAGS", tagsW)),
+					clrBold.Sprint("DETAILS"))
 				divider()
 				for _, r := range rows {
 					clean := r.status == core.StatusSynced
-					statusStr := strings.ToLower(string(r.status))
-					hashCol := clrDim.Sprint(pad(r.id, hashW))
-					typeCol := clrDim.Sprint(pad(r.trackType, typeW))
-					displayTags := r.tags
-					if len(displayTags) == 0 {
-						displayTags = implicitTags
-					}
-					tagsCol := clrInfo.Sprint(strings.Join(displayTags, ","))
-					if clean {
-						fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad(r.path, pathW)), hashCol, clrSynced.Sprint(pad("✓ "+statusStr, 12)), typeCol, tagsCol)
-					} else {
+					stateCol := groupStateColored(map[core.FileStatusLabel]int{r.status: 1})
+					trackCol := clrDim.Sprint(pad(r.trackType, trackW))
+					tagsCol := clrInfo.Sprint(pad(displayTags(compactTags(r.tags, 3), implicitTags), tagsW))
+					details := "verified"
+					if !clean {
 						drifted++
-						fmt.Printf("%s  %s  %s  %s  %s\n", clrDirty.Sprint(pad(r.path, pathW)), hashCol, clrErr.Sprint(pad("✗ "+statusStr, 12)), typeCol, tagsCol)
+						details = strings.ToLower(string(r.status))
 					}
+					detailsCol := clrDim.Sprint(details)
+					if !clean {
+						detailsCol = clrDirty.Sprint(details)
+					}
+					fmt.Printf("%s  %s  %s  %s  %s\n",
+						clrBold.Sprint(pad(r.path, pathW)),
+						padVisible(stateCol, stateW),
+						trackCol,
+						tagsCol,
+						detailsCol)
 				}
 				divider()
 				fmt.Println()
@@ -274,9 +300,9 @@ Designed for use in systemd timers or cron jobs:
 			checked := len(rows)
 			if !quiet {
 				if drifted > 0 {
-					fmt.Printf("  %s\n", clrErr.Sprintf("Audit: %d/%d file(s) drifted", drifted, checked))
+					fmt.Printf("  %s\n", clrErr.Sprintf("Audit degraded · %d/%d file(s) drifted", drifted, checked))
 				} else {
-					fmt.Printf("  %s\n", clrOK.Sprintf("Audit: %d/%d file(s) clean", checked, checked))
+					fmt.Printf("  %s\n", clrOK.Sprintf("Audit clean · %d/%d verified", checked, checked))
 				}
 			}
 
@@ -415,4 +441,3 @@ Usage:
 	f.StringVar(&renameTo, "to", "", "new tag name (use with --rename)")
 	return cmd
 }
-

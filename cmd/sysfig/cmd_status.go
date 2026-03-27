@@ -84,11 +84,6 @@ func groupResultsByDir(results []core.FileStatusResult) (order []string, groups 
 // Folders with any changed files expand to list those files.
 // Returns true if any file needs attention.
 func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bool) {
-	type dirGroup struct {
-		dir     string
-		results []core.FileStatusResult
-	}
-
 	// Group results by directory, preserving first-seen order.
 	dirOrder, groups := groupResultsByDir(results)
 
@@ -101,6 +96,7 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 			hasDiff = true
 		}
 	}
+	implicitTags := core.DetectPlatformTags()
 
 	// Compute max row label width — must account for single-file rows that
 	// show the full path, not just the directory name.
@@ -119,97 +115,39 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 	}
 	dirW += 2
 
-	// Hash column is always 8 chars (fixed). Slug column only with showIDs.
-	const hashW = 10 // "HASH" + 2 padding
-	idW := 0
-	if showIDs {
-		idW = len("SLUG")
-		for _, r := range results {
-			if len(r.Slug) > idW {
-				idW = len(r.Slug)
-			}
-		}
-		idW += 2
-	}
-
-	// Pre-compute STATUS column width so TYPE/TAGS stay aligned.
-	statusW := len("STATUS")
+	stateW := len("STATE") + 2
+	trackW := len("TRACK") + 2
+	tagsW := len("TAGS") + 2
+	detailsW := len("DETAILS")
 	for _, d := range dirOrder {
 		files := groups[d]
-		dCounts := map[string]int{}
-		for _, r := range files {
-			dCounts[string(r.Status)]++
+		if l := len(healthSummary(groupCounts(files))); l+2 > stateW {
+			stateW = l + 2
 		}
-		var rawSummary string
-		if len(files) == 1 {
-			rawSummary = statusLabel(files[0].Status)
-		} else {
-			var parts []string
-			for _, st := range []core.FileStatusLabel{core.StatusSynced, core.StatusEncrypted, core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew} {
-				if n := dCounts[string(st)]; n > 0 {
-					parts = append(parts, fmt.Sprintf("%d %s", n, strings.ToLower(string(st))))
-				}
-			}
-			rawSummary = strings.Join(parts, "  ·  ")
+		if l := len(groupTrackType(files)); l+2 > trackW {
+			trackW = l + 2
 		}
-		if l := len(rawSummary); l > statusW {
-			statusW = l
+		if l := len(displayTags(compactTags(groupTags(files), 3), implicitTags)); l+2 > tagsW {
+			tagsW = l + 2
+		}
+		if l := len(groupDetails(files)); l > detailsW {
+			detailsW = l
 		}
 	}
-	statusW += 2
 
-	if showIDs {
-		fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", idW)), clrBold.Sprint(pad("STATUS", statusW)), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
-	} else {
-		fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", dirW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("STATUS", statusW)), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
-	}
+	fmt.Printf("%s  %s  %s  %s  %s\n",
+		clrBold.Sprint(pad("PATH", dirW)),
+		clrBold.Sprint(pad("STATE", stateW)),
+		clrBold.Sprint(pad("TRACK", trackW)),
+		clrBold.Sprint(pad("TAGS", tagsW)),
+		clrBold.Sprint("DETAILS"))
 	divider()
-
-	implicitTags := core.DetectPlatformTags()
 
 	for _, dir := range dirOrder {
 		files := groups[dir]
 		dirDisplay := dir + "/"
-
-		// Tally this dir's statuses.
-		dCounts := map[string]int{}
-		for _, r := range files {
-			dCounts[string(r.Status)]++
-		}
-
-		// Build summary. Single-file rows: plain status word. Multi-file: "N status" counts.
-		var summary string
-		if len(files) == 1 {
-			r := files[0]
-			summary = statusColored(r.Status, statusLabel(r.Status))
-		} else {
-			var parts []string
-			if n := dCounts[string(core.StatusSynced)]; n > 0 {
-				parts = append(parts, clrSynced.Sprintf("%d synced", n))
-			}
-			if n := dCounts[string(core.StatusEncrypted)]; n > 0 {
-				parts = append(parts, clrEncrypted.Sprintf("%d encrypted", n))
-			}
-			if n := dCounts[string(core.StatusDirty)]; n > 0 {
-				parts = append(parts, clrDirty.Sprintf("%d dirty", n))
-			}
-			if n := dCounts[string(core.StatusPending)]; n > 0 {
-				parts = append(parts, clrPending.Sprintf("%d pending", n))
-			}
-			if n := dCounts[string(core.StatusMissing)]; n > 0 {
-				parts = append(parts, clrMissing.Sprintf("%d missing", n))
-			}
-			if n := dCounts[string(core.StatusNew)]; n > 0 {
-				parts = append(parts, clrNew.Sprintf("%d new", n))
-			}
-			summary = strings.Join(parts, clrDim.Sprint("  ·  "))
-		}
-
-		// Determine if this dir has any non-clean files.
-		dirDirty := dCounts[string(core.StatusDirty)]+
-			dCounts[string(core.StatusPending)]+
-			dCounts[string(core.StatusMissing)]+
-			dCounts[string(core.StatusNew)] > 0
+		dCounts := groupCounts(files)
+		dirDirty := isGroupDegraded(dCounts)
 
 		// Single file in this dir: show the full path instead of the folder.
 		rowLabel := dirDisplay
@@ -217,76 +155,43 @@ func printStatusTable(results []core.FileStatusResult, showIDs bool) (hasDiff bo
 			rowLabel = files[0].SystemPath
 		}
 
-		rowHash := core.DeriveID(dir)
-		rowSlug := ""
-		if len(files) == 1 {
-			rowHash = files[0].ID
-			rowSlug = files[0].Slug
-		}
-		// TYPE column: unanimous type or "mixed" when the group spans types.
-		groupType := fileTypeStr(files[0])
-		for _, f := range files[1:] {
-			if fileTypeStr(f) != groupType {
-				groupType = "mixed"
-				break
-			}
-		}
-		typeCol := clrDim.Sprint(pad(groupType, 6))
-
-		// TAGS column: union of all files' tags, fallback to platform tags.
-		seen := make(map[string]bool)
-		var rowTags []string
-		for _, f := range files {
-			for _, t := range f.Tags {
-				if !seen[t] {
-					seen[t] = true
-					rowTags = append(rowTags, t)
-				}
-			}
-		}
-		tagsCol := clrInfo.Sprint(displayTags(rowTags, implicitTags))
-
+		stateCol := padVisible(groupStateColored(dCounts), stateW)
+		trackCol := clrDim.Sprint(pad(groupTrackType(files), trackW))
+		tagsCol := clrInfo.Sprint(pad(displayTags(compactTags(groupTags(files), 3), implicitTags), tagsW))
+		detailsCol := groupDetails(files)
 		pathCol := pad(rowLabel, dirW)
-		hashCol := clrDim.Sprint(pad(rowHash, hashW))
+
 		if dirDirty {
-			if showIDs {
-				fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), padVisible(summary, statusW), typeCol, tagsCol)
-			} else {
-				fmt.Printf("%s  %s  %s  %s  %s\n", clrDirty.Sprint(pathCol), hashCol, padVisible(summary, statusW), typeCol, tagsCol)
-			}
+			fmt.Printf("%s  %s  %s  %s  %s\n",
+				clrBold.Sprint(pathCol),
+				stateCol,
+				trackCol,
+				tagsCol,
+				clrDirty.Sprint(detailsCol))
 		} else {
-			if showIDs {
-				fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, clrDim.Sprint(pad(rowSlug, idW)), padVisible(summary, statusW), typeCol, tagsCol)
-			} else {
-				fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pathCol), hashCol, padVisible(summary, statusW), typeCol, tagsCol)
-			}
+			fmt.Printf("%s  %s  %s  %s  %s\n",
+				clrBold.Sprint(pathCol),
+				stateCol,
+				trackCol,
+				tagsCol,
+				clrDim.Sprint(detailsCol))
 		}
 
 		// Expand changed files under the dir (skip if single-file row — it's already shown inline).
 		if dirDirty && len(files) > 1 {
+			fmt.Printf("  %s\n", clrDim.Sprint("changed:"))
 			for _, r := range files {
 				switch r.Status {
 				case core.StatusDirty, core.StatusPending, core.StatusMissing, core.StatusNew:
 				default:
 					continue
 				}
-				// Sub-row: align PATH/HASH/STATUS columns with parent rows.
-				// "  └ " is 4 display columns but 6 bytes (└ is 3 bytes in UTF-8).
-				// Pad only the filename to dirW-4 so total display width equals dirW.
-				subName := pad(filepath.Base(r.SystemPath), dirW-4)
+				subName := filepath.Base(r.SystemPath)
 				if r.Status == core.StatusNew {
-					fmt.Printf("  └ %s  %s  %s\n",
-						clrDim.Sprint(subName),
-						clrDim.Sprint(pad("", hashW)),
-						clrNew.Sprint("NEW  → sysfig track "+filepath.Dir(r.SystemPath)))
+					fmt.Printf("    %s\n", clrNew.Sprint(subName+"  → track required"))
 					continue
 				}
-				label := statusLabel(r.Status)
-				coloredLabel := statusColored(r.Status, label)
-				fmt.Printf("  └ %s  %s  %s\n",
-					clrDirty.Sprint(subName),
-					clrDim.Sprint(pad(r.ID, hashW)),
-					coloredLabel)
+				fmt.Printf("    %s\n", statusColored(r.Status, subName))
 
 				formatMetaDrift(&r, "    ")
 			}
@@ -400,37 +305,33 @@ func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff boo
 	})
 
 	pathW := len("PATH")
-	stW := len("STATUS")
-	slugW := 0
-	if showIDs {
-		slugW = len("SLUG")
-		for _, r := range results {
-			if len(r.Slug) > slugW {
-				slugW = len(r.Slug)
-			}
-		}
-		slugW += 2
-	}
+	stW := len("STATE")
+	trackW := len("TRACK") + 2
+	tagsW := len("TAGS") + 2
+	implicitTags := core.DetectPlatformTags()
 	for _, r := range results {
-		if len(r.SystemPath) > pathW {
-			pathW = len(r.SystemPath)
+		shortPath := shortenHomePath(r.SystemPath)
+		if len(shortPath) > pathW {
+			pathW = len(shortPath)
 		}
 		if len(statusLabel(r.Status)) > stW {
 			stW = len(statusLabel(r.Status))
+		}
+		if l := len(displayTags(compactTags(r.Tags, 3), implicitTags)); l+2 > tagsW {
+			tagsW = l + 2
 		}
 	}
 	pathW += 2
 	stW += 2
 
-	const hashW = 10 // "HASH" + 2 padding
-	if showIDs {
-		fmt.Printf("%s  %s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("SLUG", slugW)), clrBold.Sprint(pad("STATUS", stW)), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
-	} else {
-		fmt.Printf("%s  %s  %s  %s  %s\n", clrBold.Sprint(pad("PATH", pathW)), clrBold.Sprint(pad("HASH", hashW)), clrBold.Sprint(pad("STATUS", stW)), clrBold.Sprint(pad("TYPE", 6)), clrBold.Sprint("TAGS"))
-	}
+	fmt.Printf("%s  %s  %s  %s  %s\n",
+		clrBold.Sprint(pad("PATH", pathW)),
+		clrBold.Sprint(pad("STATE", stW)),
+		clrBold.Sprint(pad("TRACK", trackW)),
+		clrBold.Sprint(pad("TAGS", tagsW)),
+		clrBold.Sprint("DETAILS"))
 	divider()
 
-	implicitTags := core.DetectPlatformTags()
 	totals := map[string]int{}
 	for _, r := range results {
 		label := statusLabel(r.Status)
@@ -440,14 +341,18 @@ func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff boo
 		}
 		totals[string(r.Status)]++
 
-		typeCol := clrDim.Sprint(pad(fileTypeStr(r), 6))
-		tagsCol := clrInfo.Sprint(displayTags(r.Tags, implicitTags))
-
-		if showIDs {
-			fmt.Printf("%s  %s  %s  %s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), clrDim.Sprint(pad(r.Slug, slugW)), statusColored(r.Status, pad(label, stW)), typeCol, tagsCol)
-		} else {
-			fmt.Printf("%s  %s  %s  %s  %s\n", pad(r.SystemPath, pathW), clrDim.Sprint(pad(r.ID, hashW)), statusColored(r.Status, pad(label, stW)), typeCol, tagsCol)
+		trackCol := clrDim.Sprint(pad(fileTypeStr(r), trackW))
+		tagsCol := clrInfo.Sprint(pad(displayTags(compactTags(r.Tags, 3), implicitTags), tagsW))
+		details := strings.ToLower(label)
+		if r.Status == core.StatusDirty || r.Status == core.StatusPending || r.Status == core.StatusMissing || r.Status == core.StatusTampered {
+			details = "needs attention"
 		}
+		fmt.Printf("%s  %s  %s  %s  %s\n",
+			pad(shortenHomePath(r.SystemPath), pathW),
+			statusColored(r.Status, pad(label, stW)),
+			trackCol,
+			tagsCol,
+			clrDim.Sprint(details))
 
 		formatMetaDrift(&r, "   ")
 	}
@@ -455,6 +360,102 @@ func printStatusFlat(results []core.FileStatusResult, showIDs bool) (hasDiff boo
 	divider()
 	printSummaryFooter(totals, len(results))
 	return hasDiff
+}
+
+func groupCounts(files []core.FileStatusResult) map[core.FileStatusLabel]int {
+	counts := make(map[core.FileStatusLabel]int)
+	for _, r := range files {
+		counts[r.Status]++
+	}
+	return counts
+}
+
+func isGroupDegraded(counts map[core.FileStatusLabel]int) bool {
+	return counts[core.StatusDirty]+counts[core.StatusPending]+counts[core.StatusMissing]+counts[core.StatusNew]+counts[core.StatusTampered] > 0
+}
+
+func healthSummary(counts map[core.FileStatusLabel]int) string {
+	if isGroupDegraded(counts) {
+		return "DEGRADED"
+	}
+	return "HEALTHY"
+}
+
+func groupStateColored(counts map[core.FileStatusLabel]int) string {
+	label := healthSummary(counts)
+	if label == "DEGRADED" {
+		return clrDirty.Sprint(label)
+	}
+	return clrSynced.Sprint(label)
+}
+
+func groupTrackType(files []core.FileStatusResult) string {
+	groupType := fileTypeStr(files[0])
+	for _, f := range files[1:] {
+		if fileTypeStr(f) != groupType {
+			return "mixed"
+		}
+	}
+	return groupType
+}
+
+func groupTags(files []core.FileStatusResult) []string {
+	seen := make(map[string]bool)
+	var tags []string
+	for _, f := range files {
+		for _, t := range f.Tags {
+			if !seen[t] {
+				seen[t] = true
+				tags = append(tags, t)
+			}
+		}
+	}
+	return tags
+}
+
+func compactTags(tags []string, keep int) []string {
+	if len(tags) <= keep || keep <= 0 {
+		return tags
+	}
+	out := append([]string{}, tags[:keep]...)
+	out = append(out, fmt.Sprintf("+%d", len(tags)-keep))
+	return out
+}
+
+func groupDetails(files []core.FileStatusResult) string {
+	counts := groupCounts(files)
+	var parts []string
+	for _, item := range []struct {
+		status core.FileStatusLabel
+		label  string
+	}{
+		{core.StatusDirty, "dirty"},
+		{core.StatusPending, "pending"},
+		{core.StatusMissing, "missing"},
+		{core.StatusTampered, "tampered"},
+		{core.StatusNew, "new"},
+		{core.StatusSynced, "synced"},
+		{core.StatusEncrypted, "encrypted"},
+	} {
+		if n := counts[item.status]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, item.label))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func shortenHomePath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if strings.HasPrefix(path, home+"/") {
+		return "~/" + strings.TrimPrefix(path, home+"/")
+	}
+	return path
 }
 
 func newStatusCmd() *cobra.Command {
@@ -571,4 +572,3 @@ func runStatusWatch(baseDir, sysRoot string, ids []string, interval time.Duratio
 		}
 	}
 }
-
