@@ -1,4 +1,7 @@
 name: CI
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 permissions:
   contents: write
 
@@ -116,7 +119,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v6.0.0
         with:
           path: dist
           merge-multiple: true
@@ -150,7 +153,13 @@ jobs:
           cat checksums.txt
 
       - name: Install git-cliff
-        uses: kenji-miyake/setup-git-cliff@v2
+        run: |
+          VERSION="2.12.0"
+          curl -LsSf \
+            "https://github.com/orhun/git-cliff/releases/download/v${VERSION}/git-cliff-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            -o /tmp/git-cliff.tar.gz
+          tar -xzf /tmp/git-cliff.tar.gz -C /tmp
+          sudo install -m 0755 "/tmp/git-cliff-${VERSION}/git-cliff" /usr/local/bin/git-cliff
 
       - name: Generate changelog
         id: changelog
@@ -161,7 +170,7 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Publish latest (rolling)
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.6.1
         with:
           tag_name: latest
           name: "latest (main)"
