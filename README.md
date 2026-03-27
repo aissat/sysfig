@@ -207,6 +207,7 @@ sysfig deploy    bundle+ssh://backup@server/srv/conf.bundle
 - **[Hooks](docs/hooks.md)** — run commands after apply
 - **[Config sources](docs/config-sources.md)** — shared templates across machines
 - **[Secrets](docs/secrets.md)** — encryption, multi-node key sharing
+- **[Security](docs/security.md)** — audit findings, remediations, open issues
 
 ---
 

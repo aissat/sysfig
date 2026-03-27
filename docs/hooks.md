@@ -5,14 +5,18 @@ Hooks let you validate or reload services automatically after `sysfig apply` wri
 Create `~/.sysfig/hooks.yaml` (never committed to the repo):
 
 ```yaml
-# binaries allowed in exec hooks — add any tool you need
-allowlist: [nginx, sshd, apachectl, haproxy]
+# binaries allowed in exec hooks — full absolute paths required
+allowlist:
+  - /usr/sbin/nginx
+  - /usr/sbin/sshd
+  - /usr/sbin/apachectl
+  - /usr/sbin/haproxy
 
 hooks:
   nginx_validate:
     on: [etc_nginx_nginx_conf]     # file ID from 'sysfig status'
     type: exec
-    cmd: [nginx, -t]               # runs: nginx -t
+    cmd: [/usr/sbin/nginx, -t]     # runs: nginx -t
 
   nginx_reload:
     on: [etc_nginx_nginx_conf]
@@ -22,8 +26,10 @@ hooks:
   sshd_validate:
     on: [etc_ssh_sshd_config]
     type: exec
-    cmd: [sshd, -t]
+    cmd: [/usr/sbin/sshd, -t]
 ```
+
+> **Note:** `allowlist` entries and `cmd` binaries must be **full absolute paths** (e.g. `/usr/sbin/nginx`, not `nginx`). sysfig resolves the binary and compares its absolute path — a binary at `/tmp/nginx` will be rejected even if `nginx` is listed.
 
 When `sysfig apply` writes `/etc/nginx/nginx.conf`:
 - `nginx_validate` runs `nginx -t` — if it fails, apply exits with error
