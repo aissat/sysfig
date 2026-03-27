@@ -154,3 +154,30 @@ func TestBackup_Prune(t *testing.T) {
 		}
 	}
 }
+
+// ── SEC-005: backup directory must be created with mode 0700 ─────────────────
+//
+// Before the fix, os.MkdirAll used 0755, making the backup directory
+// world-traversable — a local attacker could read backed-up secrets.
+
+func TestSEC005_BackupDirCreatedWith0700(t *testing.T) {
+	baseDir := t.TempDir()
+	src := writeTempFile(t, t.TempDir(), "secret.conf", "db_password=hunter2")
+
+	m := backup.NewManager(baseDir)
+	backupPath, err := m.Backup("sec005_file", src)
+	if err != nil {
+		t.Fatalf("Backup returned unexpected error: %v", err)
+	}
+
+	backupDir := filepath.Dir(backupPath)
+	info, err := os.Stat(backupDir)
+	if err != nil {
+		t.Fatalf("stat backup dir: %v", err)
+	}
+
+	perm := info.Mode().Perm()
+	if perm != 0o700 {
+		t.Errorf("SEC-005 regression: backup dir has mode %04o, want 0700 — world-traversable backup dirs leak secrets to local users", perm)
+	}
+}

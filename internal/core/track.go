@@ -18,8 +18,11 @@ import (
 )
 
 // systemDenylist is the hardcoded set of paths that sysfig refuses to track.
-// Patterns ending in /* match any file under that directory.
-// Patterns containing * are matched via filepath.Match.
+//
+// Two pattern forms are supported:
+//   - Entries ending in /*   match any direct child (one level deep).
+//   - Entries ending in /**  match any file at any depth beneath that directory.
+//   - All other entries use filepath.Match (which supports * but not /).
 var systemDenylist = []string{
 	"/etc/shadow",
 	"/etc/passwd",
@@ -28,8 +31,15 @@ var systemDenylist = []string{
 	"/etc/subuid",
 	"/etc/subgid",
 	"/etc/sudoers",
+	"/etc/sudoers.d/*",
+	"/etc/pam.d/*",
+	"/etc/security/*",
+	"/etc/polkit-1/**",
+	"/etc/cron.d/*",
+	"/etc/cron.daily/*",
+	"/run/secrets/*",
 	"/etc/ssh/ssh_host_*",
-	"/etc/ssl/private/*",
+	"/etc/ssl/private/**",
 	"/var/lib/machines/*",
 	"/boot/*",
 	"/proc/*",
@@ -38,8 +48,7 @@ var systemDenylist = []string{
 }
 
 // IsDenied returns true if the given absolute path matches any entry in the
-// built-in system denylist. Patterns ending in /* match any file under that
-// directory. Patterns containing * use glob matching via filepath.Match.
+// built-in system denylist.
 func IsDenied(path string) bool {
 	for _, pattern := range systemDenylist {
 		// Exact match — fast path.
@@ -47,7 +56,16 @@ func IsDenied(path string) bool {
 			return true
 		}
 
-		// Glob match (handles ssh_host_*, private/*, boot/*, etc.)
+		// Recursive directory match — /** covers any depth beneath the directory.
+		if strings.HasSuffix(pattern, "/**") {
+			dir := strings.TrimSuffix(pattern, "/**")
+			if strings.HasPrefix(path, dir+"/") {
+				return true
+			}
+			continue
+		}
+
+		// Shallow glob match (handles ssh_host_*, private/*, boot/*, etc.)
 		matched, err := filepath.Match(pattern, path)
 		if err == nil && matched {
 			return true
@@ -190,7 +208,11 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 	}
 
 	// 1a. Denylist check — always on the logical path.
-	if IsDenied(path) {
+	// Hash-only mode stores no content (only a digest), so the threat model
+	// behind the denylist (secrets leaking into git) does not apply.
+	// Operators legitimately use hash-only to monitor sensitive files for
+	// unexpected changes without ever capturing their contents.
+	if IsDenied(path) && !opts.HashOnly {
 		return nil, fmt.Errorf("core: path %q is in the system denylist", path)
 	}
 
@@ -560,8 +582,8 @@ func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
 			return nil
 		}
 
-		// Denylist check.
-		if IsDenied(path) {
+		// Denylist check — hash-only is exempt (no content stored in git).
+		if IsDenied(path) && !opts.HashOnly {
 			summary.Entries = append(summary.Entries, TrackDirEntry{
 				Path:    path,
 				Skipped: true,

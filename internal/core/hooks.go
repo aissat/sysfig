@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -71,7 +72,7 @@ func LoadHooks(baseDir string) (*HooksConfig, error) {
 
 	allowlist := make(map[string]bool, len(hf.Allowlist))
 	for _, b := range hf.Allowlist {
-		allowlist[filepath.Base(b)] = true
+		allowlist[b] = true
 	}
 	return &HooksConfig{Hooks: hf.Hooks, Allowlist: allowlist}, nil
 }
@@ -124,13 +125,21 @@ func runHook(h HookDef, allowlist map[string]bool) (string, error) {
 }
 
 // runExec validates cmd against the allowlist then runs it.
+// The allowlist must contain full absolute paths; basenames are not accepted.
 func runExec(cmd []string, allowlist map[string]bool) (string, error) {
 	if len(cmd) == 0 {
 		return "", fmt.Errorf("hooks: exec: cmd is empty")
 	}
-	binary := filepath.Base(cmd[0])
-	if !allowlist[binary] {
-		return "", fmt.Errorf("hooks: exec: %q is not in the allowlist", binary)
+	resolved, err := exec.LookPath(cmd[0])
+	if err != nil {
+		return "", fmt.Errorf("hooks: exec: binary not found: %w", err)
+	}
+	absPath, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("hooks: exec: resolve path: %w", err)
+	}
+	if !allowlist[absPath] {
+		return "", fmt.Errorf("hooks: exec: %q is not in the allowlist", absPath)
 	}
 	return runCmd(30*time.Second, cmd[0], cmd[1:]...)
 }
@@ -146,7 +155,9 @@ func validateService(name string) error {
 }
 
 func runCmd(timeout time.Duration, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 	if err != nil {

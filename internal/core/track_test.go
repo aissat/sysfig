@@ -106,6 +106,62 @@ func TestIsDenied_Glob(t *testing.T) {
 	assert.False(t, core.IsDenied("/etc/ssh/sshd_config"), "ssh_host_* glob must NOT match sshd_config")
 }
 
+// ── SEC-006: incomplete denylist — missing privilege-escalation paths ─────────
+//
+// The original denylist did not cover sudoers.d, pam.d, polkit, cron, or
+// /run/secrets, so an attacker with repo access could track and push those
+// files to take over a system. Each entry below maps to a gap found in the
+// security assessment.
+
+func TestSEC006_SudoersDotD_IsDenied(t *testing.T) {
+	assert.True(t, core.IsDenied("/etc/sudoers.d/90-admin"),
+		"SEC-006: /etc/sudoers.d/* grants root via sudo — must be denied")
+	assert.True(t, core.IsDenied("/etc/sudoers.d/custom"),
+		"SEC-006: /etc/sudoers.d/* grants root via sudo — must be denied")
+}
+
+func TestSEC006_PamD_IsDenied(t *testing.T) {
+	assert.True(t, core.IsDenied("/etc/pam.d/sshd"),
+		"SEC-006: /etc/pam.d/* controls the auth stack — must be denied")
+	assert.True(t, core.IsDenied("/etc/pam.d/sudo"),
+		"SEC-006: /etc/pam.d/* controls the auth stack — must be denied")
+}
+
+func TestSEC006_SecurityDir_IsDenied(t *testing.T) {
+	assert.True(t, core.IsDenied("/etc/security/access.conf"),
+		"SEC-006: /etc/security/* (PAM limits/access) — must be denied")
+}
+
+func TestSEC006_Polkit_IsDenied(t *testing.T) {
+	assert.True(t, core.IsDenied("/etc/polkit-1/rules.d/50.rules"),
+		"SEC-006: polkit rules grant privilege — must be denied at any depth")
+}
+
+func TestSEC006_CronD_IsDenied(t *testing.T) {
+	assert.True(t, core.IsDenied("/etc/cron.d/root-job"),
+		"SEC-006: /etc/cron.d/* runs as root — must be denied")
+	assert.True(t, core.IsDenied("/etc/cron.daily/backup"),
+		"SEC-006: /etc/cron.daily/* runs as root — must be denied")
+}
+
+func TestSEC006_RunSecrets_IsDenied(t *testing.T) {
+	assert.True(t, core.IsDenied("/run/secrets/db_password"),
+		"SEC-006: /run/secrets/* holds container/systemd secrets — must be denied")
+}
+
+func TestSEC006_SslPrivateNested_IsDenied(t *testing.T) {
+	// Original /etc/ssl/private/* only covered one level; nested certs slipped through.
+	assert.True(t, core.IsDenied("/etc/ssl/private/sub/key.pem"),
+		"SEC-006: nested private keys under /etc/ssl/private/ must also be denied")
+}
+
+// Sanity-check: legitimate paths that must remain trackable.
+func TestSEC006_LegitPaths_NotDenied(t *testing.T) {
+	assert.False(t, core.IsDenied("/etc/nginx/nginx.conf"))
+	assert.False(t, core.IsDenied("/etc/ssh/sshd_config"))
+	assert.False(t, core.IsDenied("/etc/systemd/system/myapp.service"))
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -185,6 +241,49 @@ func TestTrack_DeniedPath(t *testing.T) {
 	_, err := core.Track(opts)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "denylist", "error must mention the denylist")
+}
+
+// TestTrack_HashOnly_DeniedPathAllowed verifies that hash-only mode bypasses
+// the denylist. Storing only a digest carries none of the risk that blocks
+// content tracking (secrets leaking into git) — it is useful for integrity
+// monitoring of sensitive files like /etc/shadow or /etc/sudoers.
+func TestTrack_HashOnly_DeniedPathAllowed(t *testing.T) {
+	baseDir := initBareLocalRepo(t)
+	sysRoot := t.TempDir()
+
+	// Simulate a denylist-protected file with some fake content.
+	writeFile(t, filepath.Join(sysRoot, "etc/shadow"), "root:!:19000::::::\n")
+
+	result, err := core.Track(core.TrackOptions{
+		SystemPath: filepath.Join(sysRoot, "etc/shadow"),
+		RepoDir:    filepath.Join(baseDir, "repo.git"),
+		StateDir:   baseDir,
+		SysRoot:    sysRoot,
+		HashOnly:   true,
+	})
+	require.NoError(t, err, "hash-only tracking of a denylist path must succeed")
+	require.NotNil(t, result)
+	assert.NotEmpty(t, result.Hash, "hash must be recorded")
+
+	// No file content must land in git.
+	_, ok := gitShowAt(filepath.Join(baseDir, "repo.git"), "track/etc/shadow", "etc/shadow")
+	assert.False(t, ok, "hash-only must never commit content to git, even for denylist paths")
+}
+
+// TestTrack_LocalOnly_DeniedPathBlocked confirms that --local does NOT bypass
+// the denylist — content is still committed into a local git branch.
+func TestTrack_LocalOnly_DeniedPathBlocked(t *testing.T) {
+	tmp := t.TempDir()
+
+	opts := core.TrackOptions{
+		SystemPath: "/etc/shadow",
+		RepoDir:    filepath.Join(tmp, "repo"),
+		StateDir:   filepath.Join(tmp, "state"),
+		LocalOnly:  true,
+	}
+	_, err := core.Track(opts)
+	require.Error(t, err, "--local must not bypass the denylist (content still goes into git)")
+	assert.Contains(t, err.Error(), "denylist")
 }
 
 func TestTrack_AlreadyTracked(t *testing.T) {

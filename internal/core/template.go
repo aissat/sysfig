@@ -104,14 +104,17 @@ func resolveVar(key string, vars TemplateVars) (string, error) {
 		return vars.OS, nil
 	}
 
-	// {{env.NAME}} — arbitrary environment variable.
+	// {{env.NAME}} — environment variable declared in the profile or Extra.
+	// SEC-008: the os.Getenv fallback is intentionally absent. Allowing
+	// arbitrary env var reads via shared templates is a supply-chain vector
+	// (attacker adds {{env.AWS_SECRET}} → victim's creds land in git history).
+	// Callers must opt-in by populating TemplateVars.Extra explicitly.
 	if strings.HasPrefix(key, "env.") {
 		envKey := strings.TrimPrefix(key, "env.")
-		// Check Extra map first (allows test/caller overrides).
 		if v, ok := vars.Extra[envKey]; ok {
 			return v, nil
 		}
-		return os.Getenv(envKey), nil
+		return "", fmt.Errorf("core: template: env var %q not in allowed vars — declare it in profile variables or TemplateVars.Extra", envKey)
 	}
 
 	// Check Extra map for arbitrary custom variables (e.g. source profile

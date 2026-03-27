@@ -50,7 +50,7 @@ func (m *Manager) Backup(fileID string, src string) (string, error) {
 	perm := srcInfo.Mode().Perm()
 
 	dir := m.backupDir(fileID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("backup: %w", err)
 	}
 

@@ -69,10 +69,38 @@ func TestRenderTemplate_UnclosedPlaceholder_Literal(t *testing.T) {
 	assert.Equal(t, "before {{unclosed", string(got))
 }
 
-func TestRenderTemplate_EmptyEnvVar(t *testing.T) {
-	// env var not in Extra and not set in environment → empty string, no error.
+func TestRenderTemplate_EnvVarNotInExtra_ReturnsError(t *testing.T) {
+	// SEC-008: env vars not declared in Extra must be rejected — no os.Getenv fallback.
+	// Before the fix, an unrecognised {{env.NAME}} silently read from the OS
+	// environment, leaking arbitrary secrets into rendered config files.
 	src := []byte("val={{env.UNSET_XYZ_999}}")
-	got, err := core.RenderTemplate(src, testVars())
+	_, err := core.RenderTemplate(src, testVars())
+	require.Error(t, err, "SEC-008 regression: env var not in Extra must be an error, not silent OS read")
+}
+
+// ── SEC-008: arbitrary env var exfiltration via templates ────────────────────
+//
+// An attacker who controls a shared profile template can add {{env.AWS_SECRET}}
+// to steal credentials from whoever runs `sysfig apply`. The fix requires all
+// env vars to be explicitly listed in TemplateVars.Extra; the os.Getenv
+// fallback is removed.
+
+func TestSEC008_EnvVarFromOSEnvironmentIsRejected(t *testing.T) {
+	// Set a "secret" in the OS environment — simulates a victim with cloud creds.
+	t.Setenv("SEC008_TEST_SECRET", "super-secret-value")
+
+	// Template controlled by attacker in a shared profile repo.
+	src := []byte("AWS_KEY={{env.SEC008_TEST_SECRET}}")
+
+	// testVars() does not include SEC008_TEST_SECRET in Extra.
+	_, err := core.RenderTemplate(src, testVars())
+	require.Error(t, err,
+		"SEC-008 regression: env var set in OS but not in Extra must not be rendered")
+
+	// Ensure it's not a false positive: explicitly allowed vars still work.
+	vars := testVars()
+	vars.Extra["SEC008_TEST_SECRET"] = "allowed-value"
+	got, err := core.RenderTemplate(src, vars)
 	require.NoError(t, err)
-	assert.Equal(t, "val=", string(got))
+	assert.Equal(t, "AWS_KEY=allowed-value", string(got))
 }
