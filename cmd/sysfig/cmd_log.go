@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/aissat/sysfig/internal/core"
@@ -121,10 +122,21 @@ Filter to a specific path or ID:
 				dim     = "\033[2m"
 			)
 
-			// Lane colors cycle through distinct ANSI colors.
+			// Lane colors: 12 distinct ANSI colors (normal + bright variants)
+			// so up to 12 branches have unique colors before cycling.
 			laneColors := []string{
-				"\033[32m", "\033[33m", "\033[36m", "\033[35m",
-				"\033[34m", "\033[31m", "\033[37m",
+				"\033[32m",  // green
+				"\033[33m",  // yellow
+				"\033[36m",  // cyan
+				"\033[35m",  // magenta
+				"\033[34m",  // blue
+				"\033[31m",  // red
+				"\033[92m",  // bright green
+				"\033[93m",  // bright yellow
+				"\033[96m",  // bright cyan
+				"\033[95m",  // bright magenta
+				"\033[94m",  // bright blue
+				"\033[91m",  // bright red
 			}
 
 			// Pre-build hash→branch map by walking every track/* and manifest branch.
@@ -133,14 +145,14 @@ Filter to a specific path or ID:
 			if graphMode {
 				branchListOut, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
 					"for-each-ref", "--format=%(refname:short)", "refs/heads/").Output()
-				for _, b := range strings.Split(strings.TrimSpace(string(branchListOut)), "\n") {
+				for b := range strings.SplitSeq(strings.TrimSpace(string(branchListOut)), "\n") {
 					b = strings.TrimSpace(b)
 					if !strings.HasPrefix(b, "track/") && b != "manifest" {
 						continue
 					}
 					commitListOut, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
 						"log", b, "--format=%H").Output()
-					for _, h := range strings.Split(strings.TrimSpace(string(commitListOut)), "\n") {
+					for h := range strings.SplitSeq(strings.TrimSpace(string(commitListOut)), "\n") {
 						h = strings.TrimSpace(h)
 						if h != "" {
 							if hashToBranch[h] == "" { hashToBranch[h] = b }
@@ -202,7 +214,7 @@ Filter to a specific path or ID:
 				}
 
 				var paths []string
-				for _, f := range strings.Split(strings.TrimSpace(string(dtOut)), "\n") {
+				for f := range strings.SplitSeq(strings.TrimSpace(string(dtOut)), "\n") {
 					if f == "" || f == "sysfig.yaml" {
 						continue
 					}
@@ -213,14 +225,21 @@ Filter to a specific path or ID:
 					paths = append(paths, f)
 				}
 
+				const maxPath = 35
 				pathLabel := ""
 				if len(paths) == 1 {
 					pathLabel = paths[0]
 				} else if len(paths) > 1 {
 					pathLabel = fmt.Sprintf("%s +%d", paths[0], len(paths)-1)
 				}
-				if len(pathLabel) > maxPathLen {
-					maxPathLen = len(pathLabel)
+				if len(pathLabel) > maxPath {
+					pathLabel = pathLabel[:maxPath-1] + "…"
+				}
+				if vl := visibleLen(pathLabel); vl > maxPathLen {
+					maxPathLen = vl
+				}
+				if maxPathLen > maxPath {
+					maxPathLen = maxPath
 				}
 
 				// Diff stat.
@@ -231,7 +250,7 @@ Filter to a specific path or ID:
 					nsOut, _ = exec.Command("git", "--no-pager", "--git-dir="+repoDir,
 						"show", "--numstat", "--format=", hash).Output()
 				}
-				for _, sl := range strings.Split(strings.TrimSpace(string(nsOut)), "\n") {
+				for sl := range strings.SplitSeq(strings.TrimSpace(string(nsOut)), "\n") {
 					fields := strings.Fields(sl)
 					if len(fields) >= 2 && (fields[0] != "0" || fields[1] != "0") {
 						statLabel = dim + "[+" + fields[0] + "/-" + fields[1] + "]" + reset
@@ -250,96 +269,149 @@ Filter to a specific path or ID:
 				})
 			}
 
-			// Second pass: render with aligned path column + optional lane graph.
-			// Lane graph state: lanes[i] holds the branch name active in column i.
-			lanes := []string{}
-			laneColor := map[string]string{}
-			laneIdx := map[string]int{}
-			// Pre-compute last occurrence index per branch for lane closing.
-			lastOcc := map[string]int{}
-			for i, r := range rows {
-				if r.branchName != "" {
-					lastOcc[r.branchName] = i
-				}
-			}
-			getLane := func(branch string) int {
-				if idx, ok := laneIdx[branch]; ok {
-					return idx
-				}
-				for i, l := range lanes {
-					if l == "" {
-						lanes[i] = branch
-						laneIdx[branch] = i
-						return i
-					}
-				}
-				i := len(lanes)
-				lanes = append(lanes, branch)
-				laneIdx[branch] = i
-				laneColor[branch] = laneColors[i%len(laneColors)]
-				return i
-			}
-			closeLane := func(branch string) {
-				if idx, ok := laneIdx[branch]; ok {
-					lanes[idx] = ""
-					delete(laneIdx, branch)
-				}
-			}
-			graphPfx := func(active int) string {
-				// find rightmost active column
-				width := active + 1
-				for i := len(lanes) - 1; i > active; i-- {
-					if lanes[i] != "" {
-						width = i + 1
-						break
-					}
-				}
-				var sb strings.Builder
-				for i := 0; i < width; i++ {
-					if i == active {
-						sb.WriteString(laneColor[lanes[i]] + "* " + reset)
-					} else if lanes[i] != "" {
-						sb.WriteString(laneColor[lanes[i]] + "| " + reset)
-					} else {
-						sb.WriteString("  ")
-					}
-				}
-				return sb.String()
-			}
-			for i, r := range rows {
-				if r.connector != "" {
-					fmt.Println(r.connector)
-					continue
-				}
-				paddedPath := r.pathLabel
+			// ── Second pass: render ──────────────────────────────────────────
+
+			// Shared row printer used by both modes.
+			// Full line is truncated to terminal width to prevent wrapping.
+			tw := termWidth()
+			printRow := func(prefix, h, date, pathLabel, subject, statLabel, decoration string) {
+				paddedPath := pathLabel
 				if maxPathLen > 0 {
-					paddedPath = r.pathLabel + strings.Repeat(" ", maxPathLen-len(r.pathLabel))
+					if pad := maxPathLen - visibleLen(pathLabel); pad > 0 {
+						paddedPath = pathLabel + strings.Repeat(" ", pad)
+					}
 				}
 				decStr := ""
-				if r.decoration != "" {
-					decStr = "  " + green + "(" + r.decoration + ")" + reset
+				if decoration != "" {
+					decStr = "  " + green + "(" + decoration + ")" + reset
 				}
-				prefix := "* "
-				if graphMode && r.branchName != "" {
-					activeLane := getLane(r.branchName)
-					prefix = graphPfx(activeLane)
-					if lastOcc[r.branchName] == i {
-						closeLane(r.branchName)
+				var line string
+				if pathLabel == "" {
+					line = fmt.Sprintf("%s%s%s%s %s%s%s  %s %s%s",
+						prefix,
+						yellow, h, reset,
+						cyan, date, reset,
+						subject, statLabel, decStr)
+				} else {
+					line = fmt.Sprintf("%s%s%s%s %s%s%s  %s%s%s  %s %s%s",
+						prefix,
+						yellow, h, reset,
+						cyan, date, reset,
+						magenta, paddedPath, reset,
+						subject, statLabel, decStr)
+				}
+				fmt.Println(fitANSI(line, tw))
+			}
+
+			if graphMode {
+				// Assign each branch a fixed lane (column), sorted for stability.
+				branchSet := map[string]bool{}
+				for _, r := range rows {
+					if r.branchName != "" {
+						branchSet[r.branchName] = true
 					}
 				}
-				if r.pathLabel == "" {
-					fmt.Printf("%s%s%s%s %s%s%s  %s %s%s\n",
-						prefix,
-						yellow, r.hash, reset,
-						cyan, r.date, reset,
-						r.subject, r.statLabel, decStr)
-				} else {
-					fmt.Printf("%s%s%s%s %s%s%s  %s%s%s  %s %s%s\n",
-						prefix,
-						yellow, r.hash, reset,
-						cyan, r.date, reset,
-						magenta, paddedPath, reset,
-						r.subject, r.statLabel, decStr)
+				sortedBranches := make([]string, 0, len(branchSet))
+				for b := range branchSet {
+					sortedBranches = append(sortedBranches, b)
+				}
+				sort.Strings(sortedBranches)
+
+				branchLane := map[string]int{}
+				for li, b := range sortedBranches {
+					branchLane[b] = li
+				}
+
+				// shortTrack converts a branch ref to a human-readable file path.
+				// "track/home/aye7/dot-zshrc" → "home/aye7/.zshrc"
+				// "manifest" or "local/etc/fstab" → kept as-is
+				shortTrack := func(b string) string {
+					b = strings.TrimPrefix(b, "track/")
+					parts := strings.Split(b, "/")
+					for i, p := range parts {
+						if strings.HasPrefix(p, "dot-") {
+							parts[i] = "." + p[4:]
+						}
+					}
+					return strings.Join(parts, "/")
+				}
+
+				// Print legend: one row per lane, two columns side by side.
+				colW := tw/2 - 2
+				sep := dim + strings.Repeat("─", tw-1) + reset
+				fmt.Println(sep)
+				for i, b := range sortedBranches {
+					color := laneColors[i%len(laneColors)]
+					entry := color + "●" + reset + " " + shortTrack(b)
+					if i%2 == 0 {
+						fmt.Print("  " + padVisible(entry, colW))
+					} else {
+						fmt.Println(entry)
+					}
+				}
+				if len(sortedBranches)%2 != 0 {
+					fmt.Println()
+				}
+				fmt.Println(sep)
+
+				// Lane activity: a lane shows │ between its first and last commit row.
+				firstRowOf := map[string]int{}
+				lastRowOf := map[string]int{}
+				tipOf := map[string]bool{} // branch → true for the first (newest) commit
+				for i, r := range rows {
+					if r.branchName == "" {
+						continue
+					}
+					if _, seen := firstRowOf[r.branchName]; !seen {
+						firstRowOf[r.branchName] = i
+						tipOf[r.branchName] = true
+					}
+					lastRowOf[r.branchName] = i
+				}
+
+				// buildPfx builds the lane prefix for a given row index and commit lane.
+				// Each lane is 1 char wide (no trailing space) — minimises graph width.
+				// A single space is appended at the end as separator from the commit info.
+				buildPfx := func(rowIdx, commitLane int) string {
+					var sb strings.Builder
+					for li, branch := range sortedBranches {
+						color := laneColors[li%len(laneColors)]
+						fst, seen := firstRowOf[branch]
+						lst := lastRowOf[branch]
+						switch {
+						case li == commitLane:
+							sym := "●"
+							if tipOf[branch] {
+								sym = "◉"
+								tipOf[branch] = false // only first occurrence is tip
+							}
+							sb.WriteString(color + sym + reset)
+						case seen && rowIdx >= fst && rowIdx <= lst:
+							sb.WriteString(color + "│" + reset)
+						default:
+							sb.WriteString(" ")
+						}
+					}
+					sb.WriteString(" ") // separator
+					return sb.String()
+				}
+
+				for i, r := range rows {
+					if r.connector != "" {
+						continue
+					}
+					commitLane := -1
+					if r.branchName != "" {
+						commitLane = branchLane[r.branchName]
+					}
+					printRow(buildPfx(i, commitLane), r.hash, r.date, r.pathLabel, r.subject, r.statLabel, r.decoration)
+				}
+			} else {
+				for _, r := range rows {
+					if r.connector != "" {
+						continue
+					}
+					printRow("  ", r.hash, r.date, r.pathLabel, r.subject, r.statLabel, r.decoration)
 				}
 			}
 			return nil
