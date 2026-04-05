@@ -50,7 +50,7 @@ func newTrackCmd() *cobra.Command {
 			//   user@host:2222:/path      → remote=user@host:2222, path=/path
 			// The --remote flag takes priority over inline syntax.
 			if remoteHost == "" {
-				if h, p, ok := parseRemotePath(targetPath); ok {
+				if h, p, ok := core.ParseInlineRemote(targetPath); ok {
 					remoteHost = h
 					targetPath = p
 				}
@@ -210,29 +210,55 @@ func newTrackCmd() *cobra.Command {
 // ── untrack ───────────────────────────────────────────────────────────────────
 
 func newUntrackCmd() *cobra.Command {
-	var baseDir string
+	var (
+		baseDir    string
+		remoteHost string
+	)
 	cmd := &cobra.Command{
 		Use:   "untrack <path-or-id>",
 		Short: "Stop tracking a file (removes from state, leaves system file untouched)",
-		Args:  cobra.ExactArgs(1),
+		Long: `Stop tracking a file. The system file is left untouched.
+
+For remote-tracked files use the inline syntax or --remote flag to target
+a specific host. Without a host qualifier, a plain path matches all hosts.
+
+  sysfig untrack /home/aye7/.zshrc                      # local file
+  sysfig untrack admin@web1:/etc/nginx/nginx.conf        # remote file (inline)
+  sysfig untrack --remote admin@web1 /etc/nginx/nginx.conf  # remote file (flag)
+  sysfig untrack /etc/nginx/nginx.conf                   # ALL hosts tracking this path`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
 			arg := args[0]
 
-			// Resolve to an absolute path if it looks like a file/dir path.
-			// A bare tracking ID is 8 hex chars with no slashes or dots.
-			// Anything starting with '.', '/', or containing '/' is a path.
-			looksLikePath := strings.Contains(arg, "/") ||
-				strings.HasPrefix(arg, ".") ||
-				strings.HasPrefix(arg, "~")
-			if looksLikePath {
-				abs, err := filepath.Abs(arg)
-				if err == nil {
-					arg = abs
+			// Inline remote syntax takes priority over --remote flag.
+			// Only resolve to absolute path for non-remote local paths.
+			if remoteHost == "" {
+				if _, _, ok := core.ParseInlineRemote(arg); !ok {
+					// Local path — resolve to absolute.
+					looksLikePath := strings.Contains(arg, "/") ||
+						strings.HasPrefix(arg, ".") ||
+						strings.HasPrefix(arg, "~")
+					if looksLikePath {
+						if abs, err := filepath.Abs(arg); err == nil {
+							arg = abs
+						}
+					}
 				}
 			}
 
-			removed, err := core.Untrack(core.UntrackOptions{BaseDir: baseDir, Arg: arg})
+			// Resolve SYSFIG_HOST when no explicit host is given.
+			if remoteHost == "" {
+				if _, _, ok := core.ParseInlineRemote(arg); !ok {
+					remoteHost = os.Getenv("SYSFIG_HOST")
+				}
+			}
+
+			removed, err := core.Untrack(core.UntrackOptions{
+				BaseDir:    baseDir,
+				Arg:        arg,
+				RemoteHost: remoteHost,
+			})
 			if err != nil {
 				return err
 			}
@@ -243,5 +269,6 @@ func newUntrackCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&baseDir, "base-dir", "", "override base dir")
+	cmd.Flags().StringVarP(&remoteHost, "remote", "r", "", "scope untrack to this remote host (user@host)")
 	return cmd
 }

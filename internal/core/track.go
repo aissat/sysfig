@@ -420,21 +420,36 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 // UntrackOptions configures an Untrack call.
 type UntrackOptions struct {
 	BaseDir string // ~/.sysfig
-	// Arg is either a bare ID (e.g. "home_aye7_zshrc") or an absolute path
-	// (e.g. "/home/aye7/.zshrc"). Both are accepted.
-	Arg string
+	// Arg is either a bare ID, an absolute path, or a remote spec:
+	//   "home_aye7_zshrc"               → bare ID
+	//   "/home/aye7/.zshrc"             → local absolute path
+	//   "user@host:/etc/path"           → remote file on specific host
+	//   "user@host:port:/etc/path"      → remote file with port
+	// When Arg is a plain path and RemoteHost is set, only records from
+	// that host are removed.
+	Arg        string
+	RemoteHost string // when set, scope removal to this host only
 }
 
 // Untrack removes one or more files from sysfig tracking. The system files are
 // left untouched. Arg may be:
-//   - a bare ID           → removes that single entry
-//   - an absolute path    → removes that single file
-//   - an absolute dir     → removes all files under that directory
+//   - a bare ID                 → removes that single entry
+//   - an absolute path          → removes that file (scoped to RemoteHost if set)
+//   - an absolute dir           → removes all files under that directory (scoped to RemoteHost if set)
+//   - user@host:/path           → removes that specific remote file
+//   - user@host:port:/path      → same, with port
 //
 // Returns the list of IDs removed, or an error if nothing matched.
 func Untrack(opts UntrackOptions) ([]string, error) {
-	// Normalise: strip trailing slash so dir matching is consistent.
+	// Parse inline remote syntax: user@host:/path or user@host:port:/path
+	remoteHost := opts.RemoteHost
 	arg := strings.TrimRight(opts.Arg, "/")
+	if remoteHost == "" {
+		if h, p, ok := parseInlineRemote(arg); ok {
+			remoteHost = h
+			arg = strings.TrimRight(p, "/")
+		}
+	}
 
 	statePath := filepath.Join(opts.BaseDir, "state.json")
 	sm := state.NewManager(statePath)
@@ -447,6 +462,10 @@ func Untrack(opts UntrackOptions) ([]string, error) {
 				rec.Group == arg ||
 				strings.HasPrefix(rec.Group, arg+"/")
 			if match {
+				// When a remote host is specified, only remove records for that host.
+				if remoteHost != "" && rec.Remote != remoteHost {
+					continue
+				}
 				delete(s.Files, id)
 				removed = append(removed, id)
 			}

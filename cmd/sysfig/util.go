@@ -251,30 +251,6 @@ func autoSyncTracked(baseDir string, ids []string) {
 	}
 }
 
-// parseRemotePath detects the inline remote syntax and splits it into host and path.
-//
-// Supported forms:
-//
-//	user@host:/path           → host="user@host",      path="/path"
-//	user@host:2222:/path      → host="user@host:2222", path="/path"
-//
-// Returns (host, path, true) on match, ("", "", false) if not a remote path.
-func parseRemotePath(arg string) (host, path string, ok bool) {
-	// Must contain '@' before any ':' to be a remote spec.
-	atIdx := strings.Index(arg, "@")
-	if atIdx < 0 {
-		return "", "", false
-	}
-	// Find the last occurrence of ":/" which separates host(:port) from path.
-	sepIdx := strings.LastIndex(arg, ":/")
-	if sepIdx < 0 || sepIdx <= atIdx {
-		return "", "", false
-	}
-	host = arg[:sepIdx]
-	path = arg[sepIdx+1:] // includes leading "/"
-	return host, path, true
-}
-
 // filterIDsByHost restricts a file ID list to records matching SYSFIG_HOST.
 // When SYSFIG_HOST is set: keep only IDs whose Remote matches that host.
 // When SYSFIG_HOST is not set: return ids unchanged.

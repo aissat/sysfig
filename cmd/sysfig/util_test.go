@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/aissat/sysfig/internal/core"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -89,7 +90,7 @@ func TestParseRemotePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			host, path, ok := parseRemotePath(tt.arg)
+			host, path, ok := core.ParseInlineRemote(tt.arg)
 			assert.Equal(t, tt.wantMatch, ok, "match")
 			if tt.wantMatch {
 				assert.Equal(t, tt.wantHost, host, "host")

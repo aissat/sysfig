@@ -23,6 +23,27 @@ import (
 //
 // The only unsafe character in a Linux path component is "/"; ":" is replaced
 // with "_" because it is used as a logical separator elsewhere in sysfig.
+// parseInlineRemote detects the inline remote syntax and splits it into host and path.
+//
+//	user@host:/path           → host="user@host",      path="/path"
+//	user@host:port:/path      → host="user@host:port",  path="/path"
+//
+// Returns ("", "", false) if arg is not a remote spec.
+// ParseInlineRemote is the exported form of parseInlineRemote, used by CLI and tests.
+func ParseInlineRemote(arg string) (host, path string, ok bool) { return parseInlineRemote(arg) }
+
+func parseInlineRemote(arg string) (host, path string, ok bool) {
+	atIdx := strings.Index(arg, "@")
+	if atIdx < 0 {
+		return "", "", false
+	}
+	sepIdx := strings.LastIndex(arg, ":/")
+	if sepIdx < 0 || sepIdx <= atIdx {
+		return "", "", false
+	}
+	return arg[:sepIdx], arg[sepIdx+1:], true
+}
+
 func RepoRemotePrefix(remote string) string {
 	return strings.ReplaceAll(remote, ":", "_")
 }
