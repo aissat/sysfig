@@ -333,7 +333,9 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		groupDirsSet := make(map[string]bool)
 		for _, rec := range currentState.Files {
 			trackedPaths[rec.SystemPath] = true
-			if rec.Group != "" {
+			// Remote group dirs must never be walked locally — the files live on
+			// a remote host and must be re-fetched via SSH, not read from disk.
+			if rec.Group != "" && rec.Remote == "" {
 				groupDirsSet[rec.Group] = true
 			}
 		}

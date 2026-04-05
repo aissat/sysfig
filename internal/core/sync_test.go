@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/aissat/sysfig/internal/core"
+	"github.com/aissat/sysfig/internal/state"
+	"github.com/aissat/sysfig/pkg/types"
+	"github.com/stretchr/testify/require"
 )
 
 // requireGitSync skips the test if the git binary is not available on PATH.
@@ -594,6 +597,78 @@ func writeMinimalState(t *testing.T, baseDir, id, systemPath, relPath, recordedH
 // jsonMarshalIndent marshals v to indented JSON.
 func jsonMarshalIndent(v interface{}) ([]byte, error) {
 	return json.MarshalIndent(v, "", "  ")
+}
+
+// TestSync_RemoteGroupNeverWalksLocal verifies that a remote-tracked directory
+// group is never walked on the local filesystem during sync auto-discovery.
+//
+// Before the fix, any rec.Group was added to groupDirsSet regardless of
+// rec.Remote, causing sync to walk the local machine's filesystem and
+// potentially auto-track local files into a repo that was meant to hold
+// remote configs.
+func TestSync_RemoteGroupNeverWalksLocal(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	// Create a local directory that mimics the remote group path.
+	// If sync walks it, it would find these files and try to auto-track them.
+	localMirror := t.TempDir()
+	sensitiveFile := filepath.Join(localMirror, "should-not-be-tracked.conf")
+	require.NoError(t, os.WriteFile(sensitiveFile, []byte("secret\n"), 0o600))
+
+	// Write a state.json that has one remote-tracked file in a group.
+	// The group path points to our localMirror — if the bug is present,
+	// sync will walk localMirror and auto-track sensitiveFile.
+	const (
+		host    = "user@remotehost"
+		logPath = "/etc/app/app.conf"
+	)
+	id := core.DeriveID(host + ":" + logPath)
+
+	s := &types.State{
+		Version: 1,
+		Files: map[string]*types.FileRecord{
+			id: {
+				ID:          id,
+				SystemPath:  logPath,
+				RepoPath:    "remotehost/etc/app/app.conf",
+				Branch:      "remote/remotehost/etc/app/app.conf",
+				CurrentHash: "deadbeef",
+				Status:      types.StatusTracked,
+				Remote:      host,
+				Group:       localMirror, // ← remote group pointing to local dir
+			},
+		},
+		Backups: map[string][]types.BackupRecord{},
+	}
+	data, err := json.MarshalIndent(s, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "state.json"), data, 0o600))
+
+	// Commit the remote file's current content to its branch so sync doesn't
+	// error on "branch not found".
+	if err := core.SyncStageBlob(repoDir, "remotehost/etc/app/app.conf", []byte("app config\n")); err != nil {
+		t.Fatalf("stage blob: %v", err)
+	}
+
+	// Run sync. The remote fetch will fail (no real SSH) — that's fine, we
+	// only care that sensitiveFile is never auto-tracked.
+	_, _ = core.Sync(core.SyncOptions{
+		BaseDir: baseDir,
+		Message: "test sync",
+	})
+
+	// Reload state and assert sensitiveFile was NOT added.
+	sm := state.NewManager(filepath.Join(baseDir, "state.json"))
+	final, err := sm.Load()
+	require.NoError(t, err)
+
+	for _, rec := range final.Files {
+		if rec.SystemPath == sensitiveFile {
+			t.Errorf("sync auto-tracked local file from remote group dir: %s", sensitiveFile)
+		}
+	}
 }
 
 // TestSync_FileIDsFilter verifies that when FileIDs is set, only matching

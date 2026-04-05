@@ -154,6 +154,11 @@ func autoTrackNewInTarget(baseDir, target string) {
 		if rec.Group == "" {
 			continue
 		}
+		// Remote group dirs must never be walked locally — their files live on
+		// a remote host and are re-fetched via SSH during sync.
+		if rec.Remote != "" {
+			continue
+		}
 		// Only scan group dirs under the target.
 		if !strings.HasPrefix(rec.Group, absTarget) && rec.Group != absTarget {
 			continue
