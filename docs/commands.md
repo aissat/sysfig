@@ -574,37 +574,34 @@ sysfig status [options]
 
 Compares every tracked file against the repo using BLAKE3 content hashes. Also checks recorded `uid`/`gid`/`mode` against the current system state and reports drift inline.
 
-**Default output is grouped by directory.** Directories where every file is SYNCED are collapsed to a single summary line. Directories with any dirty or pending files expand to show each affected file — with its tracking ID — aligned under the same `HASH` column as parent rows. If only one file is tracked in a directory, its full path is shown rather than a folder line.
+**Default output is grouped by directory.** Healthy groups are collapsed to a single summary row. Groups with any file needing attention expand to show the changed members underneath. Remote-tracked files are shown as `user@host:/path`, and when `SYSFIG_HOST` is set the output is scoped to that host unless you pass `--all`.
 
 ```
-PATH                                      HASH        STATUS
-────────────────────────────────────────────────────────────────────────────
-/home/you/                                018e4a02    1 synced  ·  1 dirty
-  └ .zshrc                               7734be1e    DIRTY
-/etc/pacman.d/                            63d01e28    10 synced
-/etc/nginx/
-  └ nginx.conf                           a3f2b1c0    DIRTY
-  └ nginx-new.conf                                   NEW  → sysfig track /etc/nginx
-/home/you/.bashrc                         ef891234    SYNCED
-────────────────────────────────────────────────────────────────────────────
-  5 files  ·  3 synced  ·  2 dirty  ·  1 new
+PATH              HASH        STATE      TRACK    TAGS               DETAILS
+──────────────────────────────────────────────────────────────────────────────
+/home/you/        018e4a02    HEALTHY    file     linux,arch         4 synced
+/etc/pacman.d/    63d01e28    DEGRADED   group    linux,arch         1 dirty, 10 synced
+  changed:
+    mirrorlist    8e261a3c
+admin@web1:/etc/  2824684d    HEALTHY    remote   linux,arch,+1      2 stale
+──────────────────────────────────────────────────────────────────────────────
+  17 files  ·  14 synced  ·  1 dirty  ·  2 stale
 ```
 
-The tracking ID shown in the `HASH` column of expanded rows (e.g. `7734be1e`) can be used directly in `sysfig sync`, `sysfig undo`, and other commands — no need to run `--files` first.
-
-Use `--files` (or `-f`) to bypass grouping and see every tracked file individually on its own line.
+Use `--files` (or `-f`) to bypass grouping and show every tracked file individually. In flat view, the `HASH` column contains the tracking ID you can pass directly to `sysfig sync`, `sysfig undo`, and other commands.
 
 **Status labels:**
 
-| Label           | Meaning                                                             | Action                       |
-| --------------- | ------------------------------------------------------------------- | ---------------------------- |
-| `SYNCED`        | System file matches repo                                            | Nothing to do                |
-| `DIRTY`         | System file has been modified since last sync                       | Run `sysfig sync`            |
-| `PENDING/APPLY` | Repo has a newer version than the system file                       | Run `sysfig apply`           |
-| `MISSING`       | File is tracked but does not exist on the system                    | Run `sysfig apply`           |
-| `ENCRYPTED`     | Encrypted file — content comparison skipped (no master key present) | Copy key, then re-check      |
-| `SOURCE`        | Source-managed file; on-disk content matches committed render       | Nothing to do                |
-| `NEW`           | File exists on disk inside a tracked group dir but is not yet tracked | Run `sysfig sync` to auto-track, or `sysfig untrack <path>` to exclude |
+| Label       | Meaning                                                              | Action                                                |
+| ----------- | -------------------------------------------------------------------- | ----------------------------------------------------- |
+| `SYNCED`    | System file matches the committed repo version                       | Nothing to do                                         |
+| `DIRTY`     | System file has changed since last sync                              | Run `sysfig sync`                                     |
+| `PENDING`   | Repo has a newer version than the system file                        | Run `sysfig apply`                                    |
+| `MISSING`   | File is tracked but does not exist on the system                     | Run `sysfig apply`                                    |
+| `ENCRYPTED` | Encrypted file — content comparison skipped                          | Unlock or apply before comparing                      |
+| `SOURCE`    | Source-managed file; on-disk content matches the committed render    | Nothing to do                                         |
+| `NEW`       | File exists inside a tracked group dir but is not yet tracked        | Run `sysfig sync` to auto-track, or `sysfig untrack`  |
+| `STALE`     | Remote-tracked file has not been re-fetched live in this status run  | Run `sysfig status --fetch`                           |
 
 **Exit codes:** `0` = all SYNCED, `1` = any DIRTY/PENDING/MISSING, `2` = error.
 
@@ -615,6 +612,8 @@ Use `--files` (or `-f`) to bypass grouping and see every tracked file individual
 | `--id`       | —     | all         | Check only this ID (repeatable)                                |
 | `--tag`      | —     | all         | Show only files carrying this tag (repeatable)                 |
 | `--files`    | `-f`  | `false`     | Flat list — show every tracked file individually (no grouping) |
+| `--fetch`    | —     | `false`     | Re-fetch remote-tracked files live via SSH                     |
+| `--all`      | `-a`  | `false`     | Show all files regardless of `SYSFIG_HOST`                     |
 | `--watch`    | `-w`  | `false`     | Continuously refresh status (Ctrl-C to stop)                   |
 | `--interval` | —     | `3s`        | Refresh interval when `--watch` is set                         |
 | `--base-dir` | —     | `~/.sysfig` | Directory where sysfig stores data                             |
@@ -626,6 +625,9 @@ Use `--files` (or `-f`) to bypass grouping and see every tracked file individual
 if ! sysfig status; then
   echo "Config drift detected on $(hostname)" | mail -s "sysfig alert" ops@example.com
 fi
+
+# Remote scope with explicit live check
+SYSFIG_HOST=admin@web1 sysfig status --fetch
 ```
 
 **Live monitoring:**
@@ -638,7 +640,7 @@ sysfig status --watch
 sysfig status -w --interval 1s
 ```
 
-The watch mode clears the screen on the first frame, then redraws in-place to avoid flickering. Any transition to `DIRTY/MODIFIED` is immediately visible.
+The watch mode clears the screen on the first frame, then redraws in-place to avoid flickering. Any transition to a degraded state is immediately visible.
 
 ---
 
@@ -650,25 +652,28 @@ Show changes between system files and repo versions.
 sysfig diff [options]
 ```
 
-Colorized output with word-level inline highlighting — changed tokens are shown with dark red/green background so you can see exactly what changed within a line.
+Colorized output with word-level inline highlighting. For remote-tracked files, `diff` always fetches live remote content before comparing, so it can show both `DIRTY` drift and `PENDING` repo-ahead changes accurately.
 
 **Exit codes:** `0` = no differences, `1` = differences found, `2` = error.
 
 **Options:**
 
-| Flag              | Default    | Description                                        |
-| ----------------- | ---------- | -------------------------------------------------- |
-| `--id`            | all        | Diff only this ID (repeatable)                     |
-| `--side-by-side`/`-y` | false  | Side-by-side view (default: unified)               |
-| `--color`         | auto (TTY) | Force or disable colorized output                  |
-| `--base-dir`      | `~/.sysfig`| Directory where sysfig stores data                 |
+| Flag                  | Default     | Description                                        |
+| --------------------- | ----------- | -------------------------------------------------- |
+| `--id`                | all         | Diff only this ID (repeatable)                     |
+| `--side-by-side`/`-y` | `false`     | Side-by-side view (default: unified)               |
+| `--color`             | auto (TTY)  | Force or disable colorized output                  |
+| `--all`/`-a`          | `false`     | Show all files regardless of `SYSFIG_HOST`         |
+| `--base-dir`          | `~/.sysfig` | Directory where sysfig stores data                 |
 
 **Examples:**
 
 ```bash
-sysfig diff                           # unified diff, all dirty files
+sysfig diff                           # unified diff, all changed files in scope
 sysfig diff -y                        # side-by-side view
 sysfig diff --id nginx_main           # diff one file
+SYSFIG_HOST=admin@web1 sysfig diff    # only that host's remote files
+sysfig diff --all                     # bypass SYSFIG_HOST filtering
 sysfig diff --no-color | grep "^[+-]" # scriptable
 
 # In a script: exit 1 if anything differs
@@ -836,6 +841,8 @@ Starts a foreground process that monitors every tracked config file using OS-lev
 
 **Editor compatibility:** sysfig watches both the file inode and its parent directory. This means atomic saves from `sed -i`, vim, nano, and any editor that writes via a temp file + rename are caught correctly — the new inode is re-registered automatically.
 
+**Process attribution:** when available, watch prints the process, PID, and user that triggered the change. On Linux, fanotify provides exact attribution when the binary has the needed capability; otherwise sysfig falls back to a best-effort `/proc` scan. Other platforms still watch correctly but omit actor details.
+
 **Flags:**
 
 | Flag         | Default     | Description                                         |
@@ -860,14 +867,24 @@ Watching tracked files for changes  (Ctrl-C to stop)
   debounce: 2s
 ────────────────────────────────────────────────────────────────────────────
   10:42:15  changed  /etc/nginx/nginx.conf
+            actor  vim · pid 1234 · user you · exact
             committed etc/nginx/nginx.conf
             sysfig: update etc/nginx/nginx.conf
 ```
 
 Each event line shows:
 - `changed` — the file on disk that triggered the sync
+- `actor` — optional process attribution (`exact` via fanotify, `best-effort` via `/proc`)
 - `committed` — each repo path actually committed (one per file; grouped for dir-tracked files)
 - The commit message (`sysfig: update <path>`)
+
+**Linux capability tip:** for exact attribution without running the watcher as root, grant the binary fanotify access:
+
+```bash
+sudo setcap cap_sys_admin+ep "$(command -v sysfig)"
+```
+
+If you prefer `sudo sysfig watch`, sysfig preserves ownership of `state.json` and its lock file so your normal user can keep using the same base dir afterwards.
 
 #### Service mode (systemd)
 

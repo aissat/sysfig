@@ -155,7 +155,7 @@ Track `/etc/sudoers` with `--hash-only` — hash recorded locally, nothing pushe
                                   backups/     (auto-backups before apply)
 ```
 
-Each tracked file gets its own git branch (`track/<path>`). No full-tree noise, clean per-file history.
+Each tracked file gets its own git branch. Normal files live on `track/<path>`, local-only files on `local/<path>`, and remote-tracked files on `remote/<path>`. No full-tree noise, clean per-file history.
 
 ---
 
@@ -228,6 +228,7 @@ sysfig deploy    bundle+ssh://backup@server/srv/conf.bundle
 | `sysfig status --fetch` | Re-fetch remote files live — shows DIRTY / SYNCED / PENDING |
 | `sysfig status --all` | Show all files regardless of `$SYSFIG_HOST` |
 | `sysfig diff` | Show what changed (fetches remote files live) |
+| `sysfig diff --all` | Show all diffs regardless of `$SYSFIG_HOST` |
 | `sysfig sync` | Commit all changes locally |
 | `sysfig sync --push` | Commit and push to remote |
 | `sysfig apply` | Write tracked configs to disk |

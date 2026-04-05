@@ -102,7 +102,7 @@ PATH                        HASH        STATUS
   4 files  ·  3 synced  ·  1 dirty
 ```
 
-Status labels: `SYNCED` — in sync with repo. `DIRTY` — modified since last sync (run `sysfig sync`). `PENDING` — tracked but never synced yet. `MISSING` — file deleted from disk.
+Status labels: `SYNCED` — matches the repo. `DIRTY` — modified since last sync (run `sysfig sync`). `PENDING` — the repo is ahead of disk (run `sysfig apply`). `STALE` — remote-tracked file not checked live yet (run `sysfig status --fetch`). `MISSING` — file deleted from disk.
 
 ### 5. Commit changes
 
@@ -183,6 +183,16 @@ sysfig watch --debounce 5s
 # Preview changes without committing
 sysfig watch --dry-run
 ```
+
+When available, watch also shows who triggered the change:
+
+```text
+15:04:05  changed  /etc/nginx/nginx.conf
+          actor    vim · pid 1234 · user you · exact
+          committed etc/nginx/nginx.conf
+```
+
+On Linux, process attribution is best with `setcap cap_sys_admin+ep $(command -v sysfig)` so `sysfig watch` keeps running as your user while fanotify remains available. Without that capability, sysfig falls back to best-effort process detection. Other platforms still work, but without actor attribution.
 
 Install as a systemd user service so it runs on every login:
 
