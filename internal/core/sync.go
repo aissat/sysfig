@@ -109,6 +109,9 @@ func syncStagePlain(repoDir, relPath string) error {
 //
 // syncHashBlob stores data as a git blob object and returns its 40-char SHA.
 // The blob is written to the object store but NOT added to any index.
+// SyncHashBlob is the exported wrapper for syncHashBlob, used in tests.
+func SyncHashBlob(repoDir string, data []byte) (string, error) { return syncHashBlob(repoDir, data) }
+
 func syncHashBlob(repoDir string, data []byte) (string, error) {
 	tmp, err := os.CreateTemp(sysfigfs.SecureTempDir(), "sysfig-sync-blob-*")
 	if err != nil {
@@ -134,6 +137,11 @@ func syncHashBlob(repoDir string, data []byte) (string, error) {
 		return "", fmt.Errorf("core: sync: hash blob: hash-object returned empty hash")
 	}
 	return blobHash, nil
+}
+
+// SyncStageBlob is the exported wrapper for syncStageBlob, used in tests.
+func SyncStageBlob(repoDir, relPath string, data []byte) error {
+	return syncStageBlob(repoDir, relPath, data)
 }
 
 func syncStageBlob(repoDir, relPath string, data []byte) error {
@@ -206,6 +214,9 @@ type SyncResult struct {
 //	"sysfig: update home/aye7/.zshrc"
 //	"sysfig: update etc/pacman.d, home/aye7"
 //	"sysfig: sync 3 directories"  (when more than 2)
+// BuildSyncMessage is the exported wrapper for buildSyncMessage, used in tests.
+func BuildSyncMessage(repoDir string) string { return buildSyncMessage(repoDir) }
+
 func buildSyncMessage(repoDir string) string {
 	cmd := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
 		"diff", "--cached", "--name-only")

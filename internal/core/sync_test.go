@@ -673,3 +673,149 @@ func TestSync_FileIDsFilter(t *testing.T) {
 		t.Error("b.conf must not be committed when filtered out")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// syncHashBlob / syncStageBlob
+// ---------------------------------------------------------------------------
+
+// TestSyncHashBlob verifies that syncHashBlob writes a git blob object to the
+// bare repo and returns the expected 40-char SHA-1.
+func TestSyncHashBlob(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	data := []byte("hello sysfig blob\n")
+	blobHash, err := core.SyncHashBlob(repoDir, data)
+	if err != nil {
+		t.Fatalf("syncHashBlob: %v", err)
+	}
+	if len(blobHash) != 40 {
+		t.Fatalf("expected 40-char SHA, got %q (len=%d)", blobHash, len(blobHash))
+	}
+
+	// Verify the object actually exists in the repo.
+	cmd := exec.Command("git", "--git-dir="+repoDir, "cat-file", "-t", blobHash)
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cat-file -t %s: %v\n%s", blobHash, err, out)
+	}
+	if strings.TrimSpace(string(out)) != "blob" {
+		t.Errorf("expected object type 'blob', got %q", strings.TrimSpace(string(out)))
+	}
+}
+
+// TestSyncHashBlob_SameContentSameHash verifies that hashing the same content
+// twice returns the same blob hash (git content-addressing property).
+func TestSyncHashBlob_SameContentSameHash(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	data := []byte("deterministic content\n")
+	h1, err := core.SyncHashBlob(repoDir, data)
+	if err != nil {
+		t.Fatalf("first hash: %v", err)
+	}
+	h2, err := core.SyncHashBlob(repoDir, data)
+	if err != nil {
+		t.Fatalf("second hash: %v", err)
+	}
+	if h1 != h2 {
+		t.Errorf("same content produced different hashes: %q vs %q", h1, h2)
+	}
+}
+
+// TestSyncStageBlob verifies that syncStageBlob writes a blob and stages it
+// in the index under the given relative path, so a subsequent git commit
+// captures the content.
+func TestSyncStageBlob(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	data := []byte("staged blob content\n")
+	relPath := "etc/app.conf"
+
+	if err := core.SyncStageBlob(repoDir, relPath, data); err != nil {
+		t.Fatalf("syncStageBlob: %v", err)
+	}
+
+	// Verify the file appears in the index.
+	cmd := exec.Command("git", "--git-dir="+repoDir, "ls-files", "--cached", relPath)
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ls-files: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), relPath) {
+		t.Errorf("expected %q in index, got: %q", relPath, string(out))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildSyncMessage
+// ---------------------------------------------------------------------------
+
+// TestBuildSyncMessage_SingleFile verifies that when a single file is staged,
+// the message identifies that file's top-level directory.
+func TestBuildSyncMessage_SingleFile(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	// Stage a blob directly.
+	if err := core.SyncStageBlob(repoDir, "etc/nginx/nginx.conf", []byte("nginx\n")); err != nil {
+		t.Fatalf("stage blob: %v", err)
+	}
+
+	msg := core.BuildSyncMessage(repoDir)
+	if !strings.Contains(msg, "etc") {
+		t.Errorf("expected message to mention 'etc', got: %q", msg)
+	}
+	if !strings.HasPrefix(msg, "sysfig:") {
+		t.Errorf("expected message to start with 'sysfig:', got: %q", msg)
+	}
+}
+
+// TestBuildSyncMessage_MultipleFiles verifies that when files from multiple
+// top-level directories are staged, the message summarises them.
+func TestBuildSyncMessage_MultipleFiles(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	files := map[string][]byte{
+		"etc/nginx/nginx.conf": []byte("nginx\n"),
+		"home/aye7/.zshrc":     []byte("zsh\n"),
+		"home/aye7/.vimrc":     []byte("vim\n"),
+	}
+	for path, data := range files {
+		if err := core.SyncStageBlob(repoDir, path, data); err != nil {
+			t.Fatalf("stage %s: %v", path, err)
+		}
+	}
+
+	msg := core.BuildSyncMessage(repoDir)
+	if !strings.HasPrefix(msg, "sysfig:") {
+		t.Errorf("expected message to start with 'sysfig:', got: %q", msg)
+	}
+	// With 2 distinct top-level dirs (etc, home) message should mention both or summarise.
+	if !strings.Contains(msg, "etc") && !strings.Contains(msg, "home") && !strings.Contains(msg, "director") {
+		t.Errorf("expected message to mention dirs or 'directories', got: %q", msg)
+	}
+}
+
+// TestBuildSyncMessage_EmptyIndex verifies that an empty index produces a
+// fallback message rather than panicking or returning empty string.
+func TestBuildSyncMessage_EmptyIndex(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	msg := core.BuildSyncMessage(repoDir)
+	if msg == "" {
+		t.Error("expected non-empty fallback message for empty index")
+	}
+}

@@ -63,7 +63,9 @@ sysfig doctor   # verify install
 ```bash
 # 1. Track a file
 sysfig track ~/.zshrc
-sysfig track /etc/nginx/nginx.conf   # needs sudo for /etc
+sysfig track /etc/nginx/nginx.conf      # needs sudo for /etc
+sysfig track admin@web1:/etc/nginx/nginx.conf        # remote server
+sysfig track admin@web1:2222:/etc/nginx/nginx.conf   # with port
 
 # 2. Commit changes
 sysfig sync
@@ -108,6 +110,11 @@ Remote files are committed locally on a `remote/` branch — **never pushed** to
 Track the same path from multiple servers — each gets its own ID and repo namespace:
 
 ```bash
+# Inline syntax — user@host:/path or user@host:port:/path
+sysfig track admin@web1:/etc/nginx/nginx.conf
+sysfig track admin@web1:2222:/etc/nginx/nginx.conf
+
+# Or with explicit flag
 sysfig track --remote admin@web1 /etc/nginx/nginx.conf
 sysfig track --remote admin@web2 /etc/nginx/nginx.conf
 
@@ -214,7 +221,9 @@ sysfig deploy    bundle+ssh://backup@server/srv/conf.bundle
 | `sysfig track --encrypt <path>` | Track and encrypt (age) |
 | `sysfig track --hash-only <path>` | Record hash only — never pushed |
 | `sysfig track --local <path>` | Track locally — never pushed |
-| `sysfig track --remote user@host <path>` | Fetch and track a file from a remote server via SSH |
+| `sysfig track user@host:/path` | Fetch and track a remote file (inline syntax) |
+| `sysfig track user@host:port:/path` | Same, with non-standard SSH port |
+| `sysfig track --remote user@host <path>` | Same via explicit flag |
 | `sysfig status` | Show sync state of all tracked files |
 | `sysfig status --fetch` | Re-fetch remote files live — shows DIRTY / SYNCED / PENDING |
 | `sysfig status --all` | Show all files regardless of `$SYSFIG_HOST` |

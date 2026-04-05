@@ -45,6 +45,17 @@ func newTrackCmd() *cobra.Command {
 				fixSudoOwnership(baseDir)
 			}
 
+			// Parse inline remote syntax from the positional argument:
+			//   user@host:/path           → remote=user@host, path=/path
+			//   user@host:2222:/path      → remote=user@host:2222, path=/path
+			// The --remote flag takes priority over inline syntax.
+			if remoteHost == "" {
+				if h, p, ok := parseRemotePath(targetPath); ok {
+					remoteHost = h
+					targetPath = p
+				}
+			}
+
 			// Resolve remote host: explicit flag takes priority, then SYSFIG_HOST env var.
 			// Must happen before auto-detect so the env-var path is also covered.
 			if remoteHost == "" {
