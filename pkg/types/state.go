@@ -73,6 +73,15 @@ type FileRecord struct {
 	// is stored in the repo. Useful for integrity monitoring without storing
 	// sensitive content. Status reports TAMPERED when the hash drifts.
 	HashOnly bool `json:"hash_only,omitempty"`
+	// Remote is the SSH target used to fetch this file ("user@hostname",
+	// "user@host:port", or "hostname"). Empty for locally-tracked files.
+	// When non-empty, sync re-fetches the file content from the remote host
+	// via SSH before staging.
+	Remote string `json:"remote,omitempty"`
+	// RemoteSSHKey is the path to the SSH identity file recorded at track time.
+	// Empty means rely on SSH_AUTH_SOCK agent. Stored so that sync can
+	// authenticate to the remote without requiring the flag again.
+	RemoteSSHKey string `json:"remote_ssh_key,omitempty"`
 }
 
 // BackupRecord represents a single backup entry in state.json.

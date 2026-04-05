@@ -21,6 +21,7 @@ func newDiffCmd() *cobra.Command {
 		colorSet   bool
 		ids        []string
 		sideBySide bool
+		showAll    bool
 	)
 
 	cmd := &cobra.Command{
@@ -45,6 +46,10 @@ func newDiffCmd() *cobra.Command {
 			})
 			if err != nil {
 				os.Exit(2)
+			}
+
+			if !showAll {
+				results = filterDiffBySysfigHost(results)
 			}
 
 			if len(results) == 0 {
@@ -84,9 +89,13 @@ func newDiffCmd() *cobra.Command {
 				default:
 					statusTag = clrDim.Sprint(string(r.Status))
 				}
+				displayPath := r.SystemPath
+				if r.Remote != "" {
+					displayPath = r.Remote + ":" + r.SystemPath
+				}
 				fmt.Printf("%s %s  %s\n",
 					clrBold.Sprint("──"),
-					clrBold.Sprint(r.SystemPath),
+					clrBold.Sprint(displayPath),
 					statusTag)
 				if sideBySide {
 					fmt.Print(renderSideBySide(r.Diff, termW))
@@ -118,7 +127,23 @@ func newDiffCmd() *cobra.Command {
 	f.BoolVar(&colorFlag, "color", true, "colorize diff output (default: true when stdout is a TTY)")
 	f.BoolVarP(&sideBySide, "side-by-side", "y", false, "show diff in side-by-side view")
 	f.StringArrayVar(&ids, "id", nil, "diff only this ID (repeatable)")
+	f.BoolVarP(&showAll, "all", "a", false, "show all files regardless of $SYSFIG_HOST")
 	return cmd
+}
+
+// filterDiffBySysfigHost mirrors filterBySysfigHost for DiffResult slices.
+func filterDiffBySysfigHost(results []core.DiffResult) []core.DiffResult {
+	host := os.Getenv("SYSFIG_HOST")
+	if host == "" {
+		return results
+	}
+	filtered := results[:0]
+	for _, r := range results {
+		if r.Remote == host {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }
 
 // termWidth returns the current terminal column width, defaulting to 160.

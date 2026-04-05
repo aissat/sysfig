@@ -60,16 +60,33 @@ func formatMetaDrift(r *core.FileStatusResult, indent string) {
 // preserving first-seen order.  Files tracked via a group directory
 // (Group != "") are folded under that group root; individually-tracked
 // files use filepath.Dir(SystemPath) as the key.
+// remoteDisplayPath returns "remote-spec:/path" for remote files, plain path for local.
+func remoteDisplayPath(r core.FileStatusResult) string {
+	if r.Remote == "" {
+		return r.SystemPath
+	}
+	return r.Remote + ":" + r.SystemPath
+}
+
 func groupResultsByDir(results []core.FileStatusResult) (order []string, groups map[string][]core.FileStatusResult) {
 	groups = map[string][]core.FileStatusResult{}
 	for _, r := range results {
-		dir := filepath.Dir(r.SystemPath)
-		// Files tracked via `sysfig track /dir/` carry rec.Group (the root
-		// tracked directory).  Use that as the grouping key so sub-directory
-		// files (e.g. /etc/pacman.d/hooks/foo) fold under the group row
-		// (e.g. /etc/pacman.d/) instead of appearing in their own row.
+		var dir string
 		if r.Group != "" {
-			dir = r.Group
+			// Files tracked via `sysfig track /dir/` fold under the group root.
+			// Remote groups are namespaced by host so two hosts tracking the same
+			// directory path never collapse into the same table row.
+			if r.Remote != "" {
+				dir = r.Remote + ":" + r.Group
+			} else {
+				dir = r.Group
+			}
+		} else if r.Remote != "" {
+			// Remote files group by "remote-spec:/dir" so files from different
+			// users or hosts never merge into the same table row.
+			dir = r.Remote + ":" + filepath.Dir(r.SystemPath)
+		} else {
+			dir = filepath.Dir(r.SystemPath)
 		}
 		if _, seen := groups[dir]; !seen {
 			order = append(order, dir)
@@ -105,7 +122,7 @@ func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
 		files := groups[d]
 		var label string
 		if len(files) == 1 {
-			label = files[0].SystemPath
+			label = remoteDisplayPath(files[0])
 		} else {
 			label = d + "/"
 		}
@@ -148,7 +165,7 @@ func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
 
 		rowLabel := dir + "/"
 		if len(files) == 1 {
-			rowLabel = files[0].SystemPath
+			rowLabel = remoteDisplayPath(files[0])
 		}
 
 		// Hash: file ID for single-file rows, dir-derived ID for groups.
@@ -215,6 +232,8 @@ func isDegraded(s core.FileStatusLabel) bool {
 // fileTypeStr returns the TYPE label for a file result.
 func fileTypeStr(r core.FileStatusResult) string {
 	switch {
+	case r.Remote != "":
+		return "remote"
 	case r.HashOnly:
 		return "hash"
 	case r.LocalOnly:
@@ -299,6 +318,9 @@ func printSummaryFooter(totals map[string]int, total int) {
 	if n := totals[string(core.StatusNew)]; n > 0 {
 		parts = append(parts, clrNew.Sprintf("%d new", n))
 	}
+	if n := totals[string(core.StatusStale)]; n > 0 {
+		parts = append(parts, clrDim.Sprintf("%d stale", n))
+	}
 	fmt.Printf("  %s\n", strings.Join(parts, clrDim.Sprint("  ·  ")))
 }
 
@@ -320,7 +342,7 @@ func printStatusFlat(results []core.FileStatusResult) (hasDiff bool) {
 	tagsW := len("TAGS") + 2
 	implicitTags := core.DetectPlatformTags()
 	for _, r := range results {
-		if l := len(shortenHomePath(r.SystemPath)) + 2; l > pathW {
+		if l := len(shortenHomePath(remoteDisplayPath(r))) + 2; l > pathW {
 			pathW = l
 		}
 		if l := len(statusLabel(r.Status)) + 2; l > statusW {
@@ -353,12 +375,17 @@ func printStatusFlat(results []core.FileStatusResult) (hasDiff bool) {
 
 		typeCol := clrDim.Sprint(pad(fileTypeStr(r), typeW))
 		tagsCol := clrInfo.Sprint(pad(displayTags(compactTags(r.Tags, 3), implicitTags), tagsW))
-		fmt.Printf("%s  %s  %s  %s  %s\n",
-			pad(shortenHomePath(r.SystemPath), pathW),
+		var sourceCol string
+		if r.Remote != "" {
+			sourceCol = "  " + clrDim.Sprint("→ "+r.Remote)
+		}
+		fmt.Printf("%s  %s  %s  %s  %s%s\n",
+			pad(shortenHomePath(remoteDisplayPath(r)), pathW),
 			clrDim.Sprint(pad(r.ID, hashW)),
 			statusColored(r.Status, pad(label, statusW)),
 			typeCol,
-			tagsCol)
+			tagsCol,
+			sourceCol)
 
 		formatMetaDrift(&r, "   ")
 	}
@@ -442,12 +469,18 @@ func groupDetails(files []core.FileStatusResult) string {
 		{core.StatusNew, "new"},
 		{core.StatusSynced, "synced"},
 		{core.StatusEncrypted, "encrypted"},
+		{core.StatusStale, "stale"},
 	} {
 		if n := counts[item.status]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, item.label))
 		}
 	}
-	return strings.Join(parts, ", ")
+	detail := strings.Join(parts, ", ")
+	// Append remote source for single-file remote rows.
+	if len(files) == 1 && files[0].Remote != "" {
+		detail += "  → " + files[0].Remote
+	}
+	return detail
 }
 
 func shortenHomePath(path string) string {
@@ -466,13 +499,15 @@ func shortenHomePath(path string) string {
 
 func newStatusCmd() *cobra.Command {
 	var (
-		baseDir   string
-		sysRoot   string
-		ids       []string
-		tags      []string
-		watchMode bool
-		interval  time.Duration
-		flatFiles bool
+		baseDir     string
+		sysRoot     string
+		ids         []string
+		tags        []string
+		watchMode   bool
+		interval    time.Duration
+		flatFiles   bool
+		fetchRemote bool
+		showAll     bool
 	)
 
 	cmd := &cobra.Command{
@@ -485,13 +520,21 @@ func newStatusCmd() *cobra.Command {
 				return runStatusWatch(baseDir, sysRoot, ids, interval)
 			}
 
-			results, err := core.Status(baseDir, ids, sysRoot)
+			results, err := core.StatusWithOptions(core.StatusOptions{
+				BaseDir:     baseDir,
+				IDs:         ids,
+				SysRoot:     sysRoot,
+				FetchRemote: fetchRemote,
+			})
 			if err != nil {
 				return err
 			}
 			results = filterByTags(results, tags)
 			if len(args) == 1 {
 				results = filterByArg(results, args[0])
+			}
+			if !showAll {
+				results = filterBySysfigHost(results)
 			}
 			if len(results) == 0 {
 				info("No tracked files.")
@@ -500,7 +543,7 @@ func newStatusCmd() *cobra.Command {
 			var dirty bool
 			if flatFiles {
 				dirty = printStatusFlat(results)
-} else {
+			} else {
 				dirty = printStatusTable(results)
 			}
 			if dirty {
@@ -518,7 +561,27 @@ func newStatusCmd() *cobra.Command {
 	f.BoolVarP(&watchMode, "watch", "w", false, "continuously refresh status (Ctrl-C to stop)")
 	f.BoolVarP(&flatFiles, "files", "f", false, "show every tracked file individually instead of grouping by directory")
 	f.DurationVar(&interval, "interval", 3*time.Second, "refresh interval when --watch is set")
+	f.BoolVar(&fetchRemote, "fetch", false, "re-fetch remote-tracked files via SSH to show live DIRTY/SYNCED status")
+	f.BoolVarP(&showAll, "all", "a", false, "show all files regardless of $SYSFIG_HOST")
 	return cmd
+}
+
+// filterBySysfigHost filters results based on SYSFIG_HOST:
+//   - SYSFIG_HOST set → show only files tracked from that host
+//   - SYSFIG_HOST not set → show everything (local + all remotes)
+//   - --all / -a → bypass this filter entirely (same as no SYSFIG_HOST)
+func filterBySysfigHost(results []core.FileStatusResult) []core.FileStatusResult {
+	host := os.Getenv("SYSFIG_HOST")
+	if host == "" {
+		return results
+	}
+	filtered := results[:0]
+	for _, r := range results {
+		if r.Remote == host {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }
 
 // runStatusWatch clears the screen and re-renders the status table every

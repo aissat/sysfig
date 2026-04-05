@@ -250,3 +250,34 @@ func autoSyncTracked(baseDir string, ids []string) {
 		fmt.Printf("  %s auto-sync: %v\n", clrWarn.Sprint("warn:"), err)
 	}
 }
+
+// filterIDsByHost restricts a file ID list to records matching SYSFIG_HOST.
+// When SYSFIG_HOST is set: keep only IDs whose Remote matches that host.
+// When SYSFIG_HOST is not set: return ids unchanged.
+// When ids is nil (= all files): builds the filtered list from state.
+func filterIDsByHost(baseDir string, ids []string) []string {
+	host := os.Getenv("SYSFIG_HOST")
+	if host == "" {
+		return ids
+	}
+	sm := state.NewManager(filepath.Join(baseDir, "state.json"))
+	s, err := sm.Load()
+	if err != nil {
+		return ids
+	}
+	// Build set of candidate IDs.
+	candidates := ids
+	if candidates == nil {
+		for id := range s.Files {
+			candidates = append(candidates, id)
+		}
+	}
+	var filtered []string
+	for _, id := range candidates {
+		rec, ok := s.Files[id]
+		if ok && rec.Remote == host {
+			filtered = append(filtered, id)
+		}
+	}
+	return filtered
+}

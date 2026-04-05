@@ -14,16 +14,18 @@ import (
 
 func newTrackCmd() *cobra.Command {
 	var (
-		baseDir   string
-		id        string
-		encrypt   bool
-		template  bool
-		recursive bool
-		sysRoot   string
-		tags      []string
-		excludes  []string
-		localOnly bool
-		hashOnly  bool
+		baseDir    string
+		id         string
+		encrypt    bool
+		template   bool
+		recursive  bool
+		sysRoot    string
+		tags       []string
+		excludes   []string
+		localOnly  bool
+		hashOnly   bool
+		remoteHost string
+		sshKey     string
 	)
 
 	cmd := &cobra.Command{
@@ -43,8 +45,17 @@ func newTrackCmd() *cobra.Command {
 				fixSudoOwnership(baseDir)
 			}
 
+			// Resolve remote host: explicit flag takes priority, then SYSFIG_HOST env var.
+			// Must happen before auto-detect so the env-var path is also covered.
+			if remoteHost == "" {
+				remoteHost = os.Getenv("SYSFIG_HOST")
+			}
+
 			// Auto-detect directories so the user doesn't need --recursive.
-			if !recursive {
+			// Skip local stat when remoteHost is set: the path lives on the remote host,
+			// not the local filesystem, so a coincidental local directory of the same
+			// name must not silently trigger a local recursive walk.
+			if !recursive && remoteHost == "" {
 				if info, err := os.Stat(targetPath); err == nil && info.IsDir() {
 					recursive = true
 				}
@@ -61,16 +72,18 @@ func newTrackCmd() *cobra.Command {
 
 			if recursive {
 				summary, err := core.TrackDir(core.TrackDirOptions{
-					DirPath:   targetPath,
-					RepoDir:   repoDir,
-					StateDir:  baseDir,
-					Tags:      tags,
-					Encrypt:   encrypt,
-					Template:  template,
-					SysRoot:   resolveSysRoot(sysRoot),
-					Excludes:  excludes,
-					LocalOnly: localOnly,
-					HashOnly:  hashOnly,
+					DirPath:    targetPath,
+					RepoDir:    repoDir,
+					StateDir:   baseDir,
+					Tags:       tags,
+					Encrypt:    encrypt,
+					Template:   template,
+					SysRoot:    resolveSysRoot(sysRoot),
+					Excludes:   excludes,
+					LocalOnly:  localOnly,
+					HashOnly:   hashOnly,
+					RemoteHost: remoteHost,
+					SSHKey:     sshKey,
 				})
 				if err != nil {
 					return friendlyErr(err)
@@ -133,6 +146,8 @@ func newTrackCmd() *cobra.Command {
 				SysRoot:    resolveSysRoot(sysRoot),
 				LocalOnly:  localOnly,
 				HashOnly:   hashOnly,
+				RemoteHost: remoteHost,
+				SSHKey:     sshKey,
 			})
 			if err != nil {
 				return friendlyErr(err)
@@ -153,7 +168,9 @@ func newTrackCmd() *cobra.Command {
 			if hashOnly {
 				ok("%s", clrDim.Sprint("Mode:  hash-only (integrity monitoring, no content stored)"))
 			}
-
+			if remoteHost != "" {
+				ok("From:  %s", clrInfo.Sprint(remoteHost))
+			}
 			// Auto-sync only this newly tracked file.
 			// LocalOnly and HashOnly files have no repo content to sync.
 			if !localOnly && !hashOnly {
@@ -174,6 +191,8 @@ func newTrackCmd() *cobra.Command {
 	f.StringArrayVar(&excludes, "exclude", nil, "path or glob to skip during --recursive walk (repeatable)")
 	f.BoolVar(&localOnly, "local", false, "track locally only — never staged in git or pushed to remote")
 	f.BoolVar(&hashOnly, "hash-only", false, "record hash only for integrity monitoring — no content stored in repo")
+	f.StringVarP(&remoteHost, "remote", "r", "", "fetch file from remote host via SSH (user@host); falls back to $SYSFIG_HOST")
+	f.StringVar(&sshKey, "ssh-key", "", "SSH identity file for --remote (default: SSH_AUTH_SOCK agent)")
 	return cmd
 }
 
@@ -215,4 +234,3 @@ func newUntrackCmd() *cobra.Command {
 	cmd.Flags().StringVar(&baseDir, "base-dir", "", "override base dir")
 	return cmd
 }
-

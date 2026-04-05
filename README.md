@@ -86,7 +86,40 @@ Manage `/etc/nginx`, `/etc/ssh`, systemd units across VPS servers. Preserves own
 **3. Small team**
 Share encrypted secrets and deploy configs to remote servers via SSH. Tag files by OS/distro so each host only receives what it needs. Run `sysfig tag --auto` to label every tracked file with its OS + distro family, then `sysfig deploy --host user@vm --tag ubuntu --sudo` to push only the matching configs. No agents on remote machines — only a POSIX shell needed on the target.
 
-**4. Security-conscious admin**
+**4. Remote server monitoring**
+Track configs on servers you SSH into — no sysfig install needed on the remote. `sync` re-fetches them automatically. `status --fetch` shows live DIRTY/SYNCED/PENDING against the current remote state.
+
+```bash
+# Pin the server's host key once
+export SYSFIG_SSH_HOST_KEY=/etc/ssh/ssh_host_ed25519_key.pub
+# Set a default remote (like DOCKER_HOST) — scopes all commands to that host
+export SYSFIG_HOST=admin@prod-server
+
+sysfig track /etc/nginx/nginx.conf   # fetches from SYSFIG_HOST
+sysfig track /etc/ssh/sshd_config
+sysfig status                        # fast: shows STALE (last recorded hash)
+sysfig status --fetch                # live SSH check: DIRTY / SYNCED / PENDING
+sysfig diff                          # always fetches live — shows exact drift
+sysfig sync --auto                   # re-fetches + commits changed files
+```
+
+Remote files are committed locally on a `remote/` branch — **never pushed** to your git remote.
+
+Track the same path from multiple servers — each gets its own ID and repo namespace:
+
+```bash
+sysfig track --remote admin@web1 /etc/nginx/nginx.conf
+sysfig track --remote admin@web2 /etc/nginx/nginx.conf
+
+sysfig status --all                  # show all hosts
+# web1:/etc/nginx/nginx.conf   SYNCED   remote
+# web2:/etc/nginx/nginx.conf   DIRTY    remote   ← changed on web2
+
+SYSFIG_HOST=admin@web2 sysfig status # focus on one host only
+SYSFIG_HOST=admin@web2 sysfig sync --auto
+```
+
+**5. Security-conscious admin**
 Track `/etc/sudoers` with `--hash-only` — hash recorded locally, nothing pushed. `sysfig audit` exits 1 on drift, safe to wire into a systemd timer.
 
 ---
@@ -181,8 +214,11 @@ sysfig deploy    bundle+ssh://backup@server/srv/conf.bundle
 | `sysfig track --encrypt <path>` | Track and encrypt (age) |
 | `sysfig track --hash-only <path>` | Record hash only — never pushed |
 | `sysfig track --local <path>` | Track locally — never pushed |
+| `sysfig track --remote user@host <path>` | Fetch and track a file from a remote server via SSH |
 | `sysfig status` | Show sync state of all tracked files |
-| `sysfig diff` | Show what changed since last commit |
+| `sysfig status --fetch` | Re-fetch remote files live — shows DIRTY / SYNCED / PENDING |
+| `sysfig status --all` | Show all files regardless of `$SYSFIG_HOST` |
+| `sysfig diff` | Show what changed (fetches remote files live) |
 | `sysfig sync` | Commit all changes locally |
 | `sysfig sync --push` | Commit and push to remote |
 | `sysfig apply` | Write tracked configs to disk |
@@ -199,6 +235,13 @@ sysfig deploy    bundle+ssh://backup@server/srv/conf.bundle
 | `sysfig snap take` | Take a point-in-time snapshot |
 | `sysfig doctor` | Check environment health |
 | `sysfig log` | Show commit history |
+
+### Environment variables
+
+| Variable | What it does |
+|----------|-------------|
+| `SYSFIG_HOST` | Default remote for `track`, `status`, `diff`, `sync`, `log` — scopes commands to that host (like `DOCKER_HOST`) |
+| `SYSFIG_SSH_HOST_KEY` | Path to the remote server's public host key file — required for SSH host key verification |
 
 ---
 

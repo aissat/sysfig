@@ -11,12 +11,12 @@ import (
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
 var (
-	clrOK      = color.New(color.FgGreen, color.Bold)
-	clrWarn    = color.New(color.FgYellow, color.Bold)
-	clrErr     = color.New(color.FgRed, color.Bold)
-	clrInfo    = color.New(color.FgCyan)
-	clrDim     = color.New(color.Faint)
-	clrBold    = color.New(color.Bold)
+	clrOK   = color.New(color.FgGreen, color.Bold)
+	clrWarn = color.New(color.FgYellow, color.Bold)
+	clrErr  = color.New(color.FgRed, color.Bold)
+	clrInfo = color.New(color.FgCyan)
+	clrDim  = color.New(color.Faint)
+	clrBold = color.New(color.Bold)
 
 	clrSynced    = color.New(color.FgGreen)
 	clrDirty     = color.New(color.FgYellow)
@@ -26,10 +26,16 @@ var (
 	clrNew       = color.New(color.FgCyan)
 )
 
-func ok(format string, a ...interface{})   { fmt.Printf("  "+clrOK.Sprint("✓")+" "+format+"\n", a...) }
-func warn(format string, a ...interface{}) { fmt.Printf("  "+clrWarn.Sprint("⚠")+"  "+format+"\n", a...) }
-func info(format string, a ...interface{}) { fmt.Printf("  "+clrInfo.Sprint("ℹ")+" "+format+"\n", a...) }
-func fail(format string, a ...interface{}) { fmt.Printf("  "+clrErr.Sprint("✗")+" "+format+"\n", a...) }
+func ok(format string, a ...interface{}) { fmt.Printf("  "+clrOK.Sprint("✓")+" "+format+"\n", a...) }
+func warn(format string, a ...interface{}) {
+	fmt.Printf("  "+clrWarn.Sprint("⚠")+"  "+format+"\n", a...)
+}
+func info(format string, a ...interface{}) {
+	fmt.Printf("  "+clrInfo.Sprint("ℹ")+" "+format+"\n", a...)
+}
+func fail(format string, a ...interface{}) {
+	fmt.Printf("  "+clrErr.Sprint("✗")+" "+format+"\n", a...)
+}
 
 func statusColored(s core.FileStatusLabel, label string) string {
 	switch s {
@@ -47,6 +53,8 @@ func statusColored(s core.FileStatusLabel, label string) string {
 		return clrNew.Sprint(label)
 	case core.StatusTampered:
 		return clrErr.Sprint(label)
+	case core.StatusStale:
+		return clrDim.Sprint(label)
 	default:
 		return label
 	}

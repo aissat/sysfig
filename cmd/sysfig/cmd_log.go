@@ -100,8 +100,29 @@ Filter to a specific path or ID:
 				} else {
 					listArgs = append(listArgs, "--all", "--", filterPath)
 				}
+			} else if host := os.Getenv("SYSFIG_HOST"); host != "" {
+				// SYSFIG_HOST is set and no explicit filter: show only branches
+				// for files tracked from that host (remote/<hostname>/*).
+				hostname := core.RemoteHostname(host)
+				sm3 := state.NewManager(filepath.Join(baseDir, "state.json"))
+				var hostBranches []string
+				if s3, err3 := sm3.Load(); err3 == nil {
+					seen := map[string]bool{}
+					for _, rec := range s3.Files {
+						if rec.Remote == host && rec.Branch != "" && !seen[rec.Branch] {
+							hostBranches = append(hostBranches, rec.Branch)
+							seen[rec.Branch] = true
+						}
+					}
+				}
+				if len(hostBranches) > 0 {
+					listArgs = append(listArgs, hostBranches...)
+				} else {
+					// Fallback: ref prefix for the host.
+					listArgs = append(listArgs, "--branches=remote/"+hostname+"/*")
+				}
 			} else {
-				// Show all track/* branches merged into one timeline.
+				// Show all branches merged into one timeline.
 				listArgs = append(listArgs, "--all")
 			}
 			if n > 0 {

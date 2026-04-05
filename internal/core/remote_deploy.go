@@ -401,26 +401,38 @@ func sshExec(client *gossh.Client, cmd string) error {
 	return sshExecWithStdin(client, cmd, nil)
 }
 
-// loadHostKeyCallback loads an allow-listed SSH host public key and returns a HostKeyCallback
-// that verifies the server's host key against it. The host key file path is taken from the
-// SYSFIG_SSH_HOST_KEY environment variable and should point to a public key file (e.g. *.pub).
-func loadHostKeyCallback() (gossh.HostKeyCallback, error) {
+// loadHostKeyCallback loads an allow-listed SSH host public key and returns a
+// HostKeyCallback plus the key's algorithm string (e.g. "ssh-ed25519").
+//
+// The key algorithm must be set as HostKeyAlgorithms on the ClientConfig so
+// that the SSH handshake requests the same key type we pinned — otherwise the
+// server may offer a different algorithm and FixedHostKey will reject it.
+//
+// Accepts standard *.pub files (authorized_keys text format) and raw wire-
+// format files.  The key path is read from SYSFIG_SSH_HOST_KEY.
+func loadHostKeyCallback() (gossh.HostKeyCallback, string, error) {
 	hostKeyPath := os.Getenv("SYSFIG_SSH_HOST_KEY")
 	if hostKeyPath == "" {
-		return nil, fmt.Errorf("SSH host key verification not configured: set SYSFIG_SSH_HOST_KEY to a host public key file")
+		return nil, "", fmt.Errorf("SSH host key verification not configured: set SYSFIG_SSH_HOST_KEY to a host public key file")
 	}
 
 	hostKeyBytes, err := os.ReadFile(hostKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("read SSH host key %s: %w", hostKeyPath, err)
+		return nil, "", fmt.Errorf("read SSH host key %s: %w", hostKeyPath, err)
 	}
 
-	publicKey, err := gossh.ParsePublicKey(hostKeyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse SSH host key %s: %w", hostKeyPath, err)
+	// Standard *.pub files use authorized_keys text format ("ssh-ed25519 AAA... comment").
+	// ParseAuthorizedKey handles that. Fall back to ParsePublicKey for raw wire-format files.
+	var publicKey gossh.PublicKey
+	if pub, _, _, _, err2 := gossh.ParseAuthorizedKey(hostKeyBytes); err2 == nil {
+		publicKey = pub
+	} else if pub, err2 := gossh.ParsePublicKey(hostKeyBytes); err2 == nil {
+		publicKey = pub
+	} else {
+		return nil, "", fmt.Errorf("parse SSH host key %s: unsupported format (expected *.pub or wire format): %w", hostKeyPath, err2)
 	}
 
-	return gossh.FixedHostKey(publicKey), nil
+	return gossh.FixedHostKey(publicKey), publicKey.Type(), nil
 }
 
 // buildSSHClientConfig creates an ssh.ClientConfig using a key file and/or
@@ -457,19 +469,21 @@ func buildSSHClientConfig(sshKey string) (*gossh.ClientConfig, error) {
 		return nil, fmt.Errorf("no SSH auth available — provide --ssh-key or set SSH_AUTH_SOCK")
 	}
 
-	hostKeyCallback, err := loadHostKeyCallback()
+	hostKeyCallback, keyAlgo, err := loadHostKeyCallback()
 	if err != nil {
 		return nil, err
 	}
 
 	return &gossh.ClientConfig{
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
+		Auth:              authMethods,
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: []string{keyAlgo},
 	}, nil
 }
 
-// parseSSHTarget splits "user@host" into (user, "host:port").
-// Falls back to the current OS user if no @ is present.
+// parseSSHTarget splits "user@host", "user@host:port", or "host:port" into
+// (user, "host:port"). Falls back to the current OS user if no @ is present.
+// An explicit port in target always wins; the port argument is the fallback.
 func parseSSHTarget(target string, port int) (user, addr string) {
 	host := target
 	u := ""
@@ -479,6 +493,13 @@ func parseSSHTarget(target string, port int) (user, addr string) {
 	if i := strings.LastIndex(target, "@"); i >= 0 {
 		u = target[:i]
 		host = target[i+1:]
+	}
+	// If the host part already contains a port (e.g. "hostname:2222"),
+	// net.SplitHostPort succeeds — use it directly without appending another.
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		_ = p // already embedded
+		_ = h
+		return u, host
 	}
 	p := 22
 	if port > 0 {

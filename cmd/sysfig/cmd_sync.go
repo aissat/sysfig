@@ -140,6 +140,11 @@ Use --pull to fetch remote changes first (full round-trip with --push):
 			if len(args) > 0 && len(fileIDs) == 0 {
 				return fmt.Errorf("sync: no tracked files match %q", args[0])
 			}
+			// When SYSFIG_HOST is set and --all is not, restrict sync to that
+			// host's remote files only (avoids re-fetching unrelated hosts).
+			if !all {
+				fileIDs = filterIDsByHost(baseDir, fileIDs)
+			}
 
 			result, err := core.Sync(core.SyncOptions{
 				BaseDir: baseDir,
@@ -167,6 +172,9 @@ Use --pull to fetch remote changes first (full round-trip with --push):
 				}
 			}
 
+			for path, fetchErr := range result.RemoteFetchErrors {
+				fail("Remote fetch failed: %s — %s", clrBold.Sprint(path), clrErr.Sprint(fetchErr))
+			}
 			if !result.Committed {
 				info("Nothing to commit — shadow repo is clean.")
 				if push {

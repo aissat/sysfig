@@ -106,6 +106,7 @@ func syncStagePlain(repoDir, relPath string) error {
 // Steps:
 //  1. git hash-object -w <tmpfile>  → blob hash
 //  2. git update-index --add --cacheinfo 100644,<blobHash>,<relPath>
+//
 // syncHashBlob stores data as a git blob object and returns its 40-char SHA.
 // The blob is written to the object store but NOT added to any index.
 func syncHashBlob(repoDir string, data []byte) (string, error) {
@@ -185,15 +186,16 @@ type SyncOptions struct {
 // SyncResult reports what happened during a sync.
 type SyncResult struct {
 	RepoDir            string
-	Pulled             bool     // true if pull ran and succeeded
-	PullErr            error    // non-nil if pull was attempted but failed (non-fatal)
-	Committed          bool     // true if at least one commit was created
-	Pushed             bool     // true if push was attempted and succeeded
-	Message            string   // message of the last commit
-	CommittedFiles     []string // repo-relative paths committed in this sync
-	UpdatedFiles       []string // IDs of files whose state hash was refreshed
-	NodeWarnings       []string // non-fatal warnings from invalid node public keys
-	SkippedSourceFiles []string // system paths skipped because they are source-managed
+	Pulled             bool             // true if pull ran and succeeded
+	PullErr            error            // non-nil if pull was attempted but failed (non-fatal)
+	Committed          bool             // true if at least one commit was created
+	Pushed             bool             // true if push was attempted and succeeded
+	Message            string           // message of the last commit
+	CommittedFiles     []string         // repo-relative paths committed in this sync
+	UpdatedFiles       []string         // IDs of files whose state hash was refreshed
+	NodeWarnings       []string         // non-fatal warnings from invalid node public keys
+	SkippedSourceFiles []string         // system paths skipped because they are source-managed
+	RemoteFetchErrors  map[string]error // system path → error for remote files that couldn't be fetched
 }
 
 // buildSyncMessage inspects the git index to produce a meaningful commit
@@ -290,12 +292,13 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 
 	// fileEntry holds one changed file ready to be staged.
 	type fileEntry struct {
-		id       string
-		rec      *types.FileRecord
-		relPath  string
-		sysPath  string
-		data     []byte
-		blobHash string // populated after git hash-object
+		id          string
+		rec         *types.FileRecord
+		relPath     string
+		sysPath     string
+		data        []byte
+		blobHash    string // populated after git hash-object
+		contentHash string // BLAKE3 of the plaintext content (pre-encryption); used for remote files
 	}
 
 	// Step 1: read all file data and skip unchanged files.
@@ -377,6 +380,7 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		}
 		// HashOnly files have no content in the repo — nothing to sync.
 		// LocalOnly files sync normally into the local repo; push skips them.
+		// Remote files also sync locally only (remote/ branch prefix, never pushed).
 		if rec.HashOnly {
 			continue
 		}
@@ -386,8 +390,39 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			sysPath = filepath.Join(opts.SysRoot, rec.SystemPath)
 		}
 
+		// isRemote is true when the file was tracked from an SSH host or
+		// Docker container — we re-fetch the content instead of reading locally.
+		isRemote := rec.Remote != ""
+
 		var data []byte
-		if rec.Encrypt {
+		var remoteContentHash string // BLAKE3 of plaintext for remote files
+		if isRemote {
+			// Re-fetch from the remote source (SSH agent / DOCKER_HOST).
+			fetched, fetchErr := FetchFromSSH(rec.Remote, rec.RemoteSSHKey, 0, rec.SystemPath)
+			if fetchErr != nil {
+				if result.RemoteFetchErrors == nil {
+					result.RemoteFetchErrors = make(map[string]error)
+				}
+				result.RemoteFetchErrors[rec.SystemPath] = fetchErr
+				continue
+			}
+			remoteContentHash = hash.Bytes(fetched)
+			if rec.Encrypt {
+				keysDir := filepath.Join(opts.BaseDir, "keys")
+				km := crypto.NewKeyManager(keysDir)
+				master, err := km.Load()
+				if err != nil {
+					return nil, fmt.Errorf("core: sync: encrypt remote %q: master key not found: %w", id, err)
+				}
+				encrypted, err := crypto.EncryptForFile(fetched, master, id, nodeRecipients...)
+				if err != nil {
+					return nil, fmt.Errorf("core: sync: encrypt remote %q: %w", id, err)
+				}
+				data = encrypted
+			} else {
+				data = fetched
+			}
+		} else if rec.Encrypt {
 			plaintext, err := os.ReadFile(sysPath)
 			if err != nil {
 				continue
@@ -418,13 +453,25 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			showRef = "HEAD"
 		}
 		if existing, err := gitShowBytesAt(repoDir, showRef, relPath); err == nil && bytes.Equal(existing, data) {
-			if sysHash, err := hash.File(sysPath); err == nil {
+			// Refresh the stored hash. Remote files use the already-computed
+			// plaintext hash; local files re-hash from disk.
+			var sysHash string
+			var hashErr error
+			if isRemote {
+				// remoteContentHash was computed from the fetched plaintext above.
+				sysHash, hashErr = remoteContentHash, nil
+			} else {
+				sysHash, hashErr = hash.File(sysPath)
+			}
+			if hashErr == nil {
 				_ = sm.WithLock(func(s *types.State) error {
 					r := s.Files[id]
 					r.CurrentHash = sysHash
 					r.LastSync = &now
-					if newMeta, err := sysfigfs.ReadMeta(sysPath); err == nil {
-						r.Meta = newMeta
+					if !isRemote {
+						if newMeta, err := sysfigfs.ReadMeta(sysPath); err == nil {
+							r.Meta = newMeta
+						}
 					}
 					s.Files[id] = r
 					return nil
@@ -435,14 +482,18 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 
 		// Files tracked as part of a directory share a Group key → one commit.
 		// Individually tracked files use their unique ID → one commit each.
+		// Remote groups are namespaced by host so that two hosts tracking the same
+		// directory path (e.g. /etc) are committed as separate logical groups.
 		groupKey := rec.Group
 		if groupKey == "" {
 			groupKey = id
+		} else if rec.Remote != "" {
+			groupKey = RepoRemotePrefix(rec.Remote) + ":" + groupKey
 		}
 		if _, exists := groups[groupKey]; !exists {
 			groupOrder = append(groupOrder, groupKey)
 		}
-		groups[groupKey] = append(groups[groupKey], fileEntry{id, rec, relPath, sysPath, data, ""})
+		groups[groupKey] = append(groups[groupKey], fileEntry{id, rec, relPath, sysPath, data, "", remoteContentHash})
 	}
 
 	// Step 2: for each group, stage all files then create ONE commit.
@@ -497,10 +548,16 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		}
 
 		// Refresh state hashes for all files in the group.
+		isRemoteEntry := func(e fileEntry) bool { return e.rec.Remote != "" }
 		for _, e := range entries {
 			_ = sm.WithLock(func(s *types.State) error {
 				r := s.Files[e.id]
-				if e.rec.Encrypt {
+				if isRemoteEntry(e) {
+					// contentHash is the BLAKE3 of the fetched plaintext.
+					if e.contentHash != "" {
+						r.CurrentHash = e.contentHash
+					}
+				} else if e.rec.Encrypt {
 					sysHash, err := hash.File(e.sysPath)
 					if err != nil {
 						return nil
@@ -521,8 +578,10 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 					r.CurrentHash = sysHash
 				}
 				r.LastSync = &now
-				if newMeta, err := sysfigfs.ReadMeta(e.sysPath); err == nil {
-					r.Meta = newMeta
+				if !isRemoteEntry(e) {
+					if newMeta, err := sysfigfs.ReadMeta(e.sysPath); err == nil {
+						r.Meta = newMeta
+					}
 				}
 				s.Files[e.id] = r
 				result.UpdatedFiles = append(result.UpdatedFiles, e.id)
@@ -587,14 +646,15 @@ func Push(opts PushOptions) error {
 	}
 
 	// Standard git push — push track/* and manifest branches only.
-	// local/* branches are intentionally excluded: they contain local-only
-	// files that must never leave this machine.
+	// local/* and remote/* branches are intentionally excluded: local/* contains
+	// local-only files, remote/* contains configs fetched from SSH hosts — neither
+	// should leave this machine.
 	args := []string{"push", "origin"}
 	if opts.Force {
 		args = append(args, "--force")
 	}
 	// Push track/* branches and manifest (if it exists).
-	// local/* branches are intentionally excluded — they are never sent to remote.
+	// local/* and remote/* branches are intentionally excluded.
 	args = append(args, "refs/heads/track/*:refs/heads/track/*")
 	// Use + prefix for manifest so a missing manifest doesn't abort the push.
 	if hasBranch(repoDir, "manifest") {
@@ -729,7 +789,6 @@ func advanceBareHEAD(repoDir string) error {
 	return fmt.Errorf("advanceBareHEAD: could not advance refs/heads/%s", branch)
 }
 
-
 // buildManifest generates sysfig.yaml bytes from current state so that
 // `sysfig setup` on a new host can seed state.json automatically.
 // Staged into the bare repo as part of every sync commit.
@@ -771,4 +830,3 @@ func buildManifest(s *types.State) ([]byte, error) {
 	m := manifest{Version: 1, TrackedFiles: entries}
 	return yaml.Marshal(m)
 }
-

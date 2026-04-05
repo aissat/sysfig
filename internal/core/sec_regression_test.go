@@ -63,7 +63,7 @@ func writeSSHWireKeyFile(t *testing.T, dir string, pub gossh.PublicKey) string {
 
 func TestSEC001_LoadHostKeyCallback_NoEnvVar_Errors(t *testing.T) {
 	t.Setenv("SYSFIG_SSH_HOST_KEY", "")
-	_, err := loadHostKeyCallback()
+	_, _, err := loadHostKeyCallback()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SYSFIG_SSH_HOST_KEY",
 		"error must mention the env var so operators know how to fix it")
@@ -71,7 +71,7 @@ func TestSEC001_LoadHostKeyCallback_NoEnvVar_Errors(t *testing.T) {
 
 func TestSEC001_LoadHostKeyCallback_MissingFile_Errors(t *testing.T) {
 	t.Setenv("SYSFIG_SSH_HOST_KEY", filepath.Join(t.TempDir(), "nonexistent.pub"))
-	_, err := loadHostKeyCallback()
+	_, _, err := loadHostKeyCallback()
 	require.Error(t, err)
 }
 
@@ -80,7 +80,7 @@ func TestSEC001_HostKeyCallback_AcceptsConfiguredKey(t *testing.T) {
 	keyFile := writeSSHWireKeyFile(t, t.TempDir(), legitPub)
 	t.Setenv("SYSFIG_SSH_HOST_KEY", keyFile)
 
-	cb, err := loadHostKeyCallback()
+	cb, _, err := loadHostKeyCallback()
 	require.NoError(t, err)
 
 	err = cb("target:22", &net.TCPAddr{}, legitPub)
@@ -95,7 +95,7 @@ func TestSEC001_HostKeyCallback_RejectsAttackerKey(t *testing.T) {
 	keyFile := writeSSHWireKeyFile(t, t.TempDir(), legitPub)
 	t.Setenv("SYSFIG_SSH_HOST_KEY", keyFile)
 
-	cb, err := loadHostKeyCallback()
+	cb, _, err := loadHostKeyCallback()
 	require.NoError(t, err)
 
 	err = cb("target:22", &net.TCPAddr{}, attackerPub)

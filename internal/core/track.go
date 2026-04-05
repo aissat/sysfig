@@ -104,6 +104,15 @@ type TrackOptions struct {
 	// hash is recorded but no copy is stored in the repo. The file is never
 	// staged or pushed.
 	HashOnly bool
+	// RemoteHost, when non-empty, fetches the file from a remote host via SSH
+	// instead of reading it locally. Format: "user@hostname" or "hostname".
+	// The SYSFIG_HOST environment variable is used when this field is empty
+	// and a remote fetch is still desired — callers should resolve it before
+	// populating TrackOptions.
+	RemoteHost string
+	// SSHKey is the path to an SSH identity file used for remote tracking.
+	// Empty = rely on the SSH_AUTH_SOCK agent.
+	SSHKey string
 }
 
 // TrackResult is returned by Track on success.
@@ -207,30 +216,35 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		realPath = filepath.Join(opts.SysRoot, path)
 	}
 
+	// Detect whether this is a remote track (SSH).
+	isRemote := opts.RemoteHost != ""
+
 	// 1a. Denylist check — always on the logical path.
 	// Hash-only mode stores no content (only a digest), so the threat model
 	// behind the denylist (secrets leaking into git) does not apply.
 	// Operators legitimately use hash-only to monitor sensitive files for
 	// unexpected changes without ever capturing their contents.
+	// Remote-tracked files are still evaluated against the denylist since
+	// the purpose is to prevent secret material from being centrally stored.
 	if IsDenied(path) && !opts.HashOnly {
 		return nil, fmt.Errorf("core: path %q is in the system denylist", path)
 	}
 
-	// 1b. Stat the file — must exist and be a regular file.
-	info, err := os.Stat(realPath)
-	if err != nil {
-		return nil, fmt.Errorf("core: %w", err)
+	// 1b–1c. For local files only: stat + open readability check.
+	if !isRemote {
+		info, err := os.Stat(realPath)
+		if err != nil {
+			return nil, fmt.Errorf("core: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("core: path %q is not a regular file", path)
+		}
+		f, err := os.Open(realPath)
+		if err != nil {
+			return nil, fmt.Errorf("core: %w", err)
+		}
+		f.Close()
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("core: path %q is not a regular file", path)
-	}
-
-	// 1c. Verify the file is readable by opening it.
-	f, err := os.Open(realPath)
-	if err != nil {
-		return nil, fmt.Errorf("core: %w", err)
-	}
-	f.Close()
 
 	// 2. Derive the logical (canonical) system path by stripping SysRoot.
 	//    This is what gets stored in state.json and used as the repo layout.
@@ -242,20 +256,41 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		}
 	}
 
-	// 3. Derive ID if not supplied — always from the logical path.
+	// 3. Derive ID if not supplied.
+	// For remote files the ID includes the host so that the same path tracked
+	// from two different servers gets two distinct IDs and records.
 	id := opts.ID
 	if id == "" {
-		id = deriveID(logicalPath)
+		if isRemote {
+			id = deriveID(opts.RemoteHost + ":" + logicalPath)
+		} else {
+			id = deriveID(logicalPath)
+		}
 	}
 
 	// 4. Build the git-relative path (no leading slash).
-	//    e.g. logicalPath="/etc/nginx/nginx.conf" → repoRel="etc/nginx/nginx.conf"
+	//    For remote files we prefix with the full remote spec (user+host+port,
+	//    colon replaced by underscore) so that different users or ports on the
+	//    same host never collide in the git tree.
+	//    e.g. remote="alice@server1", logicalPath="/etc/nginx/nginx.conf"
+	//    → repoRel="alice@server1/etc/nginx/nginx.conf"
 	repoRel := strings.TrimPrefix(logicalPath, "/")
+	if isRemote {
+		repoRel = RepoRemotePrefix(opts.RemoteHost) + "/" + repoRel
+	}
 
 	// 5. Read the file content for hashing (and encryption / sandbox staging).
-	data, err := os.ReadFile(realPath)
-	if err != nil {
-		return nil, fmt.Errorf("core: %w", err)
+	var data []byte
+	if isRemote {
+		data, err = FetchFromSSH(opts.RemoteHost, opts.SSHKey, 0, logicalPath)
+		if err != nil {
+			return nil, fmt.Errorf("core: track remote: %w", err)
+		}
+	} else {
+		data, err = os.ReadFile(realPath)
+		if err != nil {
+			return nil, fmt.Errorf("core: %w", err)
+		}
 	}
 
 	// 6. Stage the file into the bare repo index.
@@ -295,17 +330,26 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		}
 	}
 
-	// 7. Compute the BLAKE3 hash of the real on-disk file.
-	fileHash, err := hash.File(realPath)
-	if err != nil {
-		return nil, fmt.Errorf("core: %w", err)
+	// 7. Compute the BLAKE3 hash of the file content.
+	// For remote files we hash the fetched bytes directly; for local files we
+	// re-read from disk (consistent with sync/status behaviour).
+	var fileHash string
+	if isRemote {
+		fileHash = hash.Bytes(data)
+	} else {
+		fileHash, err = hash.File(realPath)
+		if err != nil {
+			return nil, fmt.Errorf("core: %w", err)
+		}
 	}
 
 	// 8. Capture filesystem metadata (uid, gid, mode).
-	meta, err := sysfigfs.ReadMeta(realPath)
-	if err != nil {
-		// Non-fatal — record without metadata rather than aborting.
-		meta = nil
+	// Remote files have no accessible local metadata — skip silently.
+	var meta *types.FileMeta
+	if !isRemote {
+		if m, mErr := sysfigfs.ReadMeta(realPath); mErr == nil {
+			meta = m
+		}
 	}
 
 	// 9. Compute the branch name outside the lock so it can be returned.
@@ -319,6 +363,8 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		prefix := "track/"
 		if opts.LocalOnly {
 			prefix = "local/"
+		} else if isRemote {
+			prefix = "remote/"
 		}
 		branch = resolveTrackBranch(opts.RepoDir, prefix+SanitizeBranchName(branchBase))
 	}
@@ -341,20 +387,22 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 
 		now := time.Now()
 		s.Files[id] = &types.FileRecord{
-			ID:          id,
-			SystemPath:  logicalPath,
-			RepoPath:    repoRel, // git-relative path, e.g. "etc/nginx/nginx.conf"
-			CurrentHash: fileHash,
-			LastSync:    &now,
-			Status:      types.StatusTracked,
-			Encrypt:     opts.Encrypt,
-			Template:    opts.Template,
-			Tags:        opts.Tags,
-			Meta:        meta,
-			Group:       opts.Group,
-			Branch:      branch,
-			LocalOnly:   opts.LocalOnly,
-			HashOnly:    opts.HashOnly,
+			ID:           id,
+			SystemPath:   logicalPath,
+			RepoPath:     repoRel, // git-relative path, e.g. "etc/nginx/nginx.conf"
+			CurrentHash:  fileHash,
+			LastSync:     &now,
+			Status:       types.StatusTracked,
+			Encrypt:      opts.Encrypt,
+			Template:     opts.Template,
+			Tags:         opts.Tags,
+			Meta:         meta,
+			Group:        opts.Group,
+			Branch:       branch,
+			LocalOnly:    opts.LocalOnly,
+			HashOnly:     opts.HashOnly,
+			Remote:       opts.RemoteHost,
+			RemoteSSHKey: opts.SSHKey,
 		}
 		return nil
 	}); err != nil {
@@ -477,6 +525,13 @@ type TrackDirOptions struct {
 	Excludes  []string
 	LocalOnly bool
 	HashOnly  bool
+	// RemoteHost, when non-empty, causes TrackDir to list the directory on
+	// the remote host via SSH and fetch each file's content remotely rather
+	// than walking the local filesystem. Format: "user@hostname" or "hostname".
+	RemoteHost string
+	// SSHKey is the path to the SSH identity file for remote access.
+	// Empty means rely on SSH_AUTH_SOCK agent.
+	SSHKey string
 }
 
 // TrackDirEntry reports the outcome for a single file encountered during a
@@ -512,6 +567,14 @@ type TrackDirSummary struct {
 // Returns TrackDirSummary and a top-level error only if the root walk itself
 // fails (e.g. dirPath does not exist or is not a directory).
 func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
+	isRemote := opts.RemoteHost != ""
+
+	if isRemote {
+		// For remote directories we cannot stat or walk the local filesystem.
+		// List files via SSH and track each one remotely.
+		return trackDirRemote(opts)
+	}
+
 	// Resolve relative paths to absolute before walking.
 	absDir, err := filepath.Abs(opts.DirPath)
 	if err != nil {
@@ -632,6 +695,76 @@ func TrackDir(opts TrackDirOptions) (*TrackDirSummary, error) {
 
 	if walkErr != nil {
 		return nil, fmt.Errorf("core: trackdir: walk failed: %w", walkErr)
+	}
+
+	return summary, nil
+}
+
+// trackDirRemote handles the RemoteHost != "" path for TrackDir.
+// It lists all regular files under opts.DirPath on the remote host, then
+// calls Track for each one with the remote credentials set.
+func trackDirRemote(opts TrackDirOptions) (*TrackDirSummary, error) {
+	files, err := ListRemoteFiles(opts.RemoteHost, opts.SSHKey, 0, opts.DirPath)
+	if err != nil {
+		return nil, fmt.Errorf("core: trackdir: list remote %s %s: %w", opts.RemoteHost, opts.DirPath, err)
+	}
+
+	summary := &TrackDirSummary{}
+
+	for _, path := range files {
+		// User-supplied exclude patterns.
+		if isExcluded(path, opts.Excludes) {
+			summary.Entries = append(summary.Entries, TrackDirEntry{
+				Path:    path,
+				Skipped: true,
+				Reason:  "excluded by --exclude pattern",
+			})
+			summary.Skipped++
+			continue
+		}
+
+		// Denylist check — hash-only is exempt (no content stored in git).
+		if IsDenied(path) && !opts.HashOnly {
+			summary.Entries = append(summary.Entries, TrackDirEntry{
+				Path:    path,
+				Skipped: true,
+				Reason:  "path is in the system denylist",
+			})
+			summary.Skipped++
+			continue
+		}
+
+		result, trackErr := Track(TrackOptions{
+			SystemPath: path,
+			RepoDir:    opts.RepoDir,
+			StateDir:   opts.StateDir,
+			Tags:       opts.Tags,
+			Platform:   opts.Platform,
+			Encrypt:    opts.Encrypt,
+			Template:   opts.Template,
+			Group:      opts.DirPath,
+			LocalOnly:  opts.LocalOnly,
+			HashOnly:   opts.HashOnly,
+			RemoteHost: opts.RemoteHost,
+			SSHKey:     opts.SSHKey,
+		})
+
+		entry := TrackDirEntry{Path: path}
+		if trackErr != nil {
+			if isAlreadyTracked(trackErr) {
+				entry.Skipped = true
+				entry.Reason = "already tracked"
+				summary.Skipped++
+			} else {
+				entry.Err = trackErr
+				summary.Errors++
+			}
+		} else {
+			entry.ID = result.ID
+			entry.Result = result
+			summary.Tracked++
+		}
+		summary.Entries = append(summary.Entries, entry)
 	}
 
 	return summary, nil

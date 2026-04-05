@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	sysfigfs "github.com/aissat/sysfig/internal/fs"
@@ -21,6 +20,7 @@ type DiffResult struct {
 	ID         string
 	SystemPath string // resolved (sysRoot-prefixed) path
 	RepoPath   string // git-relative path (e.g. "etc/nginx/nginx.conf"), for display only
+	Remote     string // SSH target if file is remote-tracked (e.g. "user@host"), empty otherwise
 	Status     FileStatusLabel
 	Diff       string // unified diff text; empty if files are identical
 	Skipped    bool   // true for ENCRYPTED / MISSING files (no diff possible)
@@ -65,8 +65,14 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 	// Bare repo directory — all git-show calls use --git-dir=repoDir.
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
 
-	// Re-use Status to get the current three-way comparison for every file.
-	statuses, err := Status(opts.BaseDir, opts.IDs, opts.SysRoot)
+	// Re-use StatusWithOptions — always fetch remote files live so that
+	// remote-tracked files show DIRTY/SYNCED rather than STALE.
+	statuses, err := StatusWithOptions(StatusOptions{
+		BaseDir:     opts.BaseDir,
+		IDs:         opts.IDs,
+		SysRoot:     opts.SysRoot,
+		FetchRemote: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("core: diff: %w", err)
 	}
@@ -79,11 +85,10 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 		return nil, fmt.Errorf("core: diff: load state: %w", err)
 	}
 
-	// Build a lookup by SystemPath since IDs are now computed hashes and
-	// may not match the keys stored in state.json.
-	byPath := make(map[string]*types.FileRecord, len(s.Files))
+	// Build a lookup by ID (stable — remote records share SystemPath across hosts).
+	byID := make(map[string]*types.FileRecord, len(s.Files))
 	for _, rec := range s.Files {
-		byPath[rec.SystemPath] = rec
+		byID[rec.ID] = rec
 	}
 
 	// trackRef returns the git ref for a file's track branch.
@@ -97,20 +102,24 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 	var results []DiffResult
 
 	for _, sr := range statuses {
-		// Strip sysRoot prefix to get the logical path for lookup.
-		logicalPath := sr.SystemPath
-		if opts.SysRoot != "" {
-			logicalPath = strings.TrimPrefix(sr.SystemPath, opts.SysRoot)
-		}
-		rec, ok := byPath[logicalPath]
+		rec, ok := byID[sr.ID]
 		if !ok {
 			continue
+		}
+
+		isRemote := rec.Remote != ""
+
+		// Display path: "user@host:/etc/path" for remote, system path for local.
+		displayPath := sr.SystemPath
+		if isRemote {
+			displayPath = rec.Remote + ":" + sr.SystemPath
 		}
 
 		dr := DiffResult{
 			ID:         sr.ID,
 			SystemPath: sr.SystemPath,
-			RepoPath:   rec.RepoPath, // git-relative path, display only
+			RepoPath:   rec.RepoPath,
+			Remote:     rec.Remote,
 			Status:     sr.Status,
 		}
 
@@ -121,17 +130,18 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 
 		case StatusMissing:
 			dr.Skipped = true
-			dr.SkipReason = "system file is missing"
+			if isRemote {
+				dr.SkipReason = fmt.Sprintf("remote file unreachable: %s", rec.Remote)
+			} else {
+				dr.SkipReason = "system file is missing"
+			}
 
 		case StatusSynced:
 			// Files are identical — leave Diff empty, not skipped.
 
 		case StatusDirty:
-			// System drifted from repo. Show what `sysfig sync` would capture:
-			// a = repo (last committed), b = system (current).
-			//
-			// Read repo content from the bare repo and write it to a temp file
-			// since there is no checked-out working tree.
+			// Drifted from repo. Show what `sysfig sync` would capture:
+			// a = repo (last committed), b = live content.
 			repoContent, err := gitShowBytesAt(repoDir, trackRef(rec), rec.RepoPath)
 			if err != nil {
 				return nil, fmt.Errorf("core: diff: %s: read repo: %w", sr.ID, err)
@@ -142,20 +152,46 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 			}
 			defer cleanup()
 
-			diffText, err := runDiff(repoTmp, sr.SystemPath,
-				labelA("repo", rec.RepoPath),
-				labelB("system", sr.SystemPath))
-			cleanup() // clean up immediately rather than waiting for defer
-			if err != nil {
-				return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
+			var diffText string
+			if isRemote {
+				// Fetch live remote content and diff against it.
+				liveData, fetchErr := FetchFromSSH(rec.Remote, rec.RemoteSSHKey, 0, rec.SystemPath)
+				if fetchErr != nil {
+					cleanup()
+					dr.Skipped = true
+					dr.SkipReason = fmt.Sprintf("SSH fetch failed: %s", fetchErr)
+					results = append(results, dr)
+					continue
+				}
+				liveTmp, liveCleanup, err := writeTempFile("remote", liveData)
+				if err != nil {
+					cleanup()
+					return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
+				}
+				defer liveCleanup()
+				diffText, err = runDiff(repoTmp, liveTmp,
+					labelA("repo", rec.RepoPath),
+					labelB(rec.Remote, sr.SystemPath))
+				liveCleanup()
+				if err != nil {
+					cleanup()
+					return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
+				}
+			} else {
+				diffText, err = runDiff(repoTmp, sr.SystemPath,
+					labelA("repo", rec.RepoPath),
+					labelB("system", displayPath))
+				if err != nil {
+					cleanup()
+					return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
+				}
 			}
+			cleanup()
 			dr.Diff = diffText
 
 		case StatusPending:
 			// Repo pulled ahead. Show what `sysfig apply` would deploy:
-			// a = system (current), b = repo (incoming).
-			//
-			// Read repo content from the bare repo and write it to a temp file.
+			// a = current (system or remote), b = repo (incoming).
 			repoContent, err := gitShowBytesAt(repoDir, trackRef(rec), rec.RepoPath)
 			if err != nil {
 				return nil, fmt.Errorf("core: diff: %s: read repo: %w", sr.ID, err)
@@ -166,37 +202,49 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 			}
 			defer cleanup()
 
-			diffText, err := runDiff(sr.SystemPath, repoTmp,
-				labelA("system", sr.SystemPath),
-				labelB("repo", rec.RepoPath))
-			cleanup() // clean up immediately rather than waiting for defer
-			if err != nil {
-				return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
+			var diffText string
+			if isRemote {
+				liveData, fetchErr := FetchFromSSH(rec.Remote, rec.RemoteSSHKey, 0, rec.SystemPath)
+				if fetchErr != nil {
+					cleanup()
+					dr.Skipped = true
+					dr.SkipReason = fmt.Sprintf("SSH fetch failed: %s", fetchErr)
+					results = append(results, dr)
+					continue
+				}
+				liveTmp, liveCleanup, err := writeTempFile("remote", liveData)
+				if err != nil {
+					cleanup()
+					return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
+				}
+				defer liveCleanup()
+				diffText, err = runDiff(liveTmp, repoTmp,
+					labelA(rec.Remote, sr.SystemPath),
+					labelB("repo", rec.RepoPath))
+				liveCleanup()
+				if err != nil {
+					cleanup()
+					return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
+				}
+			} else {
+				diffText, err = runDiff(sr.SystemPath, repoTmp,
+					labelA("system", displayPath),
+					labelB("repo", rec.RepoPath))
+				if err != nil {
+					cleanup()
+					return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
+				}
 			}
+			cleanup()
 			dr.Diff = diffText
 
 		default:
-			// Unknown status — treat conservatively as dirty.
-			repoContent, err := gitShowBytesAt(repoDir, trackRef(rec), rec.RepoPath)
-			if err != nil {
-				return nil, fmt.Errorf("core: diff: %s: read repo: %w", sr.ID, err)
-			}
-			repoTmp, cleanup, err := writeTempFile("repo", repoContent)
-			if err != nil {
-				return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
-			}
-			defer cleanup()
-
-			diffText, err := runDiff(repoTmp, sr.SystemPath,
-				labelA("repo", rec.RepoPath),
-				labelB("system", sr.SystemPath))
-			cleanup() // clean up immediately rather than waiting for defer
-			if err != nil {
-				return nil, fmt.Errorf("core: diff: %s: %w", sr.ID, err)
-			}
-			dr.Diff = diffText
+			// Unknown status (e.g. STALE for remote not yet fetched) — skip.
+			dr.Skipped = true
+			dr.SkipReason = fmt.Sprintf("status %s — run with --fetch to check live state", sr.Status)
 		}
 
+		_ = displayPath // used in labels above
 		results = append(results, dr)
 	}
 
