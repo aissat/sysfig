@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aissat/sysfig/internal/core"
@@ -25,6 +26,8 @@ func newLogCmd() *cobra.Command {
 		n           int
 		noRollbacks bool
 		graphMode   bool
+		treeMode    bool
+		dirtyOnly   bool
 	)
 
 	cmd := &cobra.Command{
@@ -35,7 +38,8 @@ directory that changed, so you can see at a glance what was touched.
 
 Filter to a specific path or ID:
   sysfig log /etc/pacman.d
-  sysfig log --id 7734be1e`,
+  sysfig log --id 7734be1e
+  sysfig log --dirty        show only files with uncommitted changes`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseDir = resolveBaseDir(baseDir)
@@ -66,6 +70,333 @@ Filter to a specific path or ID:
 			}
 			if filePath != "" {
 				filterPath = filePath
+			}
+
+			// --dirty: run a status check and restrict to branches of dirty files.
+			// Any file whose status is DIRTY, TAMPERED, MISSING, or PENDING counts.
+			var dirtyBranches []string
+			if dirtyOnly {
+				statResults, serr := core.Status(baseDir, nil, "")
+				if serr != nil {
+					return fmt.Errorf("log --dirty: status check: %w", serr)
+				}
+				seenDB := map[string]bool{}
+				sm0 := state.NewManager(filepath.Join(baseDir, "state.json"))
+				s0, _ := sm0.Load()
+				for _, r := range statResults {
+					switch r.Status {
+					case core.StatusDirty, core.StatusTampered, core.StatusMissing, core.StatusPending:
+					default:
+						continue
+					}
+					if s0 != nil {
+						if rec, ok := s0.Files[r.ID]; ok && rec.Branch != "" && !seenDB[rec.Branch] {
+							dirtyBranches = append(dirtyBranches, rec.Branch)
+							seenDB[rec.Branch] = true
+						}
+					}
+				}
+				if len(dirtyBranches) == 0 {
+					info("No dirty files — everything is in sync.")
+					return nil
+				}
+			}
+
+			// ── Tree mode ─────────────────────────────────────────────────────────
+			if treeMode {
+				const (
+					yellow = "\033[33m"
+					cyan   = "\033[36m"
+					reset  = "\033[0m"
+					dim    = "\033[2m"
+				)
+				tw := termWidth()
+
+				smT := state.NewManager(filepath.Join(baseDir, "state.json"))
+				sT, errT := smT.Load()
+				if errT != nil || sT == nil || len(sT.Files) == 0 {
+					info("No tracked files.")
+					return nil
+				}
+
+				type pathNode struct {
+					name       string
+					isDir      bool
+					children   []*pathNode
+					branch     string // for leaf nodes
+					repoPath   string // empty for group-dir leaves
+					isGroupDir bool   // true = group-tracked directory leaf
+					groupPath  string // repo-relative group dir (e.g. "etc/pacman.d"), for subject shortening
+				}
+
+				root := &pathNode{name: "", isDir: true}
+
+				var insertNode func(*pathNode, []string, *pathNode)
+				insertNode = func(parent *pathNode, parts []string, leaf *pathNode) {
+					if len(parts) == 1 {
+						leaf.name = parts[0]
+						parent.children = append(parent.children, leaf)
+						return
+					}
+					dirName := parts[0]
+					var dir *pathNode
+					for _, c := range parent.children {
+						if c.isDir && c.name == dirName {
+							dir = c
+							break
+						}
+					}
+					if dir == nil {
+						dir = &pathNode{name: dirName, isDir: true}
+						parent.children = append(parent.children, dir)
+					}
+					insertNode(dir, parts[1:], leaf)
+				}
+
+				dirtySet := map[string]bool{}
+				for _, b := range dirtyBranches {
+					dirtySet[b] = true
+				}
+
+				// seenGroups deduplicates group-tracked directories so each group
+				// branch appears exactly once in the tree (not once per file in it).
+				seenGroups := map[string]bool{}
+
+				for _, rec := range sT.Files {
+					if rec.Branch == "" {
+						continue
+					}
+					if filterPath != "" {
+						sysFiltered := "/" + strings.TrimPrefix(filterPath, "/")
+						base := strings.TrimSuffix(sysFiltered, "/")
+						if !strings.HasPrefix(rec.SystemPath, base+"/") && rec.SystemPath != base {
+							continue
+						}
+					}
+					if dirtyOnly && !dirtySet[rec.Branch] {
+						continue
+					}
+
+					if rec.Group != "" {
+						// Group-tracked: insert ONE leaf for the directory, not per file.
+						groupPath := strings.TrimPrefix(rec.Group, "/")
+						if seenGroups[groupPath] {
+							continue
+						}
+						seenGroups[groupPath] = true
+						parts := strings.Split(groupPath, "/")
+						leaf := &pathNode{
+							isGroupDir: true,
+							branch:     rec.Branch,
+							groupPath:  groupPath,
+						}
+						insertNode(root, parts, leaf)
+					} else {
+						// Individually tracked file.
+						parts := strings.Split(strings.TrimPrefix(rec.SystemPath, "/"), "/")
+						leaf := &pathNode{
+							branch:   rec.Branch,
+							repoPath: rec.RepoPath,
+						}
+						insertNode(root, parts, leaf)
+					}
+				}
+
+				if len(root.children) == 0 {
+					info("No tracked files.")
+					return nil
+				}
+
+				// Sort: dirs before files, alphabetical within each type.
+				var sortTree func(*pathNode)
+				sortTree = func(nd *pathNode) {
+					sort.Slice(nd.children, func(i, j int) bool {
+						ci, cj := nd.children[i], nd.children[j]
+						if ci.isDir != cj.isDir {
+							return ci.isDir
+						}
+						return ci.name < cj.name
+					})
+					for _, c := range nd.children {
+						if c.isDir {
+							sortTree(c)
+						}
+					}
+				}
+				sortTree(root)
+
+				type commitInfo struct {
+					hash    string
+					date    string
+					subject string
+					adds    int
+					dels    int
+					paths   []string // files touched (from --numstat)
+				}
+
+				fetchCommits := func(branch, path string) []commitInfo {
+					args := []string{"--no-pager", "--git-dir=" + repoDir,
+						"log", branch, "--pretty=tformat:%h\t%ad\t%s",
+						"--numstat", "--date=format:%Y-%m-%d",
+					}
+					if n > 0 {
+						args = append(args, fmt.Sprintf("-n%d", n))
+					}
+					if path != "" {
+						args = append(args, "--", path)
+					}
+					raw, _ := exec.Command("git", args...).Output()
+
+					// isHexStr detects a git short-hash (all lowercase hex, ≥4 chars).
+					// Used to distinguish commit-header lines from numstat lines.
+					isHexStr := func(s string) bool {
+						if len(s) < 4 {
+							return false
+						}
+						for _, c := range s {
+							if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+								return false
+							}
+						}
+						return true
+					}
+
+					var out []commitInfo
+					var cur *commitInfo
+					for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+						if line == "" {
+							continue
+						}
+						ps := strings.SplitN(line, "\t", 3)
+						if len(ps) >= 3 && isHexStr(ps[0]) {
+							// New commit header: hash \t date \t subject
+							if cur != nil {
+								out = append(out, *cur)
+							}
+							cur = &commitInfo{hash: ps[0], date: ps[1], subject: ps[2]}
+						} else if cur != nil && len(ps) >= 3 {
+							// Numstat line: adds \t dels \t path
+							a, _ := strconv.Atoi(ps[0])
+							d, _ := strconv.Atoi(ps[1])
+							cur.adds += a
+							cur.dels += d
+							if ps[2] != "" {
+								cur.paths = append(cur.paths, ps[2])
+							}
+						}
+					}
+					if cur != nil {
+						out = append(out, *cur)
+					}
+					return out
+				}
+
+				var renderNode func(*pathNode, string, bool)
+
+				renderLeaf := func(fn *pathNode, prefix string, isLast bool) {
+					connector := "├── "
+					cont := "│   "
+					if isLast {
+						connector = "└── "
+						cont = "    "
+					}
+					// Group-dir leaves show a trailing "/" to look like directories.
+					nameSuffix := ""
+					if fn.isGroupDir {
+						nameSuffix = "/"
+					}
+					commits := fetchCommits(fn.branch, fn.repoPath)
+					tipStr := ""
+					if len(commits) > 0 {
+						tipStr = " @ " + yellow + commits[0].hash + reset
+					}
+					fmt.Printf("%s%s%s%s  %s%s\n",
+						prefix, connector, fn.name, nameSuffix,
+						dim+"["+fn.branch+"]"+reset,
+						tipStr)
+
+					// shortenSubject rebuilds a cleaner subject for group-dir commits.
+					// It strips the group path prefix from files listed in numstat and
+					// shows the basenames (abbreviated when >1 file changed).
+					//
+					// "sysfig: update etc/pacman.d" + numstat [mirrorlist]
+					//   → "sysfig: update mirrorlist"
+					// "sysfig: update etc/pacman.d" + numstat [mirrorlist, mirrorlist.bak, ...]
+					//   → "sysfig: update (mirrorlist, +4 others...)"
+					shortenSubject := func(c commitInfo) string {
+						if fn.groupPath == "" || len(c.paths) == 0 {
+							return c.subject
+						}
+						gpfx := fn.groupPath + "/"
+						var names []string
+						for _, p := range c.paths {
+							if after := strings.TrimPrefix(p, gpfx); after != p && after != "" {
+								names = append(names, after)
+							}
+						}
+						if len(names) == 0 {
+							return c.subject
+						}
+						// Extract verb: everything in the subject before the group path
+						verb := c.subject
+						if idx := strings.Index(c.subject, fn.groupPath); idx >= 0 {
+							verb = strings.TrimRight(c.subject[:idx], " ,")
+						}
+						if len(names) == 1 {
+							return verb + " " + names[0]
+						}
+						return verb + " (" + names[0] + ", +" + strconv.Itoa(len(names)-1) + " others...)"
+					}
+
+					for i, c := range commits {
+						bullet := "●"
+						if i == 0 {
+							bullet = "◉"
+						}
+						bar := "┃"
+						if i == len(commits)-1 {
+							bar = "┗"
+						}
+						statsStr := ""
+						if c.adds > 0 || c.dels > 0 {
+							statsStr = " " + dim + "[+" + strconv.Itoa(c.adds) + "/-" + strconv.Itoa(c.dels) + "]" + reset
+						}
+						line := fmt.Sprintf("%s%s %s %s%s%s (%s%s%s) %s%s",
+							prefix+cont, bar,
+							bullet,
+							yellow, c.hash, reset,
+							dim, c.date, reset,
+							shortenSubject(c),
+							statsStr)
+						fmt.Println(fitANSI(line, tw))
+					}
+					if !isLast {
+						fmt.Println(prefix + cont)
+					}
+				}
+
+				renderNode = func(pn *pathNode, prefix string, isLast bool) {
+					if !pn.isDir {
+						renderLeaf(pn, prefix, isLast)
+						return
+					}
+					connector := "├── "
+					cont := "│   "
+					if isLast {
+						connector = "└── "
+						cont = "    "
+					}
+					fmt.Printf("%s%s%s/\n", prefix, connector, pn.name)
+					for i, child := range pn.children {
+						renderNode(child, prefix+cont, i == len(pn.children)-1)
+					}
+				}
+
+				fmt.Println("/ (sysfig root)")
+				for i, child := range root.children {
+					renderNode(child, "", i == len(root.children)-1)
+				}
+				return nil
 			}
 
 			// Step 1: get list of commits.
@@ -100,6 +431,8 @@ Filter to a specific path or ID:
 				} else {
 					listArgs = append(listArgs, "--all", "--", filterPath)
 				}
+			} else if dirtyOnly {
+				listArgs = append(listArgs, dirtyBranches...)
 			} else if host := os.Getenv("SYSFIG_HOST"); host != "" {
 				// SYSFIG_HOST is set and no explicit filter: show only branches
 				// for files tracked from that host (remote/<hostname>/*).
@@ -122,8 +455,26 @@ Filter to a specific path or ID:
 					listArgs = append(listArgs, "--branches=remote/"+hostname+"/*")
 				}
 			} else {
-				// Show all branches merged into one timeline.
-				listArgs = append(listArgs, "--all")
+				// Show only branches of currently-tracked files so stale/orphan
+				// branches from previously-untracked files don't appear.
+				smAll := state.NewManager(filepath.Join(baseDir, "state.json"))
+				var allBranches []string
+				seenAll := map[string]bool{}
+				if sAll, err := smAll.Load(); err == nil {
+					for _, rec := range sAll.Files {
+						if rec.Branch != "" && !seenAll[rec.Branch] {
+							allBranches = append(allBranches, rec.Branch)
+							seenAll[rec.Branch] = true
+						}
+					}
+				}
+				if len(allBranches) > 0 {
+					listArgs = append(listArgs, allBranches...)
+				} else {
+					// Empty state — nothing to show.
+					info("No tracked files.")
+					return nil
+				}
 			}
 			if n > 0 {
 				listArgs = append(listArgs, fmt.Sprintf("-n%d", n))
@@ -160,24 +511,151 @@ Filter to a specific path or ID:
 				"\033[91m",  // bright red
 			}
 
-			// Pre-build hash→branch map by walking every track/* and manifest branch.
-			// This lets us assign a lane to every commit, not just branch tips.
-			hashToBranch := map[string]string{}
+			// branchLaneKey maps a branch ref to a path lane.
+			// Every distinct file/group gets its own lane; parent directories
+			// serve as virtual trunk lanes computed by laneParent().
+			//
+			// Examples:
+			//   track/etc/hostname              -> "etc/hostname"
+			//   track/etc/pacman.d              -> "etc/pacman.d"
+			//   track/home/aye7/dot-zshrc       -> "home/aye7"
+			//   track/tmp/sysfig-test/app       -> "tmp/sysfig-test/app"
+			//   track/tmp/sysfig-indiv/one.conf -> "tmp/sysfig-indiv/one.conf"
+			branchLaneKey := func(branch string) string {
+				if branch == "manifest" {
+					return "manifest"
+				}
+
+				kind := ""
+				rel := branch
+				switch {
+				case strings.HasPrefix(branch, "track/"):
+					kind = "track"
+					rel = strings.TrimPrefix(branch, "track/")
+				case strings.HasPrefix(branch, "local/"):
+					kind = "local"
+					rel = strings.TrimPrefix(branch, "local/")
+				case strings.HasPrefix(branch, "remote/"):
+					kind = "remote"
+					rel = strings.TrimPrefix(branch, "remote/")
+				default:
+					return branch
+				}
+
+				parts := strings.Split(rel, "/")
+				for i, p := range parts {
+					if strings.HasPrefix(p, "dot-") {
+						parts[i] = "." + p[4:]
+					}
+				}
+				if len(parts) == 0 {
+					return rel
+				}
+
+				if kind == "remote" {
+					// remote/<host>/<path...>
+					if len(parts) <= 1 {
+						return "remote"
+					}
+					host := parts[0]
+					pathParts := parts[1:]
+					switch {
+					case len(pathParts) >= 2 && pathParts[0] == "home":
+						return "remote/" + host + "/home/" + pathParts[1]
+					case len(pathParts) >= 3 && pathParts[0] == "tmp":
+						// tmp/<suite>/<child>
+						// If there is only one leaf file under tmp/<suite>, keep it on
+						// the suite lane; only branch when there is a child subtree.
+						if len(pathParts) >= 4 {
+							return "remote/" + host + "/tmp/" + pathParts[1] + "/" + pathParts[2]
+						}
+						return "remote/" + host + "/tmp/" + pathParts[1]
+					case len(pathParts) >= 3:
+						// /etc/pacman.d, /var/lib, /usr/local ...
+						return "remote/" + host + "/" + pathParts[0] + "/" + pathParts[1]
+					case len(pathParts) >= 1:
+						// plain file under root -> stay on root lane
+						return "remote/" + host + "/" + pathParts[0]
+					default:
+						return "remote/" + host
+					}
+				}
+
+				switch parts[0] {
+				case "home":
+					if len(parts) >= 2 {
+						return "home/" + parts[1]
+					}
+				case "tmp":
+					if len(parts) >= 3 {
+						return "tmp/" + parts[1] + "/" + parts[2]
+					}
+					if len(parts) >= 2 {
+						return "tmp/" + parts[1]
+					}
+				default:
+					// Each file/group gets its own lane so it branches from the
+					// root trunk (e.g. "etc/hostname" branches from "etc" trunk).
+					if len(parts) >= 2 {
+						return parts[0] + "/" + parts[1]
+					}
+				}
+				return parts[0]
+			}
+
+			laneParent := func(lk string) string {
+				if lk == "" || lk == "manifest" {
+					return ""
+				}
+				parts := strings.Split(lk, "/")
+				if len(parts) <= 1 {
+					return ""
+				}
+				if parts[0] == "remote" {
+					switch len(parts) {
+					case 2:
+						return ""
+					case 3:
+						return "remote/" + parts[1]
+					case 4:
+						return "remote/" + parts[1] + "/" + parts[2]
+					default:
+						return strings.Join(parts[:len(parts)-1], "/")
+					}
+				}
+				switch len(parts) {
+				case 2:
+					return parts[0]
+				default:
+					return strings.Join(parts[:len(parts)-1], "/")
+				}
+			}
+
+			// Pre-build hash→lane map by walking every relevant branch.
+			hashToLane := map[string]string{}
 			if graphMode {
 				branchListOut, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
 					"for-each-ref", "--format=%(refname:short)", "refs/heads/").Output()
 				for b := range strings.SplitSeq(strings.TrimSpace(string(branchListOut)), "\n") {
 					b = strings.TrimSpace(b)
-					if !strings.HasPrefix(b, "track/") && b != "manifest" {
+					if !strings.HasPrefix(b, "track/") &&
+						!strings.HasPrefix(b, "local/") &&
+						!strings.HasPrefix(b, "remote/") &&
+						b != "manifest" {
 						continue
 					}
+					lane := branchLaneKey(b)
 					commitListOut, _ := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
 						"log", b, "--format=%H").Output()
 					for h := range strings.SplitSeq(strings.TrimSpace(string(commitListOut)), "\n") {
 						h = strings.TrimSpace(h)
 						if h != "" {
-							if hashToBranch[h] == "" { hashToBranch[h] = b }
-							if len(h) >= 7 && hashToBranch[h[:7]] == "" { hashToBranch[h[:7]] = b }
+							if hashToLane[h] == "" {
+								hashToLane[h] = lane
+							}
+							if len(h) >= 7 && hashToLane[h[:7]] == "" {
+								hashToLane[h[:7]] = lane
+							}
 						}
 					}
 				}
@@ -286,7 +764,7 @@ Filter to a specific path or ID:
 					subject:    subject,
 					statLabel:  statLabel,
 					decoration: decoration,
-					branchName: hashToBranch[hash],
+					branchName: hashToLane[hash],
 				})
 			}
 
@@ -325,60 +803,55 @@ Filter to a specific path or ID:
 			}
 
 			if graphMode {
-				// Assign each branch a fixed lane (column), sorted for stability.
-				branchSet := map[string]bool{}
+				// Build a forest of lanes in first-seen order so the graph stays
+				// chronological while still showing parent/child path branches.
+				children := map[string][]string{}
+				seenLane := map[string]bool{}
+				var rootOrder []string
+				var addLane func(string)
+				addLane = func(lk string) {
+					if lk == "" || seenLane[lk] {
+						return
+					}
+					parent := laneParent(lk)
+					if parent != "" {
+						addLane(parent)
+						children[parent] = append(children[parent], lk)
+					} else {
+						rootOrder = append(rootOrder, lk)
+					}
+					seenLane[lk] = true
+				}
 				for _, r := range rows {
 					if r.branchName != "" {
-						branchSet[r.branchName] = true
+						addLane(r.branchName)
 					}
 				}
-				sortedBranches := make([]string, 0, len(branchSet))
-				for b := range branchSet {
-					sortedBranches = append(sortedBranches, b)
-				}
-				sort.Strings(sortedBranches)
 
-				branchLane := map[string]int{}
-				for li, b := range sortedBranches {
-					branchLane[b] = li
-				}
-
-				// shortTrack converts a branch ref to a human-readable file path.
-				// "track/home/aye7/dot-zshrc" → "home/aye7/.zshrc"
-				// "manifest" or "local/etc/fstab" → kept as-is
-				shortTrack := func(b string) string {
-					b = strings.TrimPrefix(b, "track/")
-					parts := strings.Split(b, "/")
-					for i, p := range parts {
-						if strings.HasPrefix(p, "dot-") {
-							parts[i] = "." + p[4:]
-						}
-					}
-					return strings.Join(parts, "/")
-				}
-
-				// Print legend: one row per lane, two columns side by side.
-				colW := tw/2 - 2
-				sep := dim + strings.Repeat("─", tw-1) + reset
-				fmt.Println(sep)
-				for i, b := range sortedBranches {
-					color := laneColors[i%len(laneColors)]
-					entry := color + "●" + reset + " " + shortTrack(b)
-					if i%2 == 0 {
-						fmt.Print("  " + padVisible(entry, colW))
-					} else {
-						fmt.Println(entry)
+				var sortedLanes []string
+				var walk func(string)
+				walk = func(lk string) {
+					sortedLanes = append(sortedLanes, lk)
+					for _, child := range children[lk] {
+						walk(child)
 					}
 				}
-				if len(sortedBranches)%2 != 0 {
-					fmt.Println()
+				for _, root := range rootOrder {
+					walk(root)
 				}
-				fmt.Println(sep)
 
-				// Lane activity: a lane shows │ between its first and last commit row.
+				laneIdx := map[string]int{}
+				for i, lk := range sortedLanes {
+					laneIdx[lk] = i
+				}
+
+				// Lane activity: a lane shows │ strictly between its OWN first
+				// and last commit rows. Parent spans are NOT extended by children —
+				// that would make the parent │ column persist after its own commits
+				// finish, which looks wrong.
 				firstRowOf := map[string]int{}
 				lastRowOf := map[string]int{}
-				tipOf := map[string]bool{} // branch → true for the first (newest) commit
+				tipOf := map[string]bool{}
 				for i, r := range rows {
 					if r.branchName == "" {
 						continue
@@ -390,30 +863,137 @@ Filter to a specific path or ID:
 					lastRowOf[r.branchName] = i
 				}
 
-				// buildPfx builds the lane prefix for a given row index and commit lane.
-				// Each lane is 1 char wide (no trailing space) — minimises graph width.
-				// A single space is appended at the end as separator from the commit info.
-				buildPfx := func(rowIdx, commitLane int) string {
-					var sb strings.Builder
-					for li, branch := range sortedBranches {
-						color := laneColors[li%len(laneColors)]
-						fst, seen := firstRowOf[branch]
-						lst := lastRowOf[branch]
-						switch {
-						case li == commitLane:
-							sym := "●"
-							if tipOf[branch] {
-								sym = "◉"
-								tipOf[branch] = false // only first occurrence is tip
-							}
-							sb.WriteString(color + sym + reset)
-						case seen && rowIdx >= fst && rowIdx <= lst:
-							sb.WriteString(color + "│" + reset)
-						default:
-							sb.WriteString(" ")
+				// fillSpan returns the row span of a lane including all its
+				// descendant lanes. Used both for the legend and for trunk rendering.
+				var fillSpan func(string) (int, int, bool)
+				fillSpan = func(lk string) (int, int, bool) {
+					first, last, ok := firstRowOf[lk], lastRowOf[lk], false
+					if _, has := firstRowOf[lk]; has {
+						ok = true
+					}
+					for _, child := range children[lk] {
+						cFirst, cLast, cOK := fillSpan(child)
+						if !cOK {
+							continue
+						}
+						if !ok || cFirst < first {
+							first = cFirst
+						}
+						if !ok || cLast > last {
+							last = cLast
+						}
+						ok = true
+					}
+					return first, last, ok
+				}
+				// tFirst/tLast: row span of each root trunk (encompassing all children).
+				tFirst := map[string]int{}
+				tLast := map[string]int{}
+				for _, root := range rootOrder {
+					f, l, ok := fillSpan(root)
+					if ok {
+						tFirst[root] = f
+						tLast[root] = l
+					}
+				}
+
+				// legend: one entry per lane, two columns wide.
+				{
+					sepW := min(tw-1, 72)
+					sep := dim + strings.Repeat("─", sepW) + reset
+					fmt.Println(sep)
+					// Derive colW from the separator width so that both columns
+					// together fit within the separator line and the legend doesn't
+					// sprawl across the full (possibly very wide) terminal.
+					colW := (sepW - 2) / 2
+					col := 0
+					for i, lk := range sortedLanes {
+						color := laneColors[i%len(laneColors)]
+						indent := strings.Repeat("  ", len(strings.Split(lk, "/"))-1)
+						label := "/" + strings.ReplaceAll(lk, "remote/", "@")
+						entry := color + "●" + reset + " " + indent + label
+						if col == 0 {
+							fmt.Print("  " + padVisible(entry, colW))
+							col = 1
+						} else {
+							fmt.Println(entry)
+							col = 0
 						}
 					}
-					sb.WriteString(" ") // separator
+					if col != 0 {
+						fmt.Println()
+					}
+					fmt.Println(sep)
+				}
+
+				// buildPfx — compact trunk-only graph.
+				//
+				// One 2-char column per ROOT lane (home, etc, manifest, …).
+				// The commit dot appears AFTER all root columns at a fixed position:
+				//
+				//   │   root active, no commit from this root this row
+				//       root not yet started or already finished
+				//   ╭─  root's first row in its span
+				//   ├─  root's middle row in its span
+				//   ╰─  root's last row in its span
+				//
+				// Then the dot: ◉ for the tip commit of a file lane, ● otherwise.
+				// This keeps the dot at column (2 × numActiveRoots) regardless of
+				// which root is committing — hashes always start at the same column.
+				buildPfx := func(rowIdx int, commitLane string) string {
+					var sb strings.Builder
+
+					// Walk up from commit lane to find its root trunk.
+					commitRoot := commitLane
+					if commitRoot != "" {
+						for laneParent(commitRoot) != "" {
+							commitRoot = laneParent(commitRoot)
+						}
+					}
+
+					for _, root := range rootOrder {
+						rFirst, ok := tFirst[root]
+						if !ok || rowIdx < rFirst || rowIdx > tLast[root] {
+							sb.WriteString("  ")
+							continue
+						}
+						rIdx := laneIdx[root]
+						rColor := laneColors[rIdx%len(laneColors)]
+
+						if root != commitRoot {
+							sb.WriteString(rColor + "│ " + reset)
+							continue
+						}
+
+						// Committing root — show the arc connector (joint + dash).
+						isFirst := rFirst == rowIdx
+						isLast := tLast[root] == rowIdx
+
+						var joint string
+						switch {
+						case isFirst:
+							joint = "╭"
+						case isLast:
+							joint = "╰"
+						default:
+							joint = "├"
+						}
+						sb.WriteString(rColor + joint + "─" + reset)
+					}
+
+					// Dot always after all root columns, colored by file lane.
+					if commitLane != "" {
+						cIdx := laneIdx[commitLane]
+						cColor := laneColors[cIdx%len(laneColors)]
+						dot := "●"
+						if tipOf[commitLane] {
+							dot = "◉"
+							tipOf[commitLane] = false
+						}
+						sb.WriteString(cColor + dot + reset)
+					}
+
+					sb.WriteString(" ")
 					return sb.String()
 				}
 
@@ -421,11 +1001,7 @@ Filter to a specific path or ID:
 					if r.connector != "" {
 						continue
 					}
-					commitLane := -1
-					if r.branchName != "" {
-						commitLane = branchLane[r.branchName]
-					}
-					printRow(buildPfx(i, commitLane), r.hash, r.date, r.pathLabel, r.subject, r.statLabel, r.decoration)
+					printRow(buildPfx(i, r.branchName), r.hash, r.date, r.pathLabel, r.subject, r.statLabel, r.decoration)
 				}
 			} else {
 				for _, r := range rows {
@@ -446,6 +1022,8 @@ Filter to a specific path or ID:
 	f.IntVarP(&n, "number", "n", 0, "limit to last N commits (0 = unlimited)")
 	f.BoolVar(&noRollbacks, "no-rollbacks", false, "hide rollback commits from output")
 	f.BoolVarP(&graphMode, "graph", "g", false, "show branch/merge graph (like git log --graph)")
+	f.BoolVarP(&treeMode, "tree", "t", false, "show file-centric tree view with per-file commit history")
+	f.BoolVarP(&dirtyOnly, "dirty", "d", false, "show only files with uncommitted changes")
 	return cmd
 }
 
@@ -726,4 +1304,3 @@ Examples:
 	f.BoolVar(&dryRun, "dry-run", false, "show what would happen without making changes")
 	return cmd
 }
-

@@ -245,6 +245,8 @@ sysfig deploy    bundle+ssh://backup@server/srv/conf.bundle
 | `sysfig snap take` | Take a point-in-time snapshot |
 | `sysfig doctor` | Check environment health |
 | `sysfig log` | Show commit history |
+| `sysfig log -g` | Chronological log with trunk/branch graph |
+| `sysfig log -t` | File-centric tree view with per-file history |
 
 ### Environment variables
 
