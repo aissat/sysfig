@@ -593,7 +593,7 @@ func SourceRender(opts RenderOptions) (*RenderResult, error) {
 			commitMsg := "sysfig: generate " + activation.Source
 			if err := gitCommitToBranch(repoDir, trackBranch, commitMsg, []BlobEntry{
 				{BlobHash: blobHash, RelPath: relPath},
-			}, 30*time.Second); err != nil {
+			}, nil, 30*time.Second); err != nil {
 				return nil, fmt.Errorf("source render: commit %s: %w", dest, err)
 			}
 			result.Rendered = append(result.Rendered, dest)

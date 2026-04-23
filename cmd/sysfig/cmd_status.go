@@ -204,7 +204,7 @@ func printStatusTable(results []core.FileStatusResult) (hasDiff bool) {
 				}
 				subName := filepath.Base(r.SystemPath)
 				if r.Status == core.StatusNew {
-					fmt.Printf("    %s\n", clrNew.Sprint(subName+"  → track required"))
+					fmt.Printf("    %s\n", clrNew.Sprint(subName+"  → new, run sync to commit"))
 					continue
 				}
 				fmt.Printf("    %s  %s\n",

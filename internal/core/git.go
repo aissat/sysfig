@@ -158,7 +158,6 @@ func gitCommit(repoDir, message string, timeout time.Duration) error {
 	return gitBareRun(repoDir, timeout, []string{"GIT_WORK_TREE=/"}, "commit", "-m", message)
 }
 
-
 // gitHashObject writes data to the bare repo's object store and returns the
 // 40-character blob SHA. Used to stage encrypted content without touching the
 // real filesystem at the canonical path.
@@ -209,10 +208,11 @@ type BlobEntry struct {
 // Steps:
 //  1. Temp index file: GIT_INDEX_FILE=<tmp> git read-tree --empty
 //  2. For each blob: git update-index --add --cacheinfo <mode>,<sha>,<path>
+//     2b. For each deletePath: git update-index --remove <path>
 //  3. git write-tree  → tree SHA (contains ONLY these blobs)
 //  4. git commit-tree → commit SHA (parent = current branch tip, if any)
 //  5. git update-ref  → advance refs/heads/<branch>
-func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, timeout time.Duration) error {
+func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, deletePaths []string, timeout time.Duration) error {
 	// Temporary index file — isolated per branch, safe for concurrent groups.
 	tmpIdx, err := os.CreateTemp(sysfigfs.SecureTempDir(), "sysfig-index-*")
 	if err != nil {
@@ -249,6 +249,68 @@ func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, timeo
 		if err := gitBareRun(repoDir, timeout, idxEnv,
 			"update-index", "--add", "--cacheinfo", cacheinfo); err != nil {
 			return fmt.Errorf("git update-index %s: %w", b.RelPath, err)
+		}
+	}
+
+	// 2b. Remove deleted files from the index.
+	// Use git ls-files --stage to read current index entries, filter out the
+	// deleted paths, rebuild the index from scratch using --cacheinfo (which
+	// is path-resolution-free and works reliably in bare repos).
+	if len(deletePaths) > 0 {
+		deleteSet := make(map[string]bool, len(deletePaths))
+		for _, dp := range deletePaths {
+			deleteSet[dp] = true
+		}
+
+		// Dump current index entries: "<mode> <sha> <stage>\t<path>"
+		lsOut, err := gitBareOutput(repoDir, timeout, idxEnv, "ls-files", "--stage")
+		if err != nil {
+			return fmt.Errorf("git ls-files --stage: %w", err)
+		}
+
+		// Clear the index.
+		if err := gitBareRun(repoDir, timeout, idxEnv, "read-tree", "--empty"); err != nil {
+			return fmt.Errorf("git read-tree --empty (rebuild): %w", err)
+		}
+
+		// Re-add every entry except deleted ones.
+		for _, line := range strings.Split(strings.TrimSpace(string(lsOut)), "\n") {
+			if line == "" {
+				continue
+			}
+			// Format: "<mode> <sha> <stage>\t<path>"
+			tab := strings.IndexByte(line, '\t')
+			if tab < 0 {
+				continue
+			}
+			entryPath := line[tab+1:]
+			if deleteSet[entryPath] {
+				continue // omit deleted file
+			}
+			fields := strings.Fields(line[:tab])
+			if len(fields) < 2 {
+				continue
+			}
+			mode, sha := fields[0], fields[1]
+			cacheinfo := mode + "," + sha + "," + entryPath
+			if err := gitBareRun(repoDir, timeout, idxEnv,
+				"update-index", "--add", "--cacheinfo", cacheinfo); err != nil {
+				return fmt.Errorf("git update-index (rebuild) %s: %w", entryPath, err)
+			}
+		}
+
+		// Re-add the new blobs on top (they were added in step 2 but the
+		// index was just cleared; add them again).
+		for _, b := range blobs {
+			mode := b.Mode
+			if mode == "" {
+				mode = "100644"
+			}
+			cacheinfo := fmt.Sprintf("%s,%s,%s", mode, b.BlobHash, b.RelPath)
+			if err := gitBareRun(repoDir, timeout, idxEnv,
+				"update-index", "--add", "--cacheinfo", cacheinfo); err != nil {
+				return fmt.Errorf("git update-index (re-add blob) %s: %w", b.RelPath, err)
+			}
 		}
 	}
 

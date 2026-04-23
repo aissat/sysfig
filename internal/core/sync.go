@@ -200,6 +200,7 @@ type SyncResult struct {
 	Pushed             bool             // true if push was attempted and succeeded
 	Message            string           // message of the last commit
 	CommittedFiles     []string         // repo-relative paths committed in this sync
+	DeletedFiles       []string         // system paths removed from git tree (file deleted on disk)
 	UpdatedFiles       []string         // IDs of files whose state hash was refreshed
 	NodeWarnings       []string         // non-fatal warnings from invalid node public keys
 	SkippedSourceFiles []string         // system paths skipped because they are source-managed
@@ -214,6 +215,7 @@ type SyncResult struct {
 //	"sysfig: update home/aye7/.zshrc"
 //	"sysfig: update etc/pacman.d, home/aye7"
 //	"sysfig: sync 3 directories"  (when more than 2)
+//
 // BuildSyncMessage is the exported wrapper for buildSyncMessage, used in tests.
 func BuildSyncMessage(repoDir string) string { return buildSyncMessage(repoDir) }
 
@@ -312,12 +314,38 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		contentHash string // BLAKE3 of the plaintext content (pre-encryption); used for remote files
 	}
 
+	// deletedEntry holds a file that is tracked but no longer exists on disk.
+	// These are committed as deletions (removed from the git tree).
+	type deletedEntry struct {
+		id      string
+		rec     *types.FileRecord
+		relPath string
+	}
+
 	// Step 1: read all file data and skip unchanged files.
 	// Group by rec.Group (set when tracked as a directory) so that all files
 	// from the same directory land in one commit. Individually tracked files
 	// (empty Group) each get their own commit — keyed by their unique ID.
-	groups := map[string][]fileEntry{} // key = group dir path or file ID
-	var groupOrder []string            // preserve insertion order for deterministic commits
+	groups := map[string][]fileEntry{}            // key = group dir path or file ID
+	groupDeletions := map[string][]deletedEntry{} // key = same group key; files missing from disk
+	var groupOrder []string                       // preserve insertion order for deterministic commits
+
+	// recordDeletion adds a missing-on-disk file to groupDeletions and ensures
+	// its groupKey appears in groupOrder exactly once.
+	recordDeletion := func(id string, rec *types.FileRecord, relPath string) {
+		gk := rec.Group
+		if gk == "" {
+			gk = id
+		} else if rec.Remote != "" {
+			gk = RepoRemotePrefix(rec.Remote) + ":" + gk
+		}
+		if _, inGroups := groups[gk]; !inGroups {
+			if _, inDels := groupDeletions[gk]; !inDels {
+				groupOrder = append(groupOrder, gk)
+			}
+		}
+		groupDeletions[gk] = append(groupDeletions[gk], deletedEntry{id: id, rec: rec, relPath: relPath})
+	}
 
 	// Build a quick lookup set for FileIDs filter.
 	fileIDSet := make(map[string]bool, len(opts.FileIDs))
@@ -437,6 +465,10 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			}
 		} else if rec.Encrypt {
 			plaintext, err := os.ReadFile(sysPath)
+			if os.IsNotExist(err) {
+				recordDeletion(id, rec, relPath)
+				continue
+			}
 			if err != nil {
 				continue
 			}
@@ -453,6 +485,10 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			data = encrypted
 		} else {
 			d, err := os.ReadFile(sysPath)
+			if os.IsNotExist(err) {
+				recordDeletion(id, rec, relPath)
+				continue
+			}
 			if err != nil {
 				continue
 			}
@@ -504,7 +540,10 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			groupKey = RepoRemotePrefix(rec.Remote) + ":" + groupKey
 		}
 		if _, exists := groups[groupKey]; !exists {
-			groupOrder = append(groupOrder, groupKey)
+			// Only append to groupOrder if not already added by recordDeletion.
+			if _, hasDel := groupDeletions[groupKey]; !hasDel {
+				groupOrder = append(groupOrder, groupKey)
+			}
 		}
 		groups[groupKey] = append(groups[groupKey], fileEntry{id, rec, relPath, sysPath, data, "", remoteContentHash})
 	}
@@ -512,6 +551,7 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 	// Step 2: for each group, stage all files then create ONE commit.
 	for _, groupKey := range groupOrder {
 		entries := groups[groupKey]
+		delEntries := groupDeletions[groupKey]
 
 		// Hash all blobs for this group (writes to object store, no index touch).
 		blobs := make([]BlobEntry, 0, len(entries))
@@ -524,33 +564,58 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			blobs = append(blobs, BlobEntry{BlobHash: blobHash, RelPath: entries[i].relPath})
 		}
 
-		// Build commit message.
-		groupMsg := msg
-		if groupMsg == "" {
-			paths := make([]string, len(entries))
-			for i, e := range entries {
-				paths[i] = e.relPath
-			}
-			relGroupKey := strings.TrimPrefix(groupKey, "/")
-			if len(paths) == 1 {
-				groupMsg = "sysfig: update " + paths[0]
-			} else {
-				groupMsg = "sysfig: update " + relGroupKey + " (" + strings.Join(paths, ", ") + ")"
-			}
+		// Collect repo-relative paths for files deleted from disk.
+		delPaths := make([]string, len(delEntries))
+		for i, de := range delEntries {
+			delPaths[i] = de.relPath
 		}
 
 		// Determine which branch this group commits to.
-		groupBranch := entries[0].rec.Branch
-		if groupBranch == "" {
-			if entries[0].rec.Group != "" {
-				groupBranch = "track/" + strings.TrimPrefix(entries[0].rec.Group, "/")
-			} else {
-				groupBranch = "track/" + entries[0].relPath
+		// Prefer live entries; fall back to deletion records for deletion-only groups.
+		var groupBranch string
+		if len(entries) > 0 {
+			groupBranch = entries[0].rec.Branch
+			if groupBranch == "" {
+				if entries[0].rec.Group != "" {
+					groupBranch = "track/" + strings.TrimPrefix(entries[0].rec.Group, "/")
+				} else {
+					groupBranch = "track/" + entries[0].relPath
+				}
+			}
+		} else {
+			// deletion-only group
+			groupBranch = delEntries[0].rec.Branch
+			if groupBranch == "" {
+				if delEntries[0].rec.Group != "" {
+					groupBranch = "track/" + strings.TrimPrefix(delEntries[0].rec.Group, "/")
+				} else {
+					groupBranch = "track/" + delEntries[0].relPath
+				}
 			}
 		}
 
-		// Commit using isolated index — only these blobs, no shared index state.
-		commitErr := gitCommitToBranch(repoDir, groupBranch, groupMsg, blobs, 30*time.Second)
+		// Build commit message.
+		groupMsg := msg
+		if groupMsg == "" {
+			if len(entries) == 0 {
+				// Deletion-only: report removed paths.
+				groupMsg = "sysfig: remove " + strings.Join(delPaths, ", ")
+			} else {
+				paths := make([]string, len(entries))
+				for i, e := range entries {
+					paths[i] = e.relPath
+				}
+				relGroupKey := strings.TrimPrefix(groupKey, "/")
+				if len(paths) == 1 && len(delPaths) == 0 {
+					groupMsg = "sysfig: update " + paths[0]
+				} else {
+					groupMsg = "sysfig: update " + relGroupKey + " (" + strings.Join(paths, ", ") + ")"
+				}
+			}
+		}
+
+		// Commit using isolated index — blobs are added, delPaths are removed.
+		commitErr := gitCommitToBranch(repoDir, groupBranch, groupMsg, blobs, delPaths, 30*time.Second)
 		if commitErr != nil {
 			return nil, fmt.Errorf("core: sync: commit %q: %w", groupKey, commitErr)
 		}
@@ -601,6 +666,16 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 				return nil
 			})
 		}
+
+		// Untrack files that were deleted from disk.
+		for _, de := range delEntries {
+			deCopy := de
+			_ = sm.WithLock(func(s *types.State) error {
+				delete(s.Files, deCopy.id)
+				return nil
+			})
+			result.DeletedFiles = append(result.DeletedFiles, deCopy.rec.SystemPath)
+		}
 	}
 
 	// Update sysfig.yaml manifest on the "manifest" branch if it changed.
@@ -611,7 +686,7 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 				if blobHash, err := syncHashBlob(repoDir, manifestData); err == nil {
 					_ = gitCommitToBranch(repoDir, "manifest", "sysfig: update manifest",
 						[]BlobEntry{{BlobHash: blobHash, RelPath: "sysfig.yaml"}},
-						30*time.Second)
+						nil, 30*time.Second)
 				}
 			}
 		}

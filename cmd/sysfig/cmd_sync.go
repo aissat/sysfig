@@ -188,6 +188,9 @@ Use --pull to fetch remote changes first (full round-trip with --push):
 			for _, f := range result.CommittedFiles {
 				ok("Committed: %s", clrBold.Sprint(f))
 			}
+			for _, f := range result.DeletedFiles {
+				ok("Removed:   %s", clrBold.Sprint(f))
+			}
 			ok("Repo:      %s", clrDim.Sprint(result.RepoDir))
 			if result.Pushed {
 				ok("Pushed to remote.")
@@ -262,4 +265,3 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().StringVar(&baseDir, "base-dir", "", "directory where sysfig stores its data")
 	return cmd
 }
-
