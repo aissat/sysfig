@@ -1,10 +1,19 @@
 package core_test
 
 // sync_group_test.go — tests for group-tracked directory lifecycle:
+//
 //   - CREATE: new file added to group dir is committed on the shared branch
 //   - UPDATE: existing group file content change is committed
 //   - DELETE: group file deleted from disk is removed from git tree and
 //             untracked from state.json in the same commit
+//   - TWO GROUPS: two separate group dirs each land on their own branch in one
+//     Sync call, with no cross-contamination between branches
+//   - NO-OP: a second Sync with no content change produces no commit; a third
+//     Sync after modifying one file commits again
+//
+// All tests that exercise group directories use t.TempDir() for both the
+// "system root" (files on disk) and the bare git repo, so they are fully
+// hermetic and leave no state in /tmp or the real filesystem.
 
 import (
 	"os"
@@ -358,6 +367,137 @@ func TestSync_Group_MixedUpdateAndDelete(t *testing.T) {
 	require.NoError(t, err, "git log must succeed")
 	lines := splitLines(string(logOut))
 	assert.Equal(t, 2, len(lines), "update+delete must produce exactly one new commit on the group branch")
+}
+
+// ── TestSync_TwoGroupsInOneSync ───────────────────────────────────────────────
+
+// TestSync_TwoGroupsInOneSync verifies that two separate group directories
+// tracked in the same state.json are each committed on their own branch in a
+// single Sync call, and that files from one group never appear on the other
+// group's branch.
+//
+// Real-world scenario: a user tracks both /etc/svc-a and /etc/svc-b as group
+// directories (e.g. two different services).  Running `sysfig sync` once must
+// create track/etc/svc-a and track/etc/svc-b as independent branches — files
+// from svc-a must never leak into the svc-b branch and vice versa.
+//
+// All paths are under t.TempDir() so the test is fully hermetic.
+func TestSync_TwoGroupsInOneSync(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	sysRoot := t.TempDir()
+
+	// Group A: /etc/svc-a
+	svcADir := filepath.Join(sysRoot, "etc", "svc-a")
+	require.NoError(t, os.MkdirAll(svcADir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(svcADir, "a1.conf"), []byte("a1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(svcADir, "a2.conf"), []byte("a2\n"), 0o644))
+
+	// Group B: /etc/svc-b
+	svcBDir := filepath.Join(sysRoot, "etc", "svc-b")
+	require.NoError(t, os.MkdirAll(svcBDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(svcBDir, "b1.conf"), []byte("b1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(svcBDir, "b2.conf"), []byte("b2\n"), 0o644))
+
+	idA1 := core.DeriveID("/etc/svc-a/a1.conf")
+	idA2 := core.DeriveID("/etc/svc-a/a2.conf")
+	idB1 := core.DeriveID("/etc/svc-b/b1.conf")
+	idB2 := core.DeriveID("/etc/svc-b/b2.conf")
+	writeStateMulti(t, baseDir, [][4]string{
+		{idA1, "/etc/svc-a/a1.conf", "etc/svc-a/a1.conf", "/etc/svc-a"},
+		{idA2, "/etc/svc-a/a2.conf", "etc/svc-a/a2.conf", "/etc/svc-a"},
+		{idB1, "/etc/svc-b/b1.conf", "etc/svc-b/b1.conf", "/etc/svc-b"},
+		{idB2, "/etc/svc-b/b2.conf", "etc/svc-b/b2.conf", "/etc/svc-b"},
+	})
+
+	result, err := core.Sync(core.SyncOptions{
+		BaseDir: baseDir,
+		Message: "test: two groups",
+		SysRoot: sysRoot,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Committed, "sync must commit when two groups have new files")
+
+	repoDir := filepath.Join(baseDir, "repo.git")
+	branchA := "track/etc/svc-a"
+	branchB := "track/etc/svc-b"
+
+	// Both group branches must be created.
+	assert.True(t, gitBranchExists(t, repoDir, branchA), "group A branch must be created")
+	assert.True(t, gitBranchExists(t, repoDir, branchB), "group B branch must be created")
+
+	// Branch A must contain only A's files.
+	assert.True(t, gitFileExistsOnBranch(t, repoDir, branchA, "etc/svc-a/a1.conf"))
+	assert.True(t, gitFileExistsOnBranch(t, repoDir, branchA, "etc/svc-a/a2.conf"))
+	assert.False(t, gitFileExistsOnBranch(t, repoDir, branchA, "etc/svc-b/b1.conf"),
+		"branch A must not contain group B files")
+
+	// Branch B must contain only B's files.
+	assert.True(t, gitFileExistsOnBranch(t, repoDir, branchB, "etc/svc-b/b1.conf"))
+	assert.True(t, gitFileExistsOnBranch(t, repoDir, branchB, "etc/svc-b/b2.conf"))
+	assert.False(t, gitFileExistsOnBranch(t, repoDir, branchB, "etc/svc-a/a1.conf"),
+		"branch B must not contain group A files")
+}
+
+// ── TestSync_GroupNoOp ────────────────────────────────────────────────────────
+
+// TestSync_GroupNoOp verifies that syncing a group directory twice without
+// changing any file content does NOT produce a second commit.  A third sync
+// after modifying one file must commit again.
+//
+// Real-world scenario: `sysfig sync` is run on a schedule (e.g. via a systemd
+// timer).  When nothing has changed on disk the command must be a no-op — no
+// spurious commits, no git history noise.  When a config file is edited
+// between two timer ticks the next sync must pick up the change.
+//
+// Uses core.Track (rather than writeStateMulti) so that rec.Branch is
+// populated; the content-equal guard in Sync uses rec.Branch to look up the
+// last committed content and must short-circuit when nothing changed.
+// The group directory is a t.TempDir() — fully hermetic, no writes to /etc.
+func TestSync_GroupNoOp(t *testing.T) {
+	requireGitSync(t)
+	baseDir := initBareLocalRepo(t)
+	repoDir := filepath.Join(baseDir, "repo.git")
+
+	// Use a real tempdir as the group directory (no SysRoot, same as
+	// TestSync_AutoTrackNewInGroupDir) so Track sets SystemPath correctly.
+	groupDir := t.TempDir()
+	file1 := filepath.Join(groupDir, "f1.conf")
+	file2 := filepath.Join(groupDir, "f2.conf")
+	require.NoError(t, os.WriteFile(file1, []byte("content1\n"), 0o644))
+	require.NoError(t, os.WriteFile(file2, []byte("content2\n"), 0o644))
+
+	// Track both files — this sets rec.Branch on each record.
+	_, err := core.Track(core.TrackOptions{
+		SystemPath: file1,
+		RepoDir:    repoDir,
+		StateDir:   baseDir,
+		Group:      groupDir,
+	})
+	require.NoError(t, err)
+	_, err = core.Track(core.TrackOptions{
+		SystemPath: file2,
+		RepoDir:    repoDir,
+		StateDir:   baseDir,
+		Group:      groupDir,
+	})
+	require.NoError(t, err)
+
+	// First sync — files are new → must commit.
+	r1, err := core.Sync(core.SyncOptions{BaseDir: baseDir, Message: "test: initial"})
+	require.NoError(t, err)
+	assert.True(t, r1.Committed, "first sync must commit new group files")
+
+	// Second sync — content unchanged → must NOT produce a new commit.
+	r2, err := core.Sync(core.SyncOptions{BaseDir: baseDir, Message: "test: no-op"})
+	require.NoError(t, err)
+	assert.False(t, r2.Committed, "unchanged group files must not produce a second commit")
+
+	// Modify one file, then sync — must commit again.
+	require.NoError(t, os.WriteFile(file1, []byte("modified\n"), 0o644))
+	r3, err := core.Sync(core.SyncOptions{BaseDir: baseDir, Message: "test: after change"})
+	require.NoError(t, err)
+	assert.True(t, r3.Committed, "changed group file must trigger a new commit")
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
