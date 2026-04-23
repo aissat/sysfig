@@ -739,10 +739,8 @@ func RunSourceHooks(baseDir string, profiles []string) []error {
 			continue
 		}
 		sourceName, profileName := parts[0], parts[1]
-		sourceRepoDir := filepath.Join(baseDir, "sources", sourceName, "repo.git")
 		profile, err := ReadProfileYAML(baseDir, sourceName, profileName)
 		if err != nil || len(profile.Hooks.PostApply) == 0 {
-			_ = sourceRepoDir
 			continue
 		}
 		errs = append(errs, runProfileHooks(profile.Hooks.PostApply)...)

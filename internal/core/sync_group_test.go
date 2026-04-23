@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aissat/sysfig/internal/core"
@@ -207,8 +208,9 @@ func TestSync_Group_Delete(t *testing.T) {
 		"gtk.css (not deleted) must remain in git tree")
 
 	// (b) There must be at least one commit after the initial one.
-	logOut, _ := exec.Command("git", "--git-dir="+repoDir,
+	logOut, err := exec.Command("git", "--git-dir="+repoDir,
 		"log", "--oneline", groupBranch).Output()
+	require.NoError(t, err, "git log must succeed")
 	lines := splitLines(string(logOut))
 	assert.GreaterOrEqual(t, len(lines), 2, "group branch must have a deletion commit")
 
@@ -351,8 +353,9 @@ func TestSync_Group_MixedUpdateAndDelete(t *testing.T) {
 	assert.Contains(t, result.DeletedFiles, "/etc/mixed/drop.conf")
 
 	// Both changes landed in a single commit (one extra commit on top of initial).
-	logOut, _ := exec.Command("git", "--git-dir="+repoDir,
+	logOut, err := exec.Command("git", "--git-dir="+repoDir,
 		"log", "--oneline", groupBranch).Output()
+	require.NoError(t, err, "git log must succeed")
 	lines := splitLines(string(logOut))
 	assert.Equal(t, 2, len(lines), "update+delete must produce exactly one new commit on the group branch")
 }
@@ -362,20 +365,7 @@ func TestSync_Group_MixedUpdateAndDelete(t *testing.T) {
 // splitLines splits s on newlines and drops empty lines.
 func splitLines(s string) []string {
 	var out []string
-	for _, l := range func() []string {
-		result := []string{}
-		start := 0
-		for i, c := range s {
-			if c == '\n' {
-				result = append(result, s[start:i])
-				start = i + 1
-			}
-		}
-		if start < len(s) {
-			result = append(result, s[start:])
-		}
-		return result
-	}() {
+	for _, l := range strings.Split(s, "\n") {
 		if l != "" {
 			out = append(out, l)
 		}

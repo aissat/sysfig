@@ -205,6 +205,7 @@ type SyncResult struct {
 	NodeWarnings       []string         // non-fatal warnings from invalid node public keys
 	SkippedSourceFiles []string         // system paths skipped because they are source-managed
 	RemoteFetchErrors  map[string]error // system path → error for remote files that couldn't be fetched
+	ReadErrors         map[string]error // system path → error for files that could not be read (non-ENOENT)
 }
 
 // buildSyncMessage inspects the git index to produce a meaningful commit
@@ -263,6 +264,19 @@ func buildSyncMessage(repoDir string) string {
 //	Sync (commit) is always local. Pushing is opt-in. This means you can
 //	run `sysfig sync` on an air-gapped machine and the commit is recorded
 //	locally. Run `sysfig push` (or `sysfig sync --push`) when online.
+//
+// determineBranch returns the git branch name for a file record.
+// Priority: rec.Branch → "track/"+rec.Group → "track/"+relPath.
+func determineBranch(rec *types.FileRecord, relPath string) string {
+	if rec.Branch != "" {
+		return rec.Branch
+	}
+	if rec.Group != "" {
+		return "track/" + strings.TrimPrefix(rec.Group, "/")
+	}
+	return "track/" + relPath
+}
+
 func Sync(opts SyncOptions) (*SyncResult, error) {
 	if opts.BaseDir == "" {
 		return nil, fmt.Errorf("core: sync: BaseDir must not be empty")
@@ -273,8 +287,10 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 	msg := opts.Message
 
 	result := &SyncResult{
-		RepoDir: repoDir,
-		Message: msg,
+		RepoDir:           repoDir,
+		Message:           msg,
+		RemoteFetchErrors: map[string]error{},
+		ReadErrors:        map[string]error{},
 	}
 
 	// Optional pull before committing local changes.
@@ -470,6 +486,7 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 				continue
 			}
 			if err != nil {
+				result.ReadErrors[sysPath] = err
 				continue
 			}
 			keysDir := filepath.Join(opts.BaseDir, "keys")
@@ -490,6 +507,7 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 				continue
 			}
 			if err != nil {
+				result.ReadErrors[sysPath] = err
 				continue
 			}
 			data = d
@@ -574,24 +592,10 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 		// Prefer live entries; fall back to deletion records for deletion-only groups.
 		var groupBranch string
 		if len(entries) > 0 {
-			groupBranch = entries[0].rec.Branch
-			if groupBranch == "" {
-				if entries[0].rec.Group != "" {
-					groupBranch = "track/" + strings.TrimPrefix(entries[0].rec.Group, "/")
-				} else {
-					groupBranch = "track/" + entries[0].relPath
-				}
-			}
+			groupBranch = determineBranch(entries[0].rec, entries[0].relPath)
 		} else {
 			// deletion-only group
-			groupBranch = delEntries[0].rec.Branch
-			if groupBranch == "" {
-				if delEntries[0].rec.Group != "" {
-					groupBranch = "track/" + strings.TrimPrefix(delEntries[0].rec.Group, "/")
-				} else {
-					groupBranch = "track/" + delEntries[0].relPath
-				}
-			}
+			groupBranch = determineBranch(delEntries[0].rec, delEntries[0].relPath)
 		}
 
 		// Build commit message.
@@ -610,6 +614,9 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 					groupMsg = "sysfig: update " + paths[0]
 				} else {
 					groupMsg = "sysfig: update " + relGroupKey + " (" + strings.Join(paths, ", ") + ")"
+				}
+				if len(delPaths) > 0 {
+					groupMsg += " (removed: " + strings.Join(delPaths, ", ") + ")"
 				}
 			}
 		}
@@ -667,14 +674,17 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			})
 		}
 
-		// Untrack files that were deleted from disk.
-		for _, de := range delEntries {
-			deCopy := de
+		// Untrack files that were deleted from disk — single lock acquisition.
+		if len(delEntries) > 0 {
 			_ = sm.WithLock(func(s *types.State) error {
-				delete(s.Files, deCopy.id)
+				for _, de := range delEntries {
+					delete(s.Files, de.id)
+				}
 				return nil
 			})
-			result.DeletedFiles = append(result.DeletedFiles, deCopy.rec.SystemPath)
+			for _, de := range delEntries {
+				result.DeletedFiles = append(result.DeletedFiles, de.rec.SystemPath)
+			}
 		}
 	}
 

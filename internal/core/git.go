@@ -192,6 +192,23 @@ func gitUpdateIndex(repoDir, mode, blobHash, relPath string, timeout time.Durati
 	)
 }
 
+// addBlobsToIndex adds each blob to the isolated index using --cacheinfo
+// (path-resolution-free; works in bare repos without GIT_WORK_TREE).
+func addBlobsToIndex(repoDir string, blobs []BlobEntry, idxEnv []string, timeout time.Duration) error {
+	for _, b := range blobs {
+		mode := b.Mode
+		if mode == "" {
+			mode = "100644"
+		}
+		cacheinfo := fmt.Sprintf("%s,%s,%s", mode, b.BlobHash, b.RelPath)
+		if err := gitBareRun(repoDir, timeout, idxEnv,
+			"update-index", "--add", "--cacheinfo", cacheinfo); err != nil {
+			return fmt.Errorf("git update-index %s: %w", b.RelPath, err)
+		}
+	}
+	return nil
+}
+
 // BlobEntry describes one file to include in a gitCommitToBranch call.
 type BlobEntry struct {
 	BlobHash string // 40-char SHA from git hash-object
@@ -208,7 +225,7 @@ type BlobEntry struct {
 // Steps:
 //  1. Temp index file: GIT_INDEX_FILE=<tmp> git read-tree --empty
 //  2. For each blob: git update-index --add --cacheinfo <mode>,<sha>,<path>
-//     2b. For each deletePath: git update-index --remove <path>
+//     2b. Deletions: dump index via ls-files --stage, filter out deleted paths, rebuild index from scratch
 //  3. git write-tree  → tree SHA (contains ONLY these blobs)
 //  4. git commit-tree → commit SHA (parent = current branch tip, if any)
 //  5. git update-ref  → advance refs/heads/<branch>
@@ -240,16 +257,8 @@ func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, delet
 	}
 
 	// 2. Add each blob to the isolated index (overwrites existing entries for the same path).
-	for _, b := range blobs {
-		mode := b.Mode
-		if mode == "" {
-			mode = "100644"
-		}
-		cacheinfo := fmt.Sprintf("%s,%s,%s", mode, b.BlobHash, b.RelPath)
-		if err := gitBareRun(repoDir, timeout, idxEnv,
-			"update-index", "--add", "--cacheinfo", cacheinfo); err != nil {
-			return fmt.Errorf("git update-index %s: %w", b.RelPath, err)
-		}
+	if err := addBlobsToIndex(repoDir, blobs, idxEnv, timeout); err != nil {
+		return err
 	}
 
 	// 2b. Remove deleted files from the index.
@@ -301,16 +310,8 @@ func gitCommitToBranch(repoDir, branch, message string, blobs []BlobEntry, delet
 
 		// Re-add the new blobs on top (they were added in step 2 but the
 		// index was just cleared; add them again).
-		for _, b := range blobs {
-			mode := b.Mode
-			if mode == "" {
-				mode = "100644"
-			}
-			cacheinfo := fmt.Sprintf("%s,%s,%s", mode, b.BlobHash, b.RelPath)
-			if err := gitBareRun(repoDir, timeout, idxEnv,
-				"update-index", "--add", "--cacheinfo", cacheinfo); err != nil {
-				return fmt.Errorf("git update-index (re-add blob) %s: %w", b.RelPath, err)
-			}
+		if err := addBlobsToIndex(repoDir, blobs, idxEnv, timeout); err != nil {
+			return err
 		}
 	}
 
