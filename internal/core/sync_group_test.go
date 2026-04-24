@@ -94,52 +94,52 @@ func TestSync_Group_Create(t *testing.T) {
 
 // TestSync_Group_Update verifies that modifying the content of a group-tracked
 // file produces a new commit on the group branch with the updated content.
+//
+// Uses t.TempDir() as the group directory (no SysRoot) so the auto-track
+// walker in Sync only scans the hermetic temp tree — never a real /etc path
+// that might exist on the CI runner (e.g. /etc/nginx is installed on Ubuntu).
+// core.Track is used instead of writeStateMulti so that rec.Branch is
+// populated and the content-equal guard can find the last committed content.
 func TestSync_Group_Update(t *testing.T) {
 	requireGitSync(t)
 	baseDir := initBareLocalRepo(t)
-	sysRoot := t.TempDir()
+	repoDir := filepath.Join(baseDir, "repo.git")
 
-	groupDir := "/etc/nginx"
-	nginxDir := filepath.Join(sysRoot, "etc", "nginx")
-	require.NoError(t, os.MkdirAll(nginxDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(nginxDir, "nginx.conf"), []byte("v1\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(nginxDir, "mime.types"), []byte("types{}\n"), 0o644))
+	groupDir := t.TempDir()
+	file1 := filepath.Join(groupDir, "nginx.conf")
+	file2 := filepath.Join(groupDir, "mime.types")
+	require.NoError(t, os.WriteFile(file1, []byte("v1\n"), 0o644))
+	require.NoError(t, os.WriteFile(file2, []byte("types{}\n"), 0o644))
 
-	id1 := core.DeriveID("/etc/nginx/nginx.conf")
-	id2 := core.DeriveID("/etc/nginx/mime.types")
-	writeStateMulti(t, baseDir, [][4]string{
-		{id1, "/etc/nginx/nginx.conf", "etc/nginx/nginx.conf", groupDir},
-		{id2, "/etc/nginx/mime.types", "etc/nginx/mime.types", groupDir},
-	})
+	// Track both files so rec.Branch is set in state.json.
+	r1, err := core.Track(core.TrackOptions{SystemPath: file1, RepoDir: repoDir, StateDir: baseDir, Group: groupDir})
+	require.NoError(t, err)
+	_, err = core.Track(core.TrackOptions{SystemPath: file2, RepoDir: repoDir, StateDir: baseDir, Group: groupDir})
+	require.NoError(t, err)
+
+	groupBranch := r1.Branch // e.g. "track/tmp/TestSync_Group_Update…"
+	relPath1 := strings.TrimPrefix(file1, "/")
+	relPath2 := strings.TrimPrefix(file2, "/")
 
 	// First sync — commit initial content.
-	_, err := core.Sync(core.SyncOptions{
-		BaseDir: baseDir,
-		Message: "test: initial nginx",
-		SysRoot: sysRoot,
-	})
+	_, err = core.Sync(core.SyncOptions{BaseDir: baseDir, Message: "test: initial nginx"})
 	require.NoError(t, err)
 
 	// Modify nginx.conf content.
-	require.NoError(t, os.WriteFile(filepath.Join(nginxDir, "nginx.conf"), []byte("v2\n"), 0o644))
+	require.NoError(t, os.WriteFile(file1, []byte("v2\n"), 0o644))
 
 	// Second sync — must commit the update.
-	result, err := core.Sync(core.SyncOptions{
-		BaseDir: baseDir,
-		Message: "test: update nginx.conf",
-		SysRoot: sysRoot,
-	})
+	result, err := core.Sync(core.SyncOptions{BaseDir: baseDir, Message: "test: update nginx.conf"})
 	require.NoError(t, err)
 	require.True(t, result.Committed, "sync must create a commit when group file content changes")
 
 	// Updated content must be in the repo.
-	repoDir := filepath.Join(baseDir, "repo.git")
-	content, err := gitBlobContent(t, repoDir, "track/etc/nginx", "etc/nginx/nginx.conf")
+	content, err := gitBlobContent(t, repoDir, groupBranch, relPath1)
 	require.NoError(t, err)
 	assert.Equal(t, "v2\n", string(content), "repo must contain updated nginx.conf content")
 
 	// mime.types was not changed — it must still exist on the branch.
-	assert.True(t, gitFileExistsOnBranch(t, repoDir, "track/etc/nginx", "etc/nginx/mime.types"),
+	assert.True(t, gitFileExistsOnBranch(t, repoDir, groupBranch, relPath2),
 		"unchanged mime.types must still be present on branch after update commit")
 
 	assert.Empty(t, result.DeletedFiles, "no files should be deleted in update scenario")
