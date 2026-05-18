@@ -58,7 +58,7 @@ func TestFileMeta_OmitEmptyOwnerGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var raw map[string]interface{}
+	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("unmarshal to map: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestFileRecord_OmitEmptyFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var raw map[string]interface{}
+	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("unmarshal to map: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestNode_OmitEmptyVariables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var raw map[string]interface{}
+	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("unmarshal to map: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestState_OmitEmptyNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var raw map[string]interface{}
+	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("unmarshal to map: %v", err)
 	}

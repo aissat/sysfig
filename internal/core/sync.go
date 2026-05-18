@@ -221,7 +221,9 @@ type SyncResult struct {
 func BuildSyncMessage(repoDir string) string { return buildSyncMessage(repoDir) }
 
 func buildSyncMessage(repoDir string) string {
-	cmd := exec.Command("git", "--no-pager", "--git-dir="+repoDir,
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "--no-pager", "--git-dir="+repoDir,
 		"diff", "--cached", "--name-only")
 	out, err := cmd.Output()
 	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
@@ -405,7 +407,9 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 				if trackedPaths[path] {
 					return nil
 				}
-				Track(TrackOptions{ //nolint:errcheck
+				// Auto-track is best-effort: a failure for one file must not
+				// abort the directory walk or fail the entire sync.
+				_, _ = Track(TrackOptions{
 					SystemPath: path,
 					StateDir:   opts.BaseDir,
 					RepoDir:    repoDir,

@@ -179,7 +179,9 @@ func autoTrackNewInTarget(baseDir, target string) {
 			if tracked[path] {
 				return nil
 			}
-			core.Track(core.TrackOptions{ //nolint:errcheck
+			// Auto-track is best-effort: a failure for one file must not
+			// abort the directory walk or prevent the rest of the sync.
+			_, _ = core.Track(core.TrackOptions{
 				SystemPath: path,
 				StateDir:   baseDir,
 				RepoDir:    repoDir,

@@ -567,7 +567,7 @@ func writeMinimalState(t *testing.T, baseDir, id, systemPath, relPath, recordedH
 	type state struct {
 		Version int                      `json:"version"`
 		Files   map[string]*fileRecord   `json:"files"`
-		Backups map[string][]interface{} `json:"backups"`
+		Backups map[string][]any `json:"backups"`
 	}
 
 	s := &state{
@@ -582,7 +582,7 @@ func writeMinimalState(t *testing.T, baseDir, id, systemPath, relPath, recordedH
 				Meta:        &fileMeta{Mode: 0o644},
 			},
 		},
-		Backups: map[string][]interface{}{},
+		Backups: map[string][]any{},
 	}
 
 	data, err := jsonMarshalIndent(s)
@@ -595,7 +595,7 @@ func writeMinimalState(t *testing.T, baseDir, id, systemPath, relPath, recordedH
 }
 
 // jsonMarshalIndent marshals v to indented JSON.
-func jsonMarshalIndent(v interface{}) ([]byte, error) {
+func jsonMarshalIndent(v any) ([]byte, error) {
 	return json.MarshalIndent(v, "", "  ")
 }
 
@@ -700,7 +700,7 @@ func TestSync_FileIDsFilter(t *testing.T) {
 	type stateDoc struct {
 		Version int                     `json:"version"`
 		Files   map[string]*fileRec     `json:"files"`
-		Backups map[string][]interface{} `json:"backups"`
+		Backups map[string][]any `json:"backups"`
 	}
 	s := &stateDoc{
 		Version: 1,
@@ -708,7 +708,7 @@ func TestSync_FileIDsFilter(t *testing.T) {
 			id1: {ID: id1, SystemPath: "/a.conf", RepoPath: "a.conf", Status: "tracked"},
 			id2: {ID: id2, SystemPath: "/b.conf", RepoPath: "b.conf", Status: "tracked"},
 		},
-		Backups: map[string][]interface{}{},
+		Backups: map[string][]any{},
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

@@ -398,10 +398,10 @@ func buildUntrackFixture(t *testing.T, systemPath string) (string, string) {
 	t.Helper()
 	baseDir := t.TempDir()
 	id := core.DeriveID(systemPath)
-	s := map[string]interface{}{
+	s := map[string]any{
 		"version": 1,
-		"files": map[string]interface{}{
-			id: map[string]interface{}{
+		"files": map[string]any{
+			id: map[string]any{
 				"id":           id,
 				"system_path":  systemPath,
 				"repo_path":    "etc/myapp.conf",
@@ -409,7 +409,7 @@ func buildUntrackFixture(t *testing.T, systemPath string) (string, string) {
 				"status":       "tracked",
 			},
 		},
-		"backups": map[string]interface{}{},
+		"backups": map[string]any{},
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	require.NoError(t, err)
@@ -450,10 +450,10 @@ func TestUntrack_NewPathInGroupDir(t *testing.T) {
 	baseDir := t.TempDir()
 	groupDir := "/etc/myapp"
 	id := core.DeriveID(groupDir + "/app.conf")
-	s := map[string]interface{}{
+	s := map[string]any{
 		"version": 1,
-		"files": map[string]interface{}{
-			id: map[string]interface{}{
+		"files": map[string]any{
+			id: map[string]any{
 				"id":          id,
 				"system_path": groupDir + "/app.conf",
 				"repo_path":   "etc/myapp/app.conf",
@@ -462,7 +462,7 @@ func TestUntrack_NewPathInGroupDir(t *testing.T) {
 				"group":       groupDir,
 			},
 		},
-		"backups":  map[string]interface{}{},
+		"backups":  map[string]any{},
 		"excludes": []string{},
 	}
 	data, _ := json.MarshalIndent(s, "", "  ")
@@ -482,16 +482,16 @@ func TestUntrack_AlreadyExcluded(t *testing.T) {
 	groupDir := "/etc/myapp"
 	id := core.DeriveID(groupDir + "/app.conf")
 	newPath := groupDir + "/new-file.conf"
-	s := map[string]interface{}{
+	s := map[string]any{
 		"version": 1,
-		"files": map[string]interface{}{
-			id: map[string]interface{}{
+		"files": map[string]any{
+			id: map[string]any{
 				"id": id, "system_path": groupDir + "/app.conf",
 				"repo_path": "etc/myapp/app.conf", "current_hash": "aabbccdd", "status": "tracked",
 				"group": groupDir,
 			},
 		},
-		"backups":  map[string]interface{}{},
+		"backups":  map[string]any{},
 		"excludes": []string{newPath},
 	}
 	data, _ := json.MarshalIndent(s, "", "  ")
@@ -507,21 +507,21 @@ func TestUntrack_GroupRemovesAll(t *testing.T) {
 	groupDir := "/etc/myapp"
 	id1 := core.DeriveID(groupDir + "/a.conf")
 	id2 := core.DeriveID(groupDir + "/b.conf")
-	s := map[string]interface{}{
+	s := map[string]any{
 		"version": 1,
-		"files": map[string]interface{}{
-			id1: map[string]interface{}{
+		"files": map[string]any{
+			id1: map[string]any{
 				"id": id1, "system_path": groupDir + "/a.conf",
 				"repo_path": "etc/myapp/a.conf", "current_hash": "aabb", "status": "tracked",
 				"group": groupDir,
 			},
-			id2: map[string]interface{}{
+			id2: map[string]any{
 				"id": id2, "system_path": groupDir + "/b.conf",
 				"repo_path": "etc/myapp/b.conf", "current_hash": "ccdd", "status": "tracked",
 				"group": groupDir,
 			},
 		},
-		"backups": map[string]interface{}{},
+		"backups": map[string]any{},
 	}
 	data, _ := json.MarshalIndent(s, "", "  ")
 	_ = os.WriteFile(filepath.Join(baseDir, "state.json"), data, 0o600)
