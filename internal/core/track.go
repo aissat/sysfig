@@ -302,12 +302,8 @@ func Track(opts TrackOptions) (*TrackResult, error) {
 		// Encrypted path: encrypt the plaintext in memory, then store the
 		// ciphertext as a git blob via hash-object + update-index.
 		keysDir := filepath.Join(opts.StateDir, "keys")
-		km := crypto.NewKeyManager(keysDir)
-		master, err := km.Load()
-		if err != nil {
-			return nil, fmt.Errorf("core: encrypt: master key not found — run 'sysfig init --encrypt' first: %w", err)
-		}
-		encrypted, err := crypto.EncryptForFile(data, master, id)
+		vault := crypto.NewFileVault(keysDir)
+		encrypted, err := vault.Encrypt(id, data)
 		if err != nil {
 			return nil, fmt.Errorf("core: encrypt: %w", err)
 		}

@@ -124,20 +124,6 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
 	keysDir := filepath.Join(opts.BaseDir, "keys")
 
-	idSet := make(map[string]bool, len(opts.IDs))
-	for _, id := range opts.IDs {
-		idSet[id] = true
-	}
-	pathSet := make(map[string]bool, len(opts.Paths))
-	for _, p := range opts.Paths {
-		pathSet[p] = true
-	}
-
-	tagSet := make(map[string]bool, len(opts.Tags))
-	for _, t := range opts.Tags {
-		tagSet[t] = true
-	}
-
 	result := &RemoteDeployResult{Host: opts.Host}
 
 	emit := func(fr RemoteFileResult) {
@@ -173,23 +159,7 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 	remoteHome := queryRemoteHome(sshClient, sshUser)
 
 	// ── Deploy each file ─────────────────────────────────────────────────
-	for id, rec := range currentState.Files {
-		if len(idSet) > 0 && !(idSet[id] || hasIDPrefixInSet(id, idSet)) {
-			continue
-		}
-		if len(pathSet) > 0 && !pathSet[rec.SystemPath] {
-			continue
-		}
-
-		if len(tagSet) > 0 {
-			effectiveTags := rec.Tags
-			if len(effectiveTags) == 0 {
-				effectiveTags = DetectPlatformTags()
-			}
-			if !fileHasTag(effectiveTags, tagSet) {
-				continue
-			}
-		}
+	for id, rec := range filterRecords(currentState.Files, opts.IDs, opts.Tags, opts.Paths) {
 
 		fr := RemoteFileResult{
 			ID:         id,
@@ -209,10 +179,7 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 		}
 
 		// Read content from local repo (per-file track branch).
-		trackBranch := rec.Branch
-		if trackBranch == "" {
-			trackBranch = "track/" + SanitizeBranchName(rec.RepoPath)
-		}
+		trackBranch := BranchFor(rec)
 		content, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath)
 		if err != nil {
 			fr.Err = fmt.Errorf("read from repo: %w", err)
@@ -223,8 +190,8 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 
 		// Decrypt if needed.
 		if rec.Encrypt {
-			km := crypto.NewKeyManager(keysDir)
-			identity, err := km.Load()
+			vault := crypto.NewFileVault(keysDir)
+			decrypted, err := vault.Decrypt(id, content)
 			if err != nil {
 				if opts.SkipEncrypted {
 					fr.Skipped = true
@@ -233,13 +200,6 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 					result.Skipped++
 					continue
 				}
-				fr.Err = fmt.Errorf("load master key: %w", err)
-				emit(fr)
-				result.Failed++
-				continue
-			}
-			decrypted, err := crypto.DecryptForFile(content, identity, id)
-			if err != nil {
 				fr.Err = fmt.Errorf("decrypt: %w", err)
 				emit(fr)
 				result.Failed++
@@ -309,12 +269,12 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 
 // RemoteRenderedOptions configures a push of pre-rendered files to a remote host.
 type RemoteRenderedOptions struct {
-	Host    string
-	SSHKey  string
-	SSHPort int
-	Files   []RenderedFile
-	Sudo    bool
-	DryRun  bool
+	Host     string
+	SSHKey   string
+	SSHPort  int
+	Files    []RenderedFile
+	Sudo     bool
+	DryRun   bool
 	Progress func(path string, err error)
 }
 

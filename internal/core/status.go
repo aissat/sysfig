@@ -170,10 +170,7 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 					r.CurrentHash = liveHash
 
 					// Read repo branch to detect PENDING.
-					trackBranch := rec.Branch
-					if trackBranch == "" {
-						trackBranch = "remote/" + SanitizeBranchName(rec.RepoPath)
-					}
+					trackBranch := BranchFor(rec)
 					repoHash := rec.CurrentHash
 					if repoContent, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath); err == nil {
 						repoHash = hash.Bytes(repoContent)
@@ -243,10 +240,7 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 				return nil, fmt.Errorf("core: status: hash system %q: %w", sysPath, err)
 			}
 			r.CurrentHash = sysHash
-			trackBranch := rec.Branch
-			if trackBranch == "" {
-				trackBranch = "track/" + SanitizeBranchName(rec.RepoPath)
-			}
+			trackBranch := BranchFor(rec)
 			repoHash := rec.CurrentHash
 			if repoContent, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath); err == nil {
 				repoHash = hash.Bytes(repoContent)
@@ -281,10 +275,7 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 				// rec.RepoPath is the git-relative path (e.g. "etc/nginx/nginx.conf").
 				// Fall back to rec.CurrentHash if the file is not yet committed.
 				repoHash := rec.CurrentHash
-				trackBranch := rec.Branch
-				if trackBranch == "" {
-					trackBranch = "track/" + SanitizeBranchName(rec.RepoPath)
-				}
+				trackBranch := BranchFor(rec)
 				if repoContent, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath); err == nil {
 					repoHash = hash.Bytes(repoContent)
 				}

@@ -49,49 +49,12 @@ func isGitNotFound(err error) bool {
 	return errors.Is(err, exec.ErrNotFound)
 }
 
-// syncGitBareRun executes a git command against the bare repo, setting
-// GIT_DIR=repoDir plus any additional env vars in extraEnv (e.g.
-// []string{"GIT_WORK_TREE=/"}).  Combined stdout+stderr is captured and
-// included in any error message.
-func syncGitBareRun(repoDir string, timeout time.Duration, extraEnv []string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), append([]string{"GIT_DIR=" + repoDir}, extraEnv...)...)
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %v: %w\n%s", args, err, buf.String())
-	}
-	return nil
-}
-
-// syncGitBareOutput is like syncGitBareRun but returns stdout bytes.
-func syncGitBareOutput(repoDir string, timeout time.Duration, extraEnv []string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), append([]string{"GIT_DIR=" + repoDir}, extraEnv...)...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git %v: %w\n%s", args, err, stderr.String())
-	}
-	return stdout.Bytes(), nil
-}
-
 // syncStagePlain stages the real on-disk file at /<relPath> directly into
 // the bare repo index using GIT_WORK_TREE=/.
 //
 //	GIT_DIR=repoDir GIT_WORK_TREE=/ git add <relPath>
 func syncStagePlain(repoDir, relPath string) error {
-	if err := syncGitBareRun(repoDir, 30*time.Second,
+	if err := gitBareRun(repoDir, 30*time.Second,
 		[]string{"GIT_WORK_TREE=/"},
 		"add", relPath,
 	); err != nil {
@@ -128,7 +91,7 @@ func syncHashBlob(repoDir string, data []byte) (string, error) {
 		return "", fmt.Errorf("core: sync: hash blob: close temp: %w", err)
 	}
 
-	out, err := syncGitBareOutput(repoDir, 15*time.Second, nil, "hash-object", "-w", tmpPath)
+	out, err := gitBareOutput(repoDir, 15*time.Second, nil, "hash-object", "-w", tmpPath)
 	if err != nil {
 		return "", fmt.Errorf("core: sync: hash blob: hash-object: %w", err)
 	}
@@ -150,7 +113,7 @@ func syncStageBlob(repoDir, relPath string, data []byte) error {
 		return fmt.Errorf("core: sync: stage blob %q: %w", relPath, err)
 	}
 	cacheinfo := "100644," + blobHash + "," + relPath
-	if err := syncGitBareRun(repoDir, 15*time.Second, nil,
+	if err := gitBareRun(repoDir, 15*time.Second, nil,
 		"update-index", "--add", "--cacheinfo", cacheinfo,
 	); err != nil {
 		return fmt.Errorf("core: sync: stage blob %q: update-index: %w", relPath, err)
@@ -469,13 +432,8 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 			}
 			remoteContentHash = hash.Bytes(fetched)
 			if rec.Encrypt {
-				keysDir := filepath.Join(opts.BaseDir, "keys")
-				km := crypto.NewKeyManager(keysDir)
-				master, err := km.Load()
-				if err != nil {
-					return nil, fmt.Errorf("core: sync: encrypt remote %q: master key not found: %w", id, err)
-				}
-				encrypted, err := crypto.EncryptForFile(fetched, master, id, nodeRecipients...)
+				vault := crypto.NewFileVault(filepath.Join(opts.BaseDir, "keys"))
+				encrypted, err := vault.Encrypt(id, fetched, nodeRecipients...)
 				if err != nil {
 					return nil, fmt.Errorf("core: sync: encrypt remote %q: %w", id, err)
 				}
@@ -493,13 +451,8 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 				result.ReadErrors[sysPath] = err
 				continue
 			}
-			keysDir := filepath.Join(opts.BaseDir, "keys")
-			km := crypto.NewKeyManager(keysDir)
-			master, err := km.Load()
-			if err != nil {
-				return nil, fmt.Errorf("core: sync: encrypt %q: master key not found: %w", id, err)
-			}
-			encrypted, err := crypto.EncryptForFile(plaintext, master, id, nodeRecipients...)
+			vault := crypto.NewFileVault(filepath.Join(opts.BaseDir, "keys"))
+			encrypted, err := vault.Encrypt(id, plaintext, nodeRecipients...)
 			if err != nil {
 				return nil, fmt.Errorf("core: sync: encrypt %q: %w", id, err)
 			}
@@ -717,7 +670,7 @@ func Sync(opts SyncOptions) (*SyncResult, error) {
 	// Pack loose objects when enough have accumulated.
 	// --auto is a no-op until the loose object count crosses git's threshold
 	// (~6700 by default), so this adds no overhead on normal syncs.
-	_ = syncGitBareRun(repoDir, 60*time.Second, nil, "gc", "--auto", "--quiet")
+	_ = gitBareRun(repoDir, 60*time.Second, nil, "gc", "--auto", "--quiet")
 
 	return result, nil
 }
@@ -762,7 +715,7 @@ func Push(opts PushOptions) error {
 	if hasBranch(repoDir, "manifest") {
 		args = append(args, "refs/heads/manifest:refs/heads/manifest")
 	}
-	if err := syncGitBareRun(repoDir, 60*time.Second, nil, args...); err != nil {
+	if err := gitBareRun(repoDir, 60*time.Second, nil, args...); err != nil {
 		return fmt.Errorf("core: push: %w", err)
 	}
 	return nil

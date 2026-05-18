@@ -12,6 +12,7 @@ import (
 	"time"
 
 	sysfigfs "github.com/aissat/sysfig/internal/fs"
+	"github.com/aissat/sysfig/pkg/types"
 )
 
 // resolveTrackBranch returns a branch name that won't conflict with existing
@@ -454,4 +455,17 @@ func listBranchRefs(repoDir, prefix string) ([]string, error) {
 		}
 	}
 	return refs, nil
+}
+
+// BranchFor returns the git branch name for a tracked file record.
+// Priority: rec.Branch (explicit stored branch) → "remote/<repoPath>" for
+// SSH-fetched files → "track/<repoPath>" for all others.
+func BranchFor(rec *types.FileRecord) string {
+	if rec.Branch != "" {
+		return rec.Branch
+	}
+	if rec.Remote != "" {
+		return "remote/" + SanitizeBranchName(rec.RepoPath)
+	}
+	return "track/" + SanitizeBranchName(rec.RepoPath)
 }

@@ -30,18 +30,18 @@ type ApplyOptions struct {
 
 // ApplyResult summarises a single file's apply outcome.
 type ApplyResult struct {
-	ID           string
-	SystemPath   string // final destination (may have SysRoot prepended)
-	RepoPath     string
-	BackupPath   string // empty if NoBackup or DryRun
-	Skipped      bool   // true if DryRun
-	DirtySkipped     bool   // true when file is DIRTY and Force==false
-	Encrypted        bool
-	TemplateRendered bool         // true when {{variable}} substitution was performed
-	ChownWarning     string       // non-empty if chown failed due to insufficient privilege
-	Hooks               []HookResult // results of post-apply hooks
-	HookFailed          bool         // true if any hook returned an error
-	SourceProfileApplied string      // non-empty when this file is source-managed
+	ID                   string
+	SystemPath           string // final destination (may have SysRoot prepended)
+	RepoPath             string
+	BackupPath           string // empty if NoBackup or DryRun
+	Skipped              bool   // true if DryRun
+	DirtySkipped         bool   // true when file is DIRTY and Force==false
+	Encrypted            bool
+	TemplateRendered     bool         // true when {{variable}} substitution was performed
+	ChownWarning         string       // non-empty if chown failed due to insufficient privilege
+	Hooks                []HookResult // results of post-apply hooks
+	HookFailed           bool         // true if any hook returned an error
+	SourceProfileApplied string       // non-empty when this file is source-managed
 }
 
 // ApplyReport is the aggregate result of an Apply call.
@@ -77,38 +77,9 @@ func Apply(opts ApplyOptions) (*ApplyReport, error) {
 		return nil, fmt.Errorf("core: apply: load state: %w", err)
 	}
 
-	// Build lookup sets for IDs and paths.
-	wantIDs := make(map[string]bool, len(opts.IDs))
-	for _, id := range opts.IDs {
-		wantIDs[id] = true
-	}
-	wantPaths := make(map[string]bool, len(opts.Paths))
-	for _, p := range opts.Paths {
-		wantPaths[p] = true
-	}
-	wantTags := make(map[string]bool, len(opts.Tags))
-	for _, t := range opts.Tags {
-		wantTags[t] = true
-	}
-
 	// Collect the records to apply.
 	var records []*types.FileRecord
-	for id, rec := range currentState.Files {
-		if len(opts.IDs) > 0 && !(wantIDs[id] || hasIDPrefixInSet(id, wantIDs)) {
-			continue
-		}
-		if len(opts.Paths) > 0 && !wantPaths[rec.SystemPath] {
-			continue
-		}
-		if len(wantTags) > 0 {
-			effectiveTags := rec.Tags
-			if len(effectiveTags) == 0 {
-				effectiveTags = DetectPlatformTags()
-			}
-			if !fileHasTag(effectiveTags, wantTags) {
-				continue
-			}
-		}
+	for _, rec := range filterRecords(currentState.Files, opts.IDs, opts.Tags, opts.Paths) {
 		records = append(records, rec)
 	}
 
@@ -241,10 +212,7 @@ func applyOne(opts ApplyOptions, bm *backup.Manager, rec *types.FileRecord) (App
 	// 3. Read the repo file from the bare repo via git-show.
 	//    rec.RepoPath is the git-relative path (e.g. "etc/nginx/nginx.conf").
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
-	trackBranch := rec.Branch
-	if trackBranch == "" {
-		trackBranch = "track/" + SanitizeBranchName(rec.RepoPath)
-	}
+	trackBranch := BranchFor(rec)
 	repoData, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath)
 	if err != nil {
 		return result, fmt.Errorf("core: apply: repo file missing for id %q: %w", rec.ID, err)
@@ -260,12 +228,8 @@ func applyOne(opts ApplyOptions, bm *backup.Manager, rec *types.FileRecord) (App
 	var plaintext []byte
 	if rec.Encrypt {
 		keysDir := filepath.Join(opts.BaseDir, "keys")
-		km := crypto.NewKeyManager(keysDir)
-		master, err := km.Load()
-		if err != nil {
-			return result, fmt.Errorf("core: apply: decrypt %q: %w", rec.ID, err)
-		}
-		decrypted, err := crypto.DecryptForFile(repoData, master, rec.ID)
+		vault := crypto.NewFileVault(keysDir)
+		decrypted, err := vault.Decrypt(rec.ID, repoData)
 		if err != nil {
 			return result, fmt.Errorf("core: apply: decrypt %q: %w", rec.ID, err)
 		}

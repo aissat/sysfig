@@ -92,12 +92,7 @@ func Diff(opts DiffOptions) ([]DiffResult, error) {
 	}
 
 	// trackRef returns the git ref for a file's track branch.
-	trackRef := func(rec *types.FileRecord) string {
-		if rec.Branch != "" {
-			return rec.Branch
-		}
-		return "track/" + SanitizeBranchName(rec.RepoPath)
-	}
+	trackRef := BranchFor
 
 	var results []DiffResult
 
