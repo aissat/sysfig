@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	sysfigfs "github.com/aissat/sysfig/internal/fs"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWriteFileAtomic_Basic(t *testing.T) {
@@ -113,5 +114,46 @@ func TestWriteFileAtomic_ImpossiblePath(t *testing.T) {
 	err := sysfigfs.WriteFileAtomic(targetPath, []byte("data"), 0o644)
 	if err == nil {
 		t.Fatal("expected an error when a path component is a regular file, got nil")
+	}
+}
+
+// ── SEC-011: WriteFileAtomic must not create world-traversable dirs for secrets
+//
+// Before the fix, os.MkdirAll always used 0755, so a parent directory created
+// for a 0600 secret file would be world-readable/executable. After the fix the
+// directory mode mirrors the file's world-read bit.
+
+func TestSEC011_WriteFileAtomic_SecretFile_GetsRestrictedDir(t *testing.T) {
+	base := t.TempDir()
+	// Target sits in a directory that does not yet exist.
+	targetPath := filepath.Join(base, "private", "master.key")
+
+	if err := sysfigfs.WriteFileAtomic(targetPath, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(base, "private"))
+	require.NoError(t, err)
+
+	gotPerm := info.Mode().Perm()
+	if gotPerm&0o077 != 0 {
+		t.Errorf("SEC-011 regression: directory for 0600 file has perm %04o — must be 0700 (no group/other bits)", gotPerm)
+	}
+}
+
+func TestSEC011_WriteFileAtomic_PublicFile_Gets755Dir(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "public", "config.yaml")
+
+	if err := sysfigfs.WriteFileAtomic(targetPath, []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(base, "public"))
+	require.NoError(t, err)
+
+	gotPerm := info.Mode().Perm()
+	if gotPerm != 0o755 {
+		t.Errorf("directory for 0644 file has perm %04o, want 0755", gotPerm)
 	}
 }

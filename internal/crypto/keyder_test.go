@@ -143,3 +143,25 @@ func TestEncodeBech32AgeSecretKey_RoundTrip(t *testing.T) {
 	assert.Equal(t, master.String(), reparsed.String(),
 		"round-tripped identity must match original")
 }
+
+// ── SEC-006: bech32 decoder must not accept non-ASCII input via byte truncation
+//
+// Before the fix, decodeBech32Payload iterated over data with `range data`
+// (rune iteration) and then cast each rune to byte(c), silently truncating
+// multi-byte Unicode code points. A rune whose low byte happened to map to a
+// valid bech32 character would pass validation undetected.
+//
+// Example: ű (U+0171, UTF-8: 0xC5 0xB1). byte(0x0171) = 0x71 = 'q', a valid
+// bech32 character. Old code: accepted. New code (range []byte): 0xC5 and 0xB1
+// are processed as individual bytes, both invalid, error returned.
+
+func TestSEC012_Bech32_NonASCII_Rejected(t *testing.T) {
+	// Craft a bech32-shaped string whose data section contains ű (U+0171).
+	// byte(U+0171) = 0x71 = 'q', a valid bech32 char — the old code accepted it.
+	// We repeat it 8 times to clear the 6-character checksum strip (len > 6).
+	input := "age-secret-key-1" + "űűűűűűűű"
+
+	_, err := decodeBech32Payload(input)
+	require.Error(t, err,
+		"SEC-012 regression: non-ASCII input must be rejected by the bech32 decoder")
+}

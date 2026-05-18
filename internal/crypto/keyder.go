@@ -46,8 +46,8 @@ func decodeBech32Payload(s string) ([]byte, error) {
 
 	// Collect the 5-bit values.
 	vals := make([]byte, len(data))
-	for i, c := range data {
-		v := bech32CharsetRev[byte(c)]
+	for i, c := range []byte(data) {
+		v := bech32CharsetRev[c]
 		if v < 0 {
 			return nil, fmt.Errorf("invalid bech32 character %q", c)
 		}

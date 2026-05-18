@@ -55,24 +55,6 @@ type FileStatusResult struct {
 	Remote string
 }
 
-// Status loads state.json, then for each tracked FileRecord performs a
-// three-way comparison: system file, recorded hash (state.json), repo copy.
-//
-//  1. Encrypted → StatusEncrypted, CurrentHash = "(locked)"
-//  2. System file missing → StatusMissing
-//  3. sysHash == repoHash == recordedHash → StatusSynced
-//  4. sysHash != repoHash AND repoHash != recordedHash
-//     → StatusPending  (repo pulled ahead; `sysfig apply` needed)
-//  5. sysHash != recordedHash (but repo matches recorded)
-//     → StatusDirty    (system changed locally; `sysfig sync` needed)
-//  6. Everything else → StatusDirty (safe fallback)
-//
-// The repo hash is obtained by reading the file content from the bare repo at
-// <baseDir>/repo.git using `git --git-dir=<repoDir> show HEAD:<relPath>` and
-// then hashing the bytes. If the file is not yet committed in the bare repo,
-// rec.CurrentHash is used as the fallback repo hash (same two-way behaviour as
-// before).
-//
 // StatusOptions configures a Status call.
 type StatusOptions struct {
 	BaseDir string
@@ -91,7 +73,17 @@ func Status(baseDir string, ids []string, sysRoot string) ([]FileStatusResult, e
 	return StatusWithOptions(StatusOptions{BaseDir: baseDir, IDs: ids, SysRoot: sysRoot})
 }
 
-// StatusWithOptions is the full-featured variant of Status.
+// StatusWithOptions loads state.json and computes the three-way status for each
+// tracked FileRecord: system file, recorded hash (state.json), repo copy.
+//
+//  1. Encrypted → StatusEncrypted, CurrentHash = "(locked)"
+//  2. System file missing → StatusMissing
+//  3. sysHash == repoHash → StatusSynced
+//  4. repoHash != recorded → StatusPending  (repo ahead; sysfig apply needed)
+//  5. sysHash != recorded → StatusDirty    (system changed; sysfig sync needed)
+//
+// The repo hash is read from each file's track branch in the bare repo;
+// falls back to rec.CurrentHash when the file is not yet committed.
 func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 	baseDir, ids, sysRoot := opts.BaseDir, opts.IDs, opts.SysRoot
 	statePath := filepath.Join(baseDir, "state.json")
@@ -102,10 +94,8 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 		return nil, fmt.Errorf("core: status: load state: %w", err)
 	}
 
-	// Bare repo directory — all git operations use --git-dir=repoDir.
 	repoDir := filepath.Join(baseDir, "repo.git")
 
-	// Build a set of requested IDs for quick lookup (empty set = all).
 	wantIDs := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		wantIDs[id] = true
@@ -128,7 +118,6 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 			continue
 		}
 
-		// Resolve system path, honoring sysRoot sandbox override.
 		sysPath := rec.SystemPath
 		if sysRoot != "" {
 			sysPath = filepath.Join(sysRoot, rec.SystemPath)
@@ -255,7 +244,6 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 			}
 
 		default:
-			// Check whether the system file exists.
 			if _, err := os.Stat(sysPath); os.IsNotExist(err) {
 				r.Status = StatusMissing
 				r.CurrentHash = ""
@@ -264,15 +252,12 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 				r.Status = StatusMissing
 				r.CurrentHash = ""
 			} else {
-				// Three-way comparison: system file, recorded hash, repo copy.
 				sysHash, err := hash.File(sysPath)
 				if err != nil {
 					return nil, fmt.Errorf("core: status: hash system %q: %w", sysPath, err)
 				}
 				r.CurrentHash = sysHash
 
-				// Read the repo copy from the bare repo and hash its bytes.
-				// rec.RepoPath is the git-relative path (e.g. "etc/nginx/nginx.conf").
 				// Fall back to rec.CurrentHash if the file is not yet committed.
 				repoHash := rec.CurrentHash
 				trackBranch := BranchFor(rec)
@@ -282,24 +267,15 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 
 				switch {
 				case sysHash == repoHash:
-					// System and repo agree — fully synced regardless of
-					// what the recorded hash says.
 					r.Status = StatusSynced
-
 				case repoHash != rec.CurrentHash:
-					// Repo moved ahead of what was last applied (e.g. after
-					// `sysfig pull`). System hasn't been updated yet.
+					// Repo pulled ahead (e.g. after sysfig pull) — system not yet updated.
 					r.Status = StatusPending
-
 				default:
-					// System diverged from the last known-good hash while
-					// the repo copy is still at the recorded baseline.
 					r.Status = StatusDirty
 				}
 
-				// Metadata drift check — runs regardless of content status.
-				// If FileMeta was recorded and the live metadata differs,
-				// mark MetaDrift and escalate SYNCED → DIRTY.
+				// Metadata drift: escalate SYNCED → DIRTY when permissions/ownership changed.
 				if rec.Meta != nil {
 					currentMeta, err := sysfigfs.ReadMeta(sysPath)
 					if err == nil {
@@ -308,8 +284,6 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 						if metaDiffers(rec.Meta, currentMeta) {
 							r.MetaDrift = true
 							if r.Status == StatusSynced {
-								// Content is fine but metadata changed —
-								// still report as DIRTY so the user knows.
 								r.Status = StatusDirty
 							}
 						}
@@ -321,8 +295,6 @@ func StatusWithOptions(opts StatusOptions) ([]FileStatusResult, error) {
 		results = append(results, r)
 	}
 
-	// Scan group directories for untracked files.
-	// Build a set of all tracked system paths for fast lookup.
 	trackedPaths := make(map[string]bool, len(s.Files))
 	groupDirs := make(map[string]bool)
 	for _, rec := range s.Files {

@@ -77,7 +77,6 @@ func Apply(opts ApplyOptions) (*ApplyReport, error) {
 		return nil, fmt.Errorf("core: apply: load state: %w", err)
 	}
 
-	// Collect the records to apply.
 	var records []*types.FileRecord
 	for _, rec := range filterRecords(currentState.Files, opts.IDs, opts.Tags, opts.Paths) {
 		records = append(records, rec)
@@ -114,7 +113,6 @@ func Apply(opts ApplyOptions) (*ApplyReport, error) {
 		return report, errors.Join(errs...)
 	}
 
-	// If dry-run we never mutate state, return early.
 	if opts.DryRun {
 		return report, nil
 	}

@@ -2,7 +2,7 @@
 
 > **Audit date:** 2026-03-26
 > **Methodology:** SAST + DAST + working exploits + QA validation (13/13)
-> **Last updated:** 2026-03-27
+> **Last updated:** 2026-05-18
 
 ---
 
@@ -21,6 +21,10 @@
 | [FUN-002](#fun-002--state-file-read-without-lock) | `state.json` read without lock — concurrent corruption | 🟢 LOW | 3.1 | ✅ Fixed |
 | [FUN-003](#fun-003--needssudo-heuristic-wrong-for-non-home-paths) | `needsSudo` heuristic wrong for non-`/home/` users | 🟢 LOW | 2.5 | ✅ Fixed |
 | [DES-001](#des-001--denylist-blocks-hash-only-integrity-monitoring) | Denylist blocked `--hash-only` (design gap, not a vuln) | — | — | ✅ Fixed |
+| [SEC-009](#sec-009--ssh-key-file-world-readable) | SSH key file world-readable — credential leak | 🟢 LOW | 3.3 | ✅ Fixed |
+| [SEC-010](#sec-010--passphrase-protected-ssh-key-opaque-error) | Passphrase-protected SSH key gives opaque error | 🟢 LOW | 2.0 | ✅ Fixed |
+| [SEC-011](#sec-011--mkdirall-creates-0755-dirs-for-secret-files) | `MkdirAll` creates `0755` dirs for `0600` secret files | 🟡 MEDIUM | 5.3 | ✅ Fixed |
+| [SEC-012](#sec-012--bech32-decoder-truncates-multibyte-runes) | bech32 decoder truncates multi-byte runes — bypass possible | 🟢 LOW | 3.7 | ✅ Fixed |
 
 ---
 
@@ -204,21 +208,124 @@ sysfig track --hash-only /etc/sudoers /etc/pam.d/sshd
 
 ---
 
-## Open Findings
-
----
-
 ### SEC-004 — Sensitive Data in `/tmp` via `os.CreateTemp`
 
 | | |
 |---|---|
 | **Location** | `internal/core/track.go`, `sync.go`, `diff.go`, `bundle.go`, `git.go` |
 | **CVSS** | 5.3 (AV:L/AC:L/Au:N/C:M/I:N/A:N) |
-| **Status** | ✅ Fixed |
 
 `os.CreateTemp("", "sysfig-*")` creates files in the system-wide `/tmp` directory. On multi-user systems, `/tmp` is world-readable (sticky-bit prevents deletion, not reading). Temporary files containing decrypted config content or git index blobs may be visible to other local users until they are removed.
 
-**Fix:** Added `internal/fs.SecureTempDir()` which creates and returns `$HOME/.sysfig/tmp` (mode `0700`), falling back to `os.TempDir()` only when `$HOME` is unavailable. All `os.CreateTemp("", ...)` calls in `track.go`, `sync.go`, `diff.go`, `bundle.go`, and `git.go` now use `sysfigfs.SecureTempDir()` as the directory argument. Regression test: `internal/fs.TestSecureTempDir_IsPrivate`.
+**Fix:** Added `internal/fs.SecureTempDir()` which creates and returns `$HOME/.sysfig/tmp` (mode `0700`), falling back to `os.TempDir()` only when `$HOME` is unavailable. All `os.CreateTemp("", ...)` calls in `track.go`, `sync.go`, `diff.go`, `bundle.go`, and `git.go` now use `sysfigfs.SecureTempDir()` as the directory argument.
+
+**Regression test:** `TestSecureTempDir_IsPrivate` ([tempdir_test.go](../internal/fs/tempdir_test.go))
+
+---
+
+### FUN-002 — State File Read Without Lock
+
+| | |
+|---|---|
+| **Location** | `internal/state/state.go` — `Manager.Load` |
+| **CVSS** | 3.1 (AV:L/AC:H/Au:N/C:N/I:M/A:N) |
+
+`Manager.Load()` reads `state.json` without acquiring any lock. `WithLock()` correctly uses `LOCK_EX` for mutations, but a concurrent write (e.g. `sysfig watch` committing while `sysfig status` reads) can observe a partial write on filesystems where `rename(2)` atomicity is not guaranteed (overlayfs, some FUSE mounts).
+
+**Fix:** Split `Load()` into a private `load()` (no lock, used internally by `WithLock`) and a public `Load()` that acquires `LOCK_SH` before reading and releases it after. `WithLock` continues to hold `LOCK_EX` and calls `load()` directly to avoid double-locking on the same fd.
+
+---
+
+### FUN-003 — `needsSudo` Heuristic Wrong for Non-`/home/` Paths
+
+| | |
+|---|---|
+| **Location** | `internal/core/remote_deploy.go` — `needsSudo` |
+| **CVSS** | 2.5 (AV:L/AC:H/Au:N/C:N/I:L/A:N) |
+
+`needsSudo` checked `strings.HasPrefix(dstPath, "/home/<sshUser>/")`. This fails for macOS (`/Users/<user>`), system accounts (`/var/`, `/srv/`), or custom `$HOME` from `/etc/passwd`. On macOS targets, all home-directory files incorrectly triggered `sudo`, causing unnecessary privilege escalation.
+
+**Fix:** Added `queryRemoteHome(client, sshUser)` which runs `echo $HOME` via a one-shot SSH session before the deploy loop. Both `RemoteDeploy` and `RemoteDeployRendered` now call this once and pass `remoteHome` to `needsSudo` instead of the hardcoded prefix. Falls back to `/home/<sshUser>` if the remote command fails.
+
+---
+
+### SEC-009 — SSH Key File World-Readable
+
+| | |
+|---|---|
+| **Location** | `internal/core/remote_deploy.go` — `buildSSHClientConfig` |
+| **CVSS** | 3.3 (AV:L/AC:L/Au:N/C:L/I:N/A:N) |
+
+**Vulnerability:** `buildSSHClientConfig` read the identity file without checking its permissions. A `0644` key file is readable by all local users — the private key could be trivially copied by any process running as a different user on the same host.
+
+**Fix:** Before reading the file, `os.Stat` checks that no group or other bits are set. Any key file with `perm & 0o077 != 0` is rejected with a message naming the problem and the remediation:
+
+```
+ssh key /home/user/.ssh/id_ed25519 has unsafe permissions 0644 — run: chmod 600 /home/user/.ssh/id_ed25519
+```
+
+**Regression tests:** `TestSEC009_SSHKey_WorldReadable_Rejected`, `TestSEC009_SSHKey_RestrictedPermissions_Accepted` ([sec_regression_test.go](../internal/core/sec_regression_test.go))
+
+---
+
+### SEC-010 — Passphrase-Protected SSH Key Gives Opaque Error
+
+| | |
+|---|---|
+| **Location** | `internal/core/remote_deploy.go` — `buildSSHClientConfig` |
+| **CVSS** | 2.0 (AV:L/AC:H/Au:N/C:N/I:N/A:L) |
+
+**Vulnerability:** `gossh.ParsePrivateKey` returns `*gossh.PassphraseMissingError` for encrypted keys, but the error was propagated as-is. Operators saw a raw Go type name instead of actionable guidance, leading to confusion and potentially insecure workarounds.
+
+**Fix:** `errors.As` detects `*gossh.PassphraseMissingError` and wraps it with a clear message directing the user to ssh-agent:
+
+```
+ssh key /home/user/.ssh/id_ed25519 is passphrase-protected — use ssh-agent (SSH_AUTH_SOCK) instead
+```
+
+**Regression test:** `TestSEC010_SSHKey_Passphrase_HelpfulError` ([sec_regression_test.go](../internal/core/sec_regression_test.go))
+
+---
+
+### SEC-011 — `MkdirAll` Creates `0755` Dirs for `0600` Secret Files
+
+| | |
+|---|---|
+| **Location** | `internal/fs/atomic.go` — `WriteFileAtomic` |
+| **CVSS** | 5.3 (AV:L/AC:L/Au:N/C:M/I:N/A:N) |
+
+**Vulnerability:** `WriteFileAtomic` called `os.MkdirAll(dir, 0o755)` unconditionally. When creating a new directory to hold a `0600` secret file (e.g. `~/.sysfig/keys/`), the directory itself was created world-traversable, defeating the file's restricted permissions — any local user could `ls` the directory and stat its contents.
+
+**Fix:** The directory mode is now derived from the file mode: if the file's world-read bit is unset (`perm & 0o004 == 0`), `MkdirAll` uses `0o700`; otherwise `0o755`.
+
+```go
+dirMode := os.FileMode(0o755)
+if perm&0o004 == 0 {
+    dirMode = 0o700
+}
+os.MkdirAll(dir, dirMode)
+```
+
+**Regression tests:** `TestSEC011_WriteFileAtomic_SecretFile_GetsRestrictedDir`, `TestSEC011_WriteFileAtomic_PublicFile_Gets755Dir` ([atomic_test.go](../internal/fs/atomic_test.go))
+
+---
+
+### SEC-012 — bech32 Decoder Truncates Multi-Byte Runes
+
+| | |
+|---|---|
+| **Location** | `internal/crypto/keyder.go` — `decodeBech32Payload` |
+| **CVSS** | 3.7 (AV:N/AC:H/Au:N/C:L/I:L/A:N) |
+
+**Vulnerability:** `decodeBech32Payload` iterated with `for i, c := range data` (rune iteration) and cast each character to `byte(c)`. For a multi-byte Unicode rune such as `ű` (U+0171), `byte(0x0171) = 0x71 = 'q'` — a valid bech32 character. A carefully crafted non-ASCII string could therefore pass character validation and produce a key whose payload silently differed from what was shown to the user.
+
+**Fix:** Changed to `for i, c := range []byte(data)` so the loop processes raw bytes. Non-ASCII bytes (`> 0x7F`) now fail the bech32 alphabet check immediately.
+
+**Regression test:** `TestSEC012_Bech32_NonASCII_Rejected` ([keyder_test.go](../internal/crypto/keyder_test.go))
+
+---
+
+## Open Findings
 
 ---
 
@@ -237,35 +344,6 @@ Current vulnerable references:
 - `actions/setup-go@v5`
 - `softprops/action-gh-release@v2`
 - `kenji-miyake/setup-git-cliff@v2`
-
-
----
-
-### FUN-002 — State File Read Without Lock
-
-| | |
-|---|---|
-| **Location** | `internal/state/state.go` — `Manager.Load` |
-| **CVSS** | 3.1 (AV:L/AC:H/Au:N/C:N/I:M/A:N) |
-| **Status** | ✅ Fixed |
-
-`Manager.Load()` reads `state.json` without acquiring any lock. `WithLock()` correctly uses `LOCK_EX` for mutations, but a concurrent write (e.g. `sysfig watch` committing while `sysfig status` reads) can observe a partial write on filesystems where `rename(2)` atomicity is not guaranteed (overlayfs, some FUSE mounts).
-
-**Fix:** Split `Load()` into a private `load()` (no lock, used internally by `WithLock`) and a public `Load()` that acquires `LOCK_SH` before reading and releases it after. `WithLock` continues to hold `LOCK_EX` and calls `load()` directly to avoid double-locking on the same fd.
-
----
-
-### FUN-003 — `needsSudo` Heuristic Wrong for Non-`/home/` Paths
-
-| | |
-|---|---|
-| **Location** | `internal/core/remote_deploy.go` — `needsSudo` |
-| **CVSS** | 2.5 (AV:L/AC:H/Au:N/C:N/I:L/A:N) |
-| **Status** | ✅ Fixed |
-
-`needsSudo` checked `strings.HasPrefix(dstPath, "/home/<sshUser>/")`. This fails for macOS (`/Users/<user>`), system accounts (`/var/`, `/srv/`), or custom `$HOME` from `/etc/passwd`. On macOS targets, all home-directory files incorrectly triggered `sudo`, causing unnecessary privilege escalation.
-
-**Fix:** Added `queryRemoteHome(client, sshUser)` which runs `echo $HOME` via a one-shot SSH session before the deploy loop. Both `RemoteDeploy` and `RemoteDeployRendered` now call this once and pass `remoteHome` to `needsSudo` instead of the hardcoded prefix. Falls back to `/home/<sshUser>` if the remote command fails.
 
 ---
 

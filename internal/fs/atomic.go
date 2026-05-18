@@ -18,9 +18,13 @@ import (
 func WriteFileAtomic(targetPath string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(targetPath)
 
-	// Ensure the destination directory exists so CreateTemp succeeds even when
-	// the caller supplies a path whose parents have not been created yet.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Mirror the file's world-read bit onto the directory: if the file is
+	// not world-readable, the containing directory should not be either.
+	dirMode := os.FileMode(0o755)
+	if perm&0o004 == 0 {
+		dirMode = 0o700
+	}
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("fs: create directory %q: %w", dir, err)
 	}
 

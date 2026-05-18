@@ -5,6 +5,7 @@ package core
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"net"
 	"os"
 	"path/filepath"
@@ -101,4 +102,70 @@ func TestSEC001_HostKeyCallback_RejectsAttackerKey(t *testing.T) {
 	err = cb("target:22", &net.TCPAddr{}, attackerPub)
 	assert.Error(t, err,
 		"SEC-001 regression: callback must reject a key that differs from the configured host key")
+}
+
+// ── SEC-009: SSH key file must have restrictive permissions ──────────────────
+//
+// Before the fix, buildSSHClientConfig read any key file regardless of its
+// permissions. A world-readable identity file (0644) is a credential leak
+// waiting to happen. After the fix the function rejects any key file whose
+// group or other bits are set.
+
+func writeSSHPrivKeyFile(t *testing.T, dir string, perm os.FileMode) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pemBlock, err := gossh.MarshalPrivateKey(priv, "")
+	require.NoError(t, err)
+	path := filepath.Join(dir, "id_ed25519")
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(pemBlock), perm))
+	return path
+}
+
+func TestSEC009_SSHKey_WorldReadable_Rejected(t *testing.T) {
+	keyPath := writeSSHPrivKeyFile(t, t.TempDir(), 0o644)
+	t.Setenv("SYSFIG_SSH_HOST_KEY", "") // host-key check is not the point
+
+	_, err := buildSSHClientConfig(keyPath)
+	require.Error(t, err, "SEC-009: world-readable SSH key must be rejected")
+	assert.Contains(t, err.Error(), "unsafe permissions",
+		"error must tell the user the key permissions are the problem")
+	assert.Contains(t, err.Error(), "chmod 600",
+		"error must give the operator the remediation command")
+}
+
+func TestSEC009_SSHKey_RestrictedPermissions_Accepted(t *testing.T) {
+	keyPath := writeSSHPrivKeyFile(t, t.TempDir(), 0o600)
+	// No host key configured — failure at host-key step confirms permissions were accepted.
+	t.Setenv("SYSFIG_SSH_HOST_KEY", "")
+
+	_, err := buildSSHClientConfig(keyPath)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "unsafe permissions",
+		"SEC-009: a 0600 key must pass the permissions check")
+}
+
+// ── SEC-010: Passphrase-protected SSH key must give a helpful error ───────────
+//
+// Before the fix, gossh.ParsePrivateKey returned an opaque error for passphrase-
+// protected keys. After the fix the error message names the problem and directs
+// the user to ssh-agent.
+
+func TestSEC010_SSHKey_Passphrase_HelpfulError(t *testing.T) {
+	dir := t.TempDir()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pemBlock, err := gossh.MarshalPrivateKeyWithPassphrase(priv, "", []byte("hunter2"))
+	require.NoError(t, err)
+	keyPath := filepath.Join(dir, "id_passphrase")
+	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(pemBlock), 0o600))
+
+	t.Setenv("SYSFIG_SSH_HOST_KEY", "")
+
+	_, err = buildSSHClientConfig(keyPath)
+	require.Error(t, err, "SEC-010: passphrase-protected key must error")
+	assert.Contains(t, err.Error(), "passphrase",
+		"error must mention that the key is passphrase-protected")
+	assert.Contains(t, err.Error(), "ssh-agent",
+		"error must direct the user to ssh-agent as the solution")
 }

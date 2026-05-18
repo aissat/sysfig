@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -120,7 +121,7 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 		return &RemoteDeployResult{Host: opts.Host}, nil
 	}
 
-	// ── Build target file list ───────────────────────────────────────────
+	// ── Setup ───────────────────────────────────────────────────────────
 	repoDir := filepath.Join(opts.BaseDir, "repo.git")
 	keysDir := filepath.Join(opts.BaseDir, "keys")
 
@@ -178,7 +179,6 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 			continue
 		}
 
-		// Read content from local repo (per-file track branch).
 		trackBranch := BranchFor(rec)
 		content, err := gitShowBytesAt(repoDir, trackBranch, rec.RepoPath)
 		if err != nil {
@@ -188,7 +188,6 @@ func RemoteDeploy(opts RemoteDeployOptions) (*RemoteDeployResult, error) {
 			continue
 		}
 
-		// Decrypt if needed.
 		if rec.Encrypt {
 			vault := crypto.NewFileVault(keysDir)
 			decrypted, err := vault.Decrypt(id, content)
@@ -406,12 +405,23 @@ func buildSSHClientConfig(sshKey string) (*gossh.ClientConfig, error) {
 			home, _ := os.UserHomeDir()
 			expanded = filepath.Join(home, expanded[2:])
 		}
+		info, err := os.Stat(expanded)
+		if err != nil {
+			return nil, fmt.Errorf("read ssh key %s: %w", sshKey, err)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("ssh key %s has unsafe permissions %04o — run: chmod 600 %s", sshKey, info.Mode().Perm(), sshKey)
+		}
 		keyBytes, err := os.ReadFile(expanded)
 		if err != nil {
 			return nil, fmt.Errorf("read ssh key %s: %w", sshKey, err)
 		}
 		signer, err := gossh.ParsePrivateKey(keyBytes)
 		if err != nil {
+			var passphraseErr *gossh.PassphraseMissingError
+			if errors.As(err, &passphraseErr) {
+				return nil, fmt.Errorf("ssh key %s is passphrase-protected — use ssh-agent (SSH_AUTH_SOCK) instead", sshKey)
+			}
 			return nil, fmt.Errorf("parse ssh key %s: %w", sshKey, err)
 		}
 		authMethods = append(authMethods, gossh.PublicKeys(signer))
