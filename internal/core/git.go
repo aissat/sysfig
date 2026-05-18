@@ -458,9 +458,13 @@ func listBranchRefs(repoDir, prefix string) ([]string, error) {
 }
 
 // BranchFor returns the git branch name for a tracked file record.
-// Priority: rec.Branch (explicit stored branch) → "remote/<repoPath>" for
-// SSH-fetched files → "track/<repoPath>" for all others.
+// If `rec` is nil the function returns the empty string. Priority:
+// rec.Branch (explicit stored branch) → "remote/<repoPath>" for SSH-fetched
+// files → "track/<repoPath>" for all others.
 func BranchFor(rec *types.FileRecord) string {
+	if rec == nil {
+		return ""
+	}
 	if rec.Branch != "" {
 		return rec.Branch
 	}

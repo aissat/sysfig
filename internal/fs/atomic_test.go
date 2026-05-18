@@ -157,3 +157,27 @@ func TestSEC011_WriteFileAtomic_PublicFile_Gets755Dir(t *testing.T) {
 		t.Errorf("directory for 0644 file has perm %04o, want 0755", gotPerm)
 	}
 }
+
+func TestSEC011_WriteFileAtomic_ExistingPublicDirGetsRestrictedForSecret(t *testing.T) {
+	base := t.TempDir()
+	// Pre-create the parent directory with public perms to simulate an
+	// existing, world-traversable directory.
+	parentDir := filepath.Join(base, "existing", "private")
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatalf("setup: failed to create parent dir: %v", err)
+	}
+
+	targetPath := filepath.Join(parentDir, "master.key")
+
+	if err := sysfigfs.WriteFileAtomic(targetPath, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+
+	info, err := os.Stat(parentDir)
+	require.NoError(t, err)
+
+	gotPerm := info.Mode().Perm()
+	if gotPerm&0o077 != 0 {
+		t.Errorf("SEC-011 regression: existing directory for 0600 file left permissive %04o — must be 0700", gotPerm)
+	}
+}

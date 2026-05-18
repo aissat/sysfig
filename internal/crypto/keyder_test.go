@@ -144,7 +144,7 @@ func TestEncodeBech32AgeSecretKey_RoundTrip(t *testing.T) {
 		"round-tripped identity must match original")
 }
 
-// ── SEC-006: bech32 decoder must not accept non-ASCII input via byte truncation
+// ── SEC-012: bech32 decoder must not accept non-ASCII input via byte truncation
 //
 // Before the fix, decodeBech32Payload iterated over data with `range data`
 // (rune iteration) and then cast each rune to byte(c), silently truncating

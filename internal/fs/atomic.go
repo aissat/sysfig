@@ -28,6 +28,20 @@ func WriteFileAtomic(targetPath string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("fs: create directory %q: %w", dir, err)
 	}
 
+	// Ensure the directory's permission bits match the derived `dirMode`.
+	// If the directory already existed with different permissions (e.g. more
+	// permissive), tighten or relax them to match the intended mode. This
+	// closes a race where MkdirAll leaves an existing dir at insecure perms.
+	if info, err := os.Stat(dir); err == nil {
+		if info.Mode().Perm() != dirMode {
+			if err := os.Chmod(dir, dirMode); err != nil {
+				return fmt.Errorf("fs: chmod directory %q to %04o: %w", dir, dirMode, err)
+			}
+		}
+	} else {
+		return fmt.Errorf("fs: stat directory %q: %w", dir, err)
+	}
+
 	// Create the temp file in the same directory as the target so that the
 	// subsequent rename is guaranteed to be on the same filesystem mount point
 	// (POSIX rename is atomic only within a single filesystem).
