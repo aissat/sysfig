@@ -28,12 +28,11 @@ func WriteFileAtomic(targetPath string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("fs: create directory %q: %w", dir, err)
 	}
 
-	// Ensure the directory's permission bits match the derived `dirMode`.
-	// If the directory already existed with different permissions (e.g. more
-	// permissive), tighten or relax them to match the intended mode. This
-	// closes a race where MkdirAll leaves an existing dir at insecure perms.
+	// Tighten directory permissions if the existing mode is more permissive
+	// than dirMode (i.e. it has bits set that dirMode does not). Never loosen
+	// permissions that a caller intentionally set stricter than dirMode.
 	if info, err := os.Stat(dir); err == nil {
-		if info.Mode().Perm() != dirMode {
+		if info.Mode().Perm()&^dirMode != 0 {
 			if err := os.Chmod(dir, dirMode); err != nil {
 				return fmt.Errorf("fs: chmod directory %q to %04o: %w", dir, dirMode, err)
 			}
