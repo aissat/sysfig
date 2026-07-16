@@ -10,9 +10,9 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/zeebo/blake3 v0.2.4
-	golang.org/x/crypto v0.49.0
-	golang.org/x/sys v0.42.0
-	golang.org/x/term v0.41.0
+	golang.org/x/crypto v0.52.0
+	golang.org/x/sys v0.45.0
+	golang.org/x/term v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
